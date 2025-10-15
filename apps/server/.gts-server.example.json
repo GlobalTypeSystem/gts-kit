@@ -1,0 +1,8 @@
+{
+  "gts": null,
+  "port": 7080,
+  "homeFolder": "~/.gts-viewer/server",
+  "scanFolder": ".",
+  "verbosity": "normal",
+  "dbFile": "viewer.db"
+}

@@ -1,0 +1,89 @@
+{
+  "$id": "gts.x.core.events.type.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Event Envelope (Common Fields)",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "tenantId",
+    "occurredAt"
+  ],
+  "x-event-type-settings": {
+    "additionalProperties": false,
+    "topicRef": {
+      "description": "ID of the topic where events of this type are stored.",
+      "type": "string",
+      "x-gts-type": "gts.x.core.events.topic.v1~"
+    }
+  },
+  "properties": {
+    "type": {
+      "description": "Identifier of the event type in GTS format.",
+      "type": "string",
+      "x-gts-type": "./$id"
+    },
+    "$schema": {
+      "description": "Link to the event type schema.",
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenantId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The id of the tenant that produced the event. Mandatory"
+    },
+    "userId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The id of the user that produced the event. Optional"
+    },
+    "clientId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The id of the API client that produced the event. Optional"
+    },
+    "source": {
+      "description": "Full SemVer of the event type schema used to produce this event.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The time the event occurred. Fully controlled by the producer"
+    },
+    "ingestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The time the event was ingested into the event store.",
+      "$readonly": true
+    },
+    "sequenceNumber": {
+      "type": "number",
+      "description": "The sequence number of the event in the stream."
+    },
+    "previousSequenceNumber": {
+      "type": "number",
+      "description": "The sequence number of the previous event in the same stream."
+    },
+    "payload": {
+      "description": "Type-specific body; see event type schema.",
+      "type": "object"
+    },
+    "subject": {
+      "description": "The subject of the event.",
+      "type": "string"
+    },
+    "subjectType": {
+      "description": "GTS type of the subject of the event.",
+      "type": "string",
+      "x-gts-type": "*",
+      "$comment": "The value is mandatory if subject is present"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@gts-viewer/shared": ["packages/shared/dist"],
+      "@gts-viewer/shared/*": ["packages/shared/dist/*"],
+      "@gts-viewer/ui": ["packages/ui/dist"],
+      "@gts-viewer/ui/*": ["packages/ui/dist/*"]
+    }
+  }
+}

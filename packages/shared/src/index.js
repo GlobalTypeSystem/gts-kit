@@ -1,0 +1,5 @@
+export * from './types.js'
+export * from './entities.js'
+export { JsonRegistry } from './registry.js'
+export { parseJSONC } from './jsonc.js'
+export { isGtsCandidateFileName } from './registry.js'

@@ -1,0 +1,11 @@
+{
+  "id": "gts.x.core.events.topic.v1~x.commerce._.orders.v1.0",
+  "name": "orders",
+  "description": "Order lifecycle events topic",
+  "retention": "P90D",
+  "ordering": "by-partition-key",
+  "partitions": 16,
+  "partitionKeyPath": "/payload/orderId",
+  "dedup": { "strategy": "by-key", "keyPaths": ["/payload/orderId"] },
+  "storage": { "kind": "db", "config": { "table": "order_events" } }
+}

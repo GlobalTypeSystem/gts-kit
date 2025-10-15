@@ -1,0 +1,35 @@
+# Version control and editor config
+.git/**
+.github/**
+.vscode/**
+
+# Monorepo and other apps (safety; vsce shouldn't traverse parents, but be explicit)
+apps/**
+packages/**
+examples/**
+browser/**
+mcp/**
+scripts/**
+
+# Source and dev-only files
+src/**
+tsconfig*.json
+*.tsbuildinfo
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+*.log
+
+# Node modules (not needed at runtime; extension code is compiled into dist)
+node_modules/**
+
+# Maps and misc build artifacts
+**/*.map
+**/*.map.json
+
+# Keep built payload and resources
+!dist/**
+!resources/**
+!README.md
+!CHANGELOG.md
+!LICENSE*

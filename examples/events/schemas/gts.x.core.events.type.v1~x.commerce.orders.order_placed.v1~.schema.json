@@ -1,0 +1,33 @@
+{
+  "$id": "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Event Instance Schema: order.placed",
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts.x.core.events.type.v1~" },
+    {
+      "type": "object",
+      "required": ["type", "payload", "subjectType"],
+      "properties": {
+        "type": {
+          "const": "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~",
+          "$comment": "The value is required only for IDE-side validation"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["orderId", "customerId", "totalAmount", "items"],
+          "properties": {
+            "orderId": { "type": "string", "format": "uuid" },
+            "customerId": { "type": "string", "format": "uuid" },
+            "totalAmount": { "type": "number" },
+            "items": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "subjectType": {
+          "type": "string",
+          "x-gts-type": "gts.x.commerce.orders.order.v1.0~"
+        }
+      }
+    }
+  ]
+}

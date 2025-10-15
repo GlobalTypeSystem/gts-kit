@@ -1,0 +1,28 @@
+{
+  "name": "gts-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:server": "npm --workspace apps/server run dev",
+    "dev:electron": "npm --workspace apps/electron run dev",
+    "dev:vscode": "npm --workspace apps/vscode-extension run dev",
+    "build": "npm run build:layout-storage && npm run build:shared && npm run build:server && npm run build:web && npm run build:electron && npm run build:vscode",
+    "build:layout-storage": "npm --workspace packages/layout-storage run build",
+    "build:shared": "npm --workspace packages/shared run build",
+    "build:server": "npm --workspace apps/server run build",
+    "build:web": "npm run build:layout-storage && npm --workspace apps/web run build",
+    "build:electron": "npm --workspace apps/electron run build",
+    "build:vscode": "npm --workspace apps/vscode-extension run build",
+    "package:electron": "npm --workspace apps/electron run package",
+    "package:vscode": "npm --workspace apps/vscode-extension run package"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "prism-react-renderer": "^2.4.1"
+  }
+}

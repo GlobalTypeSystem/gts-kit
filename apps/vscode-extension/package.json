@@ -1,0 +1,96 @@
+{
+  "name": "gts-viewer-vscode",
+  "displayName": "GTS Viewer",
+  "description": "View and manage GTS JSON schemas and instances",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "gts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/globaltypesystem/gts-viewer"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:gts.openViewer",
+    "onLanguage:json",
+    "onLanguage:jsonc"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gts.openViewer",
+        "title": "GTS: Open Viewer",
+        "category": "GTS"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gts-viewer",
+          "title": "GTS Viewer",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "gts-viewer": [
+        {
+          "type": "webview",
+          "id": "gts.viewerPanel",
+          "name": "Schema Viewer"
+        }
+      ]
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "gts.openViewer",
+          "group": "navigation@100",
+          "when": "resourceExtname =~ /\\.(json|jsonc)$/"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "gts.openViewer",
+          "group": "navigation@100",
+          "when": "editorLangId == json"
+        }
+      ],
+      "menubar/file": [
+        {
+          "command": "gts.openViewer",
+          "group": "2_open"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "dev": "node build.mjs --watch",
+    "build": "npm run build:web && node build.mjs && npm run package:assets",
+    "build:extension": "node build.mjs",
+    "build:web": "npm --workspace @gts/layout-storage run build && npm --workspace @gts/web run build",
+    "package:assets": "mkdir -p dist/webview && cp -R ../../apps/web/dist/* dist/webview/",
+    "vsix:clean": "rm -rf .vsce-staging gts-viewer-vscode-*.vsix",
+    "vsix:stage": "npm run vsix:clean && mkdir -p .vsce-staging && cp package.json .vsce-staging/ && cp -R dist .vsce-staging/ && [ -d resources ] && cp -R resources .vsce-staging/ || true && [ -f README.md ] && cp README.md .vsce-staging/ || true && (ls LICENSE* 1>/dev/null 2>&1 && cp LICENSE* .vsce-staging/ || true) && [ -f CHANGELOG.md ] && cp CHANGELOG.md .vsce-staging/ || true && node -e \"const fs=require('fs'); const f='.vsce-staging/package.json'; const p=JSON.parse(fs.readFileSync(f,'utf8')); if(p.scripts){ delete p.scripts['vscode:prepublish']; } if(p.dependencies){ delete p.dependencies; } fs.writeFileSync(f, JSON.stringify(p,null,2));\"",
+    "vsix:package": "mkdir -p vsix && cd .vsce-staging && npx @vscode/vsce@latest package && cp gts-viewer-vscode-*.vsix ../vsix/",
+    "package": "npm run vscode:prepublish && npm run vsix:stage && npm run vsix:package",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "esbuild": "^0.19.0",
+    "jsonc-parser": "^3.3.1",
+    "typescript": "^5.2.2"
+  }
+}
