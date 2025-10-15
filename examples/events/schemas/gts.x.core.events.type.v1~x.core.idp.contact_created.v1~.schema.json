@@ -1,0 +1,38 @@
+{
+  "$id": "gts.x.core.events.type.v1~x.core.idp.contact_created.v1.0~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Event Instance Schema: contact.created",
+  "description": "Event instance schema for the user.created event type",
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts.x.core.events.type.v1~" },
+    {
+      "type": "object",
+      "required": ["type", "payload", "subjectType"],
+      "properties": {
+        "type": {
+          "const": "gts.x.core.events.type.v1~x.core.idp.contact_created.v1.0~",
+          "$comment": "The value is required only for IDE-side validation"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["userId", "email", "name", "roles"],
+          "additionalProperties": false,
+          "properties": {
+            "userId": { "type": "string", "format": "uuid" },
+            "email": { "type": "string", "format": "email" },
+            "name": { "type": "string" },
+            "roles": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "subjectType": {
+          "type": "string",
+          "x-gts-type": "gts.x.core.idp.contact.v1.0~"
+        }
+      },
+      "x-event-type-settings": {
+        "topicRef": { "const": "gts.x.core.events.topic.v1~x.core.idp.contacts.v1" }
+      }
+    }
+  ]
+}

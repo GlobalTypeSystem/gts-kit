@@ -1,0 +1,39 @@
+[
+  {
+      "type": "gts.x.core.events.type.v1~x.core.idp.contact_created.v1.0~",
+      "id": "2e5c5d29-9a1c-4b1f-8f65-93d9d9b0e0ab",
+      "sequenceNumber": 1,
+      "previousSequenceNumber": 0,
+      "tenantId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "userId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "occurredAt": "2025-09-20T18:35:00Z",
+      "ingestedAt": "2025-09-20T18:35:01Z",
+      "source": "iam-service",
+      "subject": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "subjectType": "gts.x.core.idp.contact.v1.0~x.core.idp.billing_contact.v1.0~",
+      "payload": {
+          "userId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+          "email": "alice@example.com",
+          "name": "Alice Example",
+          "roles": ["user"]
+      }
+  },{
+      "type": "gts.x.core.events.type.v1~x.core.idp.contact_created.v1.0~",
+      "id": "2e5c5d29-9a1c-4b1f-8f65-bbbbccccdddd",
+      "sequenceNumber": 1,
+      "previousSequenceNumber": 0,
+      "tenantId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "userId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "occurredAt": "2025-09-20T18:35:00Z",
+      "ingestedAt": "2025-09-20T18:35:01Z",
+      "source": "iam-service",
+      "subject": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+      "subjectType": "gts.x.core.idp.contact.v1.0~x.core.idp.billing_contact.v1.0~",
+      "payload": {
+          "userId": "4a9e8e2d-3c08-4df1-98b3-1e5e2d1b7b5a",
+          "email": "alice@example.com",
+          "name": "Alice Example",
+          "roles": ["user"]
+      }
+  }
+]

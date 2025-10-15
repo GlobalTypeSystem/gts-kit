@@ -1,0 +1,74 @@
+{
+  "$id": "gts.x.core.events.topic.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Event Topic (Stream)",
+  "type": "object",
+  "required": ["id", "name", "retention", "ordering"],
+  "properties": {
+    "$schema": {
+      "description": "Link to the topic schema.",
+      "type": "string"
+    },
+    "id": {
+      "description": "Identifier for the topic/stream in GTS notation.",
+      "type": "string",
+      "x-gts-type": "./$id"
+    },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "retention": {
+      "description": "How long events are retained. ISO-8601 duration recommended (e.g., P30D).",
+      "type": "string",
+      "pattern": "^P(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?$"
+    },
+    "ordering": {
+      "description": "Ordering model for the stream.",
+      "type": "string",
+      "enum": ["global", "by-partition-key"]
+    },
+    "partitions": {
+      "description": "Partition count if ordering is by-partition-key.",
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "partitionKeyPath": {
+      "description": "JSON Pointer to the partition key in the event (e.g., /key or /payload/userId).",
+      "type": "string"
+    },
+    "dedup": {
+      "description": "Deduplication settings for the stream.",
+      "type": "object",
+      "required": ["strategy"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["none", "by-key", "by-hash", "time-window"]
+        },
+        "window": {
+          "description": "Only for time-window strategy: ISO-8601 duration.",
+          "type": "string",
+          "pattern": "^P(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?$"
+        },
+        "keyPaths": {
+          "description": "One or more JSON Pointers used to build the dedup key.",
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "storage": {
+      "description": "Backend storage preference for this stream.",
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["db", "nosql", "elk"] },
+        "config": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

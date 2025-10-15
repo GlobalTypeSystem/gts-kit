@@ -1,0 +1,28 @@
+<!-- public/docs/index.html — self-hosted Stoplight Elements page
+     Purpose: embed interactive docs pointing to /openapi.yaml -->
+     <!DOCTYPE html>
+     <html lang="en">
+     <head>
+       <meta charset="utf-8" />
+       <title>API Docs</title>
+       <meta name="viewport" content="width=device-width, initial-scale=1" />
+       <!-- Elements styles -->
+       <link rel="stylesheet" href="https://unpkg.com/@stoplight/elements/styles.min.css" />
+       <style>
+         html, body, elements-api { height: 100%; margin: 0; }
+       </style>
+     </head>
+     <body>
+       <!-- Elements web component -->
+       <elements-api
+         apiDescriptionUrl="/openapi.yaml"
+         router="hash"
+         layout="sidebar"
+         hide-export="false"
+         tryItCredentialsPolicy="omit"
+       ></elements-api>
+
+       <!-- Elements web component loader -->
+       <script type="module" src="https://unpkg.com/@stoplight/elements/web-components.min.js"></script>
+     </body>
+     </html>

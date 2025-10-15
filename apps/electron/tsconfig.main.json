@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "src",
+    // Allow sources to be imported from multiple roots (electron main and packages)
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true,
+    "noEmit": false,
+    "resolveJsonModule": true,
+    "lib": ["ES2020"],
+    "baseUrl": ".",
+    "paths": {
+      "@gts/layout-storage": ["../../packages/layout-storage/dist"],
+      "@gts/layout-storage/*": ["../../packages/layout-storage/dist/*"],
+      "@gts-viewer/shared": ["../../packages/shared/dist"],
+      "@gts-viewer/shared/*": ["../../packages/shared/dist/*"]
+    }
+  },
+  "include": [
+    "src/main/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "src/renderer"]
+}

@@ -1,0 +1,315 @@
+openapi: 3.1.0
+info:
+  title: GTS Viewer Layout API
+  version: 0.2.0
+servers:
+  - url: http://localhost:7080
+paths:
+  /health:
+    get:
+      summary: Health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  db: { type: string }
+                  backendVersion: { type: string }
+  /settings:
+    get:
+      summary: Get global settings
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalSettings'
+    put:
+      summary: Update global settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlobalSettings'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalSettings'
+  /layouts:
+    get:
+      summary: Get latest layout or specific version
+      parameters:
+        - in: query
+          name: workspaceName
+          schema: { type: string }
+        - in: query
+          name: layoutId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: targetId
+          schema: { type: string }
+        - in: query
+          name: filename
+          schema: { type: string }
+        - in: query
+          name: schemaId
+          schema: { type: string }
+        - in: query
+          name: version
+          schema: { type: string }
+      responses:
+        '200':
+          description: Snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LayoutSnapshot'
+        '404':
+          description: Not found
+    post:
+      summary: Save a new layout version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LayoutSaveRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LayoutSnapshot'
+  /layouts/versions:
+    get:
+      summary: List versions for target
+      parameters:
+        - in: query
+          name: workspaceName
+          schema: { type: string }
+        - in: query
+          name: layoutId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: targetId
+          schema: { type: string }
+        - in: query
+          name: filename
+          schema: { type: string }
+        - in: query
+          name: schemaId
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/LayoutVersion' }
+                  page: { type: integer }
+                  limit: { type: integer }
+                  total: { type: integer }
+  /layouts/{layoutId}/versions/{version}:
+    parameters:
+      - in: path
+        name: layoutId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: version
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get specific version
+      responses:
+        '200':
+          description: Snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LayoutSnapshot'
+        '404':
+          description: Not found
+    post:
+      summary: Restore version (clone as latest)
+      responses:
+        '201':
+          description: Restored snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LayoutSnapshot'
+components:
+  schemas:
+    GlobalSettings:
+      type: object
+      properties:
+        db:
+          type: object
+          properties:
+            dialect:
+              type: string
+              enum: [sqlite, postgres, mariadb]
+            sqlite:
+              type: object
+              properties:
+                filename: { type: string }
+            postgres:
+              type: object
+              properties:
+                host: { type: string }
+                port: { type: integer }
+                user: { type: string }
+                password: { type: string }
+                database: { type: string }
+            mariadb:
+              type: object
+              properties:
+                host: { type: string }
+                port: { type: integer }
+                user: { type: string }
+                password: { type: string }
+                database: { type: string }
+        features:
+          type: object
+          properties:
+            enableVersioning: { type: boolean }
+            enableImportExport: { type: boolean }
+            allowAnonymous: { type: boolean }
+    Point:
+      type: object
+      properties:
+        x: { type: number }
+        y: { type: number }
+    Size:
+      type: object
+      properties:
+        width: { type: number }
+        height: { type: number }
+    HandlePosition:
+      type: object
+      properties:
+        side: { type: string, enum: [Left, Right, Top, Bottom] }
+        pct: { type: number, minimum: 0, maximum: 100 }
+    Handles:
+      type: object
+      properties:
+        source: { $ref: '#/components/schemas/HandlePosition' }
+        target: { $ref: '#/components/schemas/HandlePosition' }
+    ExpansionState:
+      type: object
+      properties:
+        expanded: { type: boolean }
+        sections:
+          type: object
+          additionalProperties: { type: boolean }
+    CanvasState:
+      type: object
+      required: [scale, pan]
+      properties:
+        scale: { type: number }
+        pan: { $ref: '#/components/schemas/Point' }
+        viewportSize: { $ref: '#/components/schemas/Size' }
+    CardId:
+      type: string
+      description: hash("filename|schemaId")
+    CardIdParts:
+      type: object
+      properties:
+        filename: { type: string }
+        schemaId: { type: string }
+    LayoutNode:
+      type: object
+      required: [id, filename, schemaId, type, position, expansion]
+      properties:
+        id: { $ref: '#/components/schemas/CardId' }
+        filename: { type: string }
+        schemaId: { type: string }
+        type: { type: string, enum: [json, schema, virtual] }
+        position: { $ref: '#/components/schemas/Point' }
+        size: { $ref: '#/components/schemas/Size' }
+        expansion: { $ref: '#/components/schemas/ExpansionState' }
+        extra:
+          type: object
+          additionalProperties: true
+    LayoutEdge:
+      type: object
+      required: [id, source, target, relation, sourceKey]
+      properties:
+        id: { type: string, description: "source|target|relation|sourceKey" }
+        source: { $ref: '#/components/schemas/CardId' }
+        target: { $ref: '#/components/schemas/CardId' }
+        relation: { type: string, enum: [implements, ref, gts, other] }
+        sourceKey: { type: string }
+        handles: { $ref: '#/components/schemas/Handles' }
+    LayoutTarget:
+      type: object
+      required: [id]
+      properties:
+        id: { $ref: '#/components/schemas/CardId' }
+        workspaceName: { type: string, nullable: true }
+        filename: { type: string }
+        schemaId: { type: string }
+    LayoutSaveRequest:
+      type: object
+      required: [target, canvas, nodes, edges]
+      properties:
+        target: { $ref: '#/components/schemas/LayoutTarget' }
+        canvas: { $ref: '#/components/schemas/CanvasState' }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/LayoutNode' }
+        edges:
+          type: array
+          items: { $ref: '#/components/schemas/LayoutEdge' }
+        meta:
+          type: object
+          additionalProperties: true
+    LayoutSnapshot:
+      type: object
+      properties:
+        layoutId: { type: string, format: uuid }
+        version: { type: string }
+        createdAt: { type: string, format: date-time }
+        target: { $ref: '#/components/schemas/LayoutTarget' }
+        canvas: { $ref: '#/components/schemas/CanvasState' }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/LayoutNode' }
+        edges:
+          type: array
+          items: { $ref: '#/components/schemas/LayoutEdge' }
+        meta:
+          type: object
+          additionalProperties: true
+    LayoutVersion:
+      type: object
+      properties:
+        layoutId: { type: string, format: uuid }
+        version: { type: string }
+        createdAt: { type: string, format: date-time }
+        author: { type: string, nullable: true }
+        label: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }

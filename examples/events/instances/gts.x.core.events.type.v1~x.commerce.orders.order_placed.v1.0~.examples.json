@@ -1,0 +1,48 @@
+[
+  {
+    "type": "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~",
+    "id": "7a1d2f34-5678-49ab-9012-abcdef123456",
+    "tenantId": "11111111-2222-3333-4444-555555555555",
+    "userId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "clientId": "12345678-90ab-cdef-1234-567890abcdef",
+    "source": "orders-service@1.2.3",
+    "occurredAt": "2025-09-20T18:35:00Z",
+    "ingestedAt": "2025-09-20T18:35:01Z",
+    "sequenceNumber": 1,
+    "previousSequenceNumber": 0,
+    "subject": "af0e3c1b-8f1e-4a27-9a9b-b7b9b70c1f01",
+    "subjectType": "gts.x.commerce.orders.order.v1.0~",
+    "payload": {
+      "orderId": "af0e3c1b-8f1e-4a27-9a9b-b7b9b70c1f01",
+      "customerId": "0f2e4a9b-1c3d-4e5f-8a9b-0c1d2e3f4a5b",
+      "totalAmount": 149.99,
+      "items": [
+        { "sku": "SKU-ABC-001", "name": "Wireless Mouse", "qty": 1, "price": 49.99 },
+        { "sku": "SKU-XYZ-002", "name": "Mechanical Keyboard", "qty": 1, "price": 100.00 }
+      ]
+    }
+  },
+  {
+    "type": "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~",
+    "id": "7a1d2f34-5678-49ab-9012-abcdef123457",
+    "tenantId": "11111111-2222-3333-4444-666666666666",
+    "userId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "clientId": "12345678-90ab-cdef-1234-567890abcdef",
+    "source": "orders-service@1.2.3",
+    "occurredAt": "2025-09-20T18:35:00Z",
+    "ingestedAt": "2025-09-20T18:35:01Z",
+    "sequenceNumber": 1,
+    "previousSequenceNumber": 0,
+    "subject": "af0e3c1b-8f1e-4a27-9a9b-b7b9b70c1f01",
+    "subjectType": "gts.x.commerce.orders.order.v1.0~",
+    "payload": {
+      "orderId": "af0e3c1b-8f1e-4a27-9a9b-b7b9b70c1f01",
+      "customerId": "0f2e4a9b-1c3d-4e5f-8a9b-0c1d2e3f4a5b",
+      "totalAmount": 149.99,
+      "items": [
+        { "sku": "SKU-ABC-001", "name": "Wireless Mouse", "qty": 1, "price": 49.99 },
+        { "sku": "SKU-XYZ-002", "name": "Mechanical Keyboard", "qty": 1, "price": 100.00 }
+      ]
+    }
+  }
+]

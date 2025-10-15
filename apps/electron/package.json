@@ -1,0 +1,72 @@
+{
+  "name": "@gts-viewer/electron",
+  "version": "0.1.0",
+  "description": "GTS Viewer Electron Application",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "dev:renderer": "vite",
+    "dev:main": "npm run build:main && electron dist/main/main.js",
+    "build": "npm run build:main && npm run build:renderer",
+    "build:renderer": "npm --workspace @gts/web run build && mkdir -p dist/renderer && cp -R ../web/dist/* dist/renderer/",
+    "build:main": "tsc -p tsconfig.main.json",
+    "start": "electron dist/main/main.js",
+    "package": "electron-builder",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@gts/layout-storage": "file:../../packages/layout-storage",
+    "@gts-viewer/shared": "file:../../packages/shared",
+    "@dagrejs/dagre": "^1.1.5",
+    "@radix-ui/react-collapsible": "^1.0.3",
+    "@radix-ui/react-scroll-area": "^1.0.5",
+    "@radix-ui/react-separator": "^1.0.3",
+    "@radix-ui/react-slot": "^1.0.2",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "dagre": "^0.8.5",
+    "lucide-react": "^0.544.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "reactflow": "^11.10.1",
+    "tailwind-merge": "^2.0.0",
+    "prism-react-renderer": "^2.3.1"
+  },
+  "devDependencies": {
+    "@types/dagre": "^0.7.52",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^7.6.0",
+    "electron": "^25.0.0",
+    "electron-builder": "^24.0.0",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.3.6",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.8"
+  },
+  "build": {
+    "appId": "com.gts-viewer.app",
+    "productName": "GTS Viewer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

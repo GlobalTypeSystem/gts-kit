@@ -1,0 +1,25 @@
+{
+  "gts": {
+    "entity_id_fields": ["$id","gtsId", "gtsIid", "gtsOid", "gtsI", "gts_id", "gts_oid", "gts_iid", "id"],
+    "schema_id_fields": ["$schema", "gtsTid", "gtsT", "gts_t", "gts_tid", "type", "schema"]
+  },
+  "schema": {
+    "node": {
+      "width": 400,
+      "height": 300,
+      "label_width": 200,
+      "nodesep": 250,
+      "ranksep": 170
+    }
+  },
+  "sidebar": {
+    "min_width": 100,
+    "max_width": 400,
+    "default_width": 360
+  },
+  "server": {
+    "hostname": "",
+    "port": 7080
+  },
+  "workspace": "default"
+}
