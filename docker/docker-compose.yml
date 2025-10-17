@@ -1,0 +1,38 @@
+services:
+  gts-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    container_name: gts-server
+    ports:
+      - "${SERVER_PORT:-7806}:7806"
+    volumes:
+      - ${DATA_DIR:-${HOME}/.gts-viewer/server}:/data
+    environment:
+      - GTS_SERVER_PORT=7806
+      - GTS_SERVER_HOME_FOLDER=/data
+      - GTS_SERVER_VERBOSITY=${GTS_SERVER_VERBOSITY:-normal}
+    restart: unless-stopped
+    networks:
+      - gts-network
+
+  gts-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    container_name: gts-web
+    ports:
+      - "${WEB_PORT:-7805}:80"
+    environment:
+      # The web app runs in the browser, so it needs to connect to localhost:7806
+      # not the internal Docker network hostname
+      - GTS_SERVER_API_BASE=${GTS_SERVER_API_BASE:-http://localhost:7806}
+    depends_on:
+      - gts-server
+    restart: unless-stopped
+    networks:
+      - gts-network
+
+networks:
+  gts-network:
+    driver: bridge

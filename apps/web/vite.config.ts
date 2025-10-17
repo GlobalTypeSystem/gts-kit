@@ -72,10 +72,10 @@ export default defineConfig({
   },
   publicDir: false,
   server: {
-    port: 5173,
+    port: 7805,
     strictPort: true,
     fs: {
-      allow: ['..', '../..']
+      allow: ['..', '..']
     }
   }
 })

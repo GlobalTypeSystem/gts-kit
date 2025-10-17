@@ -19,7 +19,8 @@
     "build:electron": "npm --workspace apps/electron run build",
     "build:vscode": "npm --workspace apps/vscode-extension run build",
     "package:electron": "npm --workspace apps/electron run package",
-    "package:vscode": "npm --workspace apps/vscode-extension run package"
+    "package:vscode": "npm --workspace apps/vscode-extension run package",
+    "clean": "rm -rf node_modules package-lock.json apps/*/node_modules apps/*/package-lock.json packages/*/node_modules packages/*/package-lock.json"
   },
   "dependencies": {
     "ajv": "^8.17.1",

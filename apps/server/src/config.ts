@@ -27,7 +27,7 @@ export interface ConfigFileSchema {
 
 const DEFAULT_CONFIG: ServerConfig = {
   gts: DEFAULT_GTS_CONFIG,
-  port: 7080,
+  port: 7806,
   homeFolder: resolve(homedir(), '.gts-viewer', 'server'),
   scanFolder: cwd(),
   verbosity: 'normal',
@@ -202,7 +202,7 @@ GTS Server - Configuration Options
 Usage: gts-server [options]
 
 Options:
-  --port, -p <number>           Port to listen on (default: 7080)
+  --port, -p <number>           Port to listen on (default: 7806)
   --home, --home-folder <path>  Home folder for server data (default: ~/.gts-viewer/server/)
   --scan, --scan-folder <path>  Folder to scan for GTS entities (default: current directory)
   --verbosity, -v <level>       Verbosity level: silent, normal, debug (default: normal)
@@ -221,7 +221,7 @@ Config File:
 
   Config file format (JSON):
   {
-    "port": 7080,
+    "port": 7806,
     "homeFolder": "~/.gts-viewer/server",
     "scanFolder": ".",
     "verbosity": "normal",

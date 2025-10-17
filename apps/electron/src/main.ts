@@ -23,7 +23,7 @@ async function createWindow() {
 
   try {
     serverInstance = await startServer({
-      port: 7080,
+      port: 7806,
       dbFile: dbPath,
       allowAnonymous: true
     })

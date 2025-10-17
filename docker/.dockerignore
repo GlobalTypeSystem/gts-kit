@@ -1,0 +1,67 @@
+# Dependencies
+node_modules
+**/node_modules
+npm-debug.log*
+
+# Build outputs
+dist
+**/dist
+build
+**/build
+
+# Development
+.git
+.gitignore
+*.log
+.DS_Store
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Testing
+coverage
+.nyc_output
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Documentation
+docs
+*.md
+!README.md
+
+# Build tools (not needed in container)
+Makefile
+
+# Examples (not needed in container)
+examples
+
+# Electron and VS Code extension (not needed for web/server)
+apps/electron
+apps/vscode-extension
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Local config
+.gts-viewer
+.gts-server.json
+gts-server.json
+
+# Browser scripts
+browser
+
+# MCP
+mcp
+
+# Other
+TODO
+CONTRIBUTING.md
+setup.sh

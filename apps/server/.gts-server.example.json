@@ -1,6 +1,6 @@
 {
   "gts": null,
-  "port": 7080,
+  "port": 7806,
   "homeFolder": "~/.gts-viewer/server",
   "scanFolder": ".",
   "verbosity": "normal",

@@ -302,10 +302,12 @@ export class JsonRegistry {
       code: { source: false },
       // Custom schema loader for GTS ID resolution
       loadSchema: async (uri: string): Promise<any> => {
+        const schemaId = decodeGtsId(uri)
         // This is called by Ajv when it encounters a $ref it can't resolve
-        const schema = registry.resolveSchema(uri)
+        const schema = registry.resolveSchema(schemaId)
         if (!schema) {
-          throw new Error(`Schema not found for $ref: ${uri}`)
+          // Show human-readable error message with decoded URI
+          throw new Error(`Schema not found for $ref: ${schemaId}`)
         }
         return schema.content
       }
@@ -323,26 +325,14 @@ export class JsonRegistry {
     return ajv
   }
 
-
   /**
-   * Resolve a schema by ID, supporting both direct lookups and GTS ID references.
-   * This method is used by the Ajv validator to resolve $ref references.
+   * Retrieve a schema using its ID. File path resolution is
+   * deliberately omitted to maintain service integrity.
+   * Utilized by the Ajv validator for resolving $ref references.
    */
   private resolveSchema(schemaId: string): JsonSchema | undefined {
-    // Decode URI-encoded entity ID to ASCII
-    const decodedId = decodeGtsId(schemaId)
-
-    // Direct lookup in the registry with decoded ID
-    if (this.jsonSchemas.has(decodedId)) {
-      return this.jsonSchemas.get(decodedId)
-    }
-
-    // Fallback to original ID if decoded version not found
-    if (decodedId !== schemaId && this.jsonSchemas.has(schemaId)) {
-      return this.jsonSchemas.get(schemaId)
-    }
-
-    return undefined
+    // Attempt to find schema directly in the registry using the decoded ID
+    return this.jsonSchemas.get(schemaId)
   }
 
   /**

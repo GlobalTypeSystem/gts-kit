@@ -205,6 +205,7 @@ export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
   const [nodesAreReady, setNodesAreReady] = useState(false)
   const [toast, setToast] = useState<{ message: string | React.ReactNode; type: ToastType; duration: number } | null>(null)
+  const [isMaximized, setIsMaximized] = useState(false)
   const initialEdgesAppliedRef = useRef(false)
   const overlayContainerRef = useRef<HTMLDivElement | null>(null)
   const prevSelectedIdRef = useRef<string | null>(null)
@@ -221,6 +222,7 @@ export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>
   const handleMaximizeNode = useCallback((isMaximized: boolean) => {
     debug.diagram('handleMaximizeNode', isMaximized)
     diagramRegistry.setMaximized(isMaximized)
+    setIsMaximized(isMaximized)
   }, [])
 
   const handleMaximizeNodeRawJson = useCallback((isRawView: boolean) => {
@@ -708,20 +710,20 @@ export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>
         attributionPosition="bottom-left"
         panOnScroll={false}
         selectionOnDrag={false}
-        panOnDrag={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
-        zoomOnScroll={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
-        zoomOnPinch={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
+        panOnDrag={!isMaximized}
+        zoomOnScroll={!isMaximized}
+        zoomOnPinch={!isMaximized}
         zoomOnDoubleClick={false}
         preventScrolling={false}
-        nodesDraggable={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
+        nodesDraggable={!isMaximized}
         nodesConnectable={false}
         connectOnClick={false}
-        elementsSelectable={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
+        elementsSelectable={!isMaximized}
         onPaneContextMenu={(e) => e.preventDefault()}
       >
         <Controls
-          showZoom={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
-          showFitView={!diagramRegistry.getViewState().hasAnyMaximizedEntity}
+          showZoom={!isMaximized}
+          showFitView={!isMaximized}
           showInteractive={false}
           position="top-left"
         />

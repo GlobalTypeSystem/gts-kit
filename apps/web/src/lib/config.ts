@@ -55,7 +55,7 @@ const DEFAULTS: ConfigShape = {
   },
   server: {
     hostname: '',
-    port: 7080,
+    port: 7806,
   },
   workspace: 'default'
 }
