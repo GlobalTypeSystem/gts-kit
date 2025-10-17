@@ -31,6 +31,9 @@ docker-rebuild: ## Rebuild and restart Docker services
 	docker-compose -f docker/docker-compose.yml build --no-cache
 	docker-compose -f docker/docker-compose.yml up -d
 
+docker-status: ## Show Docker service status
+	docker-compose -f docker/docker-compose.yml ps
+
 # Development commands
 dev-web: ## Start web app in development mode
 	npm run dev:web
@@ -43,23 +46,15 @@ dev-electron: ## Start Electron app in development mode
 
 # Build commands
 build: ## Build all packages
+	npm install
 	npm run build
 
-build-web: ## Build web app
-	npm run build:web
-
-build-server: ## Build server
-	npm run build:server
+build-vscode: build ## Build vscode plugin
+	npm run package:vscode
 
 # Utility commands
 clean: ## Clean node_modules and build artifacts
 	npm run clean
-
-install: ## Install dependencies
-	npm install
-
-status: ## Show Docker service status
-	docker-compose -f docker/docker-compose.yml ps
 
 health: ## Check server health
 	@curl -s http://localhost:7806/health || echo "Server not responding"

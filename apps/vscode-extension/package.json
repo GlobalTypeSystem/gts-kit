@@ -19,10 +19,18 @@
   "activationEvents": [
     "onCommand:gts.openViewer",
     "onLanguage:json",
-    "onLanguage:jsonc"
+    "onLanguage:jsonc",
+    "onLanguage:gts"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "gts",
+        "aliases": ["GTS", "gts"],
+        "extensions": [".gts"]
+      }
+    ],
     "commands": [
       {
         "command": "gts.openViewer",
@@ -53,7 +61,7 @@
         {
           "command": "gts.openViewer",
           "group": "navigation@100",
-          "when": "resourceExtname =~ /\\.(json|jsonc)$/"
+          "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
       "editor/title": [
@@ -61,6 +69,16 @@
           "command": "gts.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == json"
+        },
+        {
+          "command": "gts.openViewer",
+          "group": "navigation@100",
+          "when": "editorLangId == jsonc"
+        },
+        {
+          "command": "gts.openViewer",
+          "group": "navigation@100",
+          "when": "editorLangId == gts"
         }
       ],
       "menubar/file": [
