@@ -512,7 +512,7 @@ export function SharedApp({
         className="fixed bottom-0 left-0 right-0 h-[25px] bg-card border-t px-4 text-xs text-muted-foreground flex items-center z-50"
         aria-hidden="false"
       >
-        <span>Tip: Use Shift + Arrow Up/Down to switch selection anywhere</span>
+        <span>Tip: Use Shift + Arrow Up/Down to navigate</span>
       </div>
     </div>
   )
