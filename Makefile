@@ -49,6 +49,9 @@ build: ## Build all packages
 	npm install
 	npm run build
 
+build-vscode: ## Build vscode plugin
+	npm run package:vscode
+
 # Utility commands
 clean: ## Clean node_modules and build artifacts
 	npm run clean
