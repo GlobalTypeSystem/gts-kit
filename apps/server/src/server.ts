@@ -405,7 +405,7 @@ export function createApp(dbFile: string, defaultWorkspace: string = 'default'):
 export async function startServer(config: ServerConfig | ServerOptions = {}): Promise<ServerInstance> {
   // Support both old ServerOptions and new ServerConfig
   const isServerConfig = 'scanFolder' in config
-  const port = isServerConfig ? config.port : (config.port || parseInt(process.env.GTS_SERVER_PORT || '7080', 10))
+  const port = isServerConfig ? config.port : (config.port || parseInt(process.env.GTS_SERVER_PORT || '7806', 10))
   const dbFile = isServerConfig ? config.dbFile! : (config.dbFile || process.env.GTS_SERVER_DB_FILE || 'viewer.db')
   const verbosity = isServerConfig ? config.verbosity : 'normal'
   const scanFolder = isServerConfig ? config.scanFolder : process.cwd()

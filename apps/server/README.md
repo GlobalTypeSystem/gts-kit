@@ -54,7 +54,7 @@ Create a `.gts-server.json` file in one of these locations:
 Example config file:
 ```json
 {
-  "port": 7080,
+  "port": 7806,
   "homeFolder": "~/.gts-viewer/server",
   "scanFolder": ".",
   "verbosity": "normal",
@@ -68,7 +68,7 @@ Example config file:
 gts-server [options]
 
 Options:
-  --port, -p <number>           Port to listen on (default: 7080)
+  --port, -p <number>           Port to listen on (default: 7806)
   --home, --home-folder <path>  Home folder for server data (default: ~/.gts-viewer/server/)
   --scan, --scan-folder <path>  Folder to scan for GTS entities (default: current directory)
   --verbosity, -v <level>       Verbosity level: silent, normal, debug (default: normal)

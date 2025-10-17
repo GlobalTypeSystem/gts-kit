@@ -58,7 +58,7 @@ function getApiBaseUrl(): string {
   // Use config
   const config = AppConfig.get()
   const hostname = config.server.hostname || 'localhost'
-  const port = config.server.port || 7080
+  const port = config.server.port || 7806
   return `http://${hostname}:${port}`
 }
 

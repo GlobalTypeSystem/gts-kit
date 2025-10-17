@@ -1,0 +1,58 @@
+# Build stage
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY apps/server/package*.json ./apps/server/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/layout-storage/package*.json ./packages/layout-storage/
+
+# Install dependencies
+RUN npm install
+
+# Copy source code and tsconfig files
+COPY apps/server ./apps/server
+COPY packages/shared ./packages/shared
+COPY packages/layout-storage ./packages/layout-storage
+COPY tsconfig.json ./
+COPY packages/shared/tsconfig.json ./packages/shared/
+COPY packages/layout-storage/tsconfig.json ./packages/layout-storage/
+
+# Build shared packages first (with type definitions)
+RUN npm run build:layout-storage
+RUN npm run build:shared
+
+# Then build server
+RUN npm run build:server
+
+# Production stage
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY apps/server/package*.json ./apps/server/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/layout-storage/package*.json ./packages/layout-storage/
+
+# Install production dependencies only
+RUN npm install --omit=dev
+
+# Copy built artifacts
+COPY --from=builder /app/apps/server/dist ./apps/server/dist
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/layout-storage/dist ./packages/layout-storage/dist
+
+# Create data directory
+RUN mkdir -p /data
+
+# Set environment variables
+ENV GTS_SERVER_PORT=7806
+ENV GTS_SERVER_HOME_FOLDER=/data
+
+EXPOSE 7806
+
+CMD ["node", "apps/server/dist/index-cli.js"]

@@ -32,6 +32,8 @@ npm run build
 
 #### 1. Web App (Browser)
 
+##### Development Mode
+
 ```bash
 # Terminal 1: Start the server
 npm run dev:server
@@ -40,9 +42,31 @@ npm run dev:server
 npm run dev:web
 ```
 
-Open http://localhost:5173
+Open http://localhost:7805
 
-The server will be started on port `7080` and store GTS entities diagram layout in SQLite database in `{HOME}/.gts-viewer/server/viewer.db` directory. See the server configuration [README.md](apps/server/README.md) to override the default DB path, port or verbosity level.
+The server will be started on port `7806` and store GTS entities diagram layout in SQLite database in `{HOME}/.gts-viewer/server/viewer.db` directory. See the server configuration [README.md](apps/server/README.md) to override the default DB path, port or verbosity level.
+
+##### Docker Compose (Production)
+
+```bash
+# Build and start both server and web app
+docker-compose -f docker/docker-compose.yml up -d
+
+# View logs
+docker-compose -f docker/docker-compose.yml logs -f
+
+# Stop services
+docker-compose -f docker/docker-compose.yml down
+
+# Or use Make commands
+make docker-up
+make docker-logs
+make docker-down
+```
+
+The web app will be available at http://localhost:7805 and the server API at http://localhost:7806.
+
+The server data (including SQLite database) is stored in `${HOME}/.gts-viewer/server/` on the host machine.
 
 #### 2. Electron App (Desktop)
 
@@ -126,24 +150,114 @@ npm run build:electron
 npm run build:vscode
 ```
 
+## Docker Deployment
+
+For detailed Docker documentation, see [docker/README.md](docker/README.md).
+
+### Quick Start with Docker Compose
+
+```bash
+# Optional: Copy and customize environment variables
+cp docker/.env.example docker/.env
+# Edit docker/.env to change ports, verbosity, etc.
+# By default web service will be running on localhost:8080
+
+# Build and start services
+docker-compose -f docker/docker-compose.yml up -d
+
+# Or use Make commands (if available)
+make docker-build
+make docker-up
+
+# Check status
+docker-compose -f docker/docker-compose.yml ps
+# or: make status
+
+# View logs
+docker-compose -f docker/docker-compose.yml logs -f
+# or: make docker-logs
+
+# Stop services
+docker-compose -f docker/docker-compose.yml down
+# or: make docker-down
+```
+
+**Tip**: Run `make help` to see all available commands.
+
+### Services
+
+- **gts-server**: Backend API server (port 7806)
+- **gts-web**: Frontend web application (port 7805)
+
+### Data Persistence
+
+The server stores data in `${HOME}/.gts-viewer/server/` which is mounted as a volume. This includes:
+- `viewer.db` - SQLite database with layout snapshots
+- `viewer.db-shm` and `viewer.db-wal` - SQLite write-ahead log files
+
+### Building Individual Images
+
+```bash
+# Build server image
+docker build -f docker/Dockerfile.server -t gts-server:latest .
+
+# Build web image
+docker build -f docker/Dockerfile.web -t gts-web:latest .
+```
+
+### Custom Configuration
+
+You can customize the Docker Compose setup by editing `docker-compose.yml`:
+
+```yaml
+# Change ports
+ports:
+  - "9090:80"  # Web app on port 9090
+  - "8080:7080"  # Server on port 8080
+
+# Change data directory
+volumes:
+  - /custom/path:/data
+
+# Change environment variables
+environment:
+  - GTS_SERVER_VERBOSITY=debug
+```
+
+### Rebuilding After Changes
+
+```bash
+# Rebuild and restart services
+docker-compose -f docker/docker-compose.yml up -d --build
+
+# Rebuild specific service
+docker-compose -f docker/docker-compose.yml build gts-server
+docker-compose -f docker/docker-compose.yml up -d gts-server
+
+# Or use Make
+make docker-rebuild
+```
+
 ## Configuration
 
 ### Environment Variables
 
 #### Server (`apps/server`)
 - `GTS_SERVER_DB_FILE`: SQLite database path (default: `viewer.db`)
-- `GTS_SERVER_PORT`: Server port (default: `7080`)
+- `GTS_SERVER_PORT`: Server port (default: `7806`)
+- `GTS_SERVER_HOME_FOLDER`: Home folder for server data (default: `~/.gts-viewer/server`)
+- `GTS_SERVER_VERBOSITY`: Verbosity level: `silent`, `normal`, `debug` (default: `normal`)
 
 See more in [apps/server/README.md](apps/server/README.md)
 
 #### Web (`apps/web`)
-- `GTS_SERVER_API_BASE`: API base URL (default: `http://localhost:7080`)
+- `GTS_SERVER_API_BASE`: API base URL (default: `http://localhost:7806`)
 
 ## Server API Documentation
 
 When the server is running, visit:
-- OpenAPI spec: http://localhost:7080/openapi.yaml
-- API docs: http://localhost:7080/docs
+- OpenAPI spec: http://localhost:7806/openapi.yaml
+- API docs: http://localhost:7806/docs
 
 ### Key Endpoints
 
@@ -155,10 +269,14 @@ When the server is running, visit:
 
 ## Troubleshooting
 
-### Server Port Already in Use
+### Docker Issues
+
+See [docker/README.md](docker/README.md) for comprehensive Docker troubleshooting.
+
+### Server Port Already in Use (Development)
 ```bash
-# Find and kill process on port 7080
-lsof -ti:7080 | xargs kill -9
+# Find and kill process on port 7806
+lsof -ti:7806 | xargs kill -9
 ```
 
 ### Electron Build Fails
