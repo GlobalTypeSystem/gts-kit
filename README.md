@@ -77,6 +77,13 @@ npm run package:vscode
 
 The VS Code plugin will store the GTS diagrams layout metadata in the `{REPOSITORY_ROOT}/.gts-viewer/` folder
 
+#### 4. Cleanup
+
+```bash
+# Remove all generated files, including node_modules and package-lock.json
+npm run clean
+```
+
 ## Project Structure
 
 ```
