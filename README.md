@@ -143,6 +143,9 @@ gts/
 # Build everything
 npm run build
 
+# Or use Make (runs install + build)
+make build
+
 # Build individual targets
 npm run build:web
 npm run build:server
@@ -171,7 +174,7 @@ make docker-up
 
 # Check status
 docker-compose -f docker/docker-compose.yml ps
-# or: make status
+# or: make docker-status
 
 # View logs
 docker-compose -f docker/docker-compose.yml logs -f
