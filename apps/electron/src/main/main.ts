@@ -1,12 +1,20 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs/promises'
-import { parseJSONC } from '@gts/shared'
 import { HomeFolderLayoutStorage } from './storage'
 import type { LayoutSaveRequest, LayoutTarget } from '@gts/layout-storage'
 
 let mainWindow: BrowserWindow
 let layoutStorage: HomeFolderLayoutStorage
+
+// Lazy-load ESM module from CJS using dynamic import
+let parseJSONCFn: ((s: string) => any) | null = null
+async function ensureSharedLoaded() {
+  if (!parseJSONCFn) {
+    const mod: any = await import('@gts-viewer/shared')
+    parseJSONCFn = mod.parseJSONC
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -71,6 +79,7 @@ ipcMain.handle('select-directory', async () => {
 ipcMain.handle('read-directory', async (_, directoryPath: string) => {
   try {
     const files: Array<{ path: string; name: string; content: any; isSchema: boolean }> = []
+    await ensureSharedLoaded()
 
     async function readDirectory(dirPath: string) {
       const entries = await fs.readdir(dirPath, { withFileTypes: true })
@@ -83,7 +92,7 @@ ipcMain.handle('read-directory', async (_, directoryPath: string) => {
         } else if (entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.jsonc') || entry.name.endsWith('.gts'))) {
           try {
             const content = await fs.readFile(fullPath, 'utf-8')
-            const jsonContent = parseJSONC(content)
+            const jsonContent = parseJSONCFn!(content)
             const relativePath = path.relative(directoryPath, fullPath)
             const isSchema = entry.name.includes('schema') ||
                            jsonContent.$schema ||
