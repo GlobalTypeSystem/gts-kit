@@ -49,7 +49,7 @@ build: ## Build all packages
 	npm install
 	npm run build
 
-build-vscode: ## Build vscode plugin
+build-vscode: build ## Build vscode plugin
 	npm run package:vscode
 
 # Utility commands
