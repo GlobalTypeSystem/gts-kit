@@ -1,0 +1,68 @@
+### Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+### TypeScript
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+### Build outputs
+dist/
+build/
+out/
+.cache/
+.parcel-cache/
+
+### Vite
+.vite/
+node_modules/.vite/
+
+### Testing & Coverage
+coverage/
+.nyc_output/
+
+### Lint/format caches
+.eslintcache
+.stylelintcache
+
+### Environment files (all packages)
+**/.env
+**/.env.*
+!.env.example
+
+### Logs
+logs/
+*.log
+*.log.*
+
+### OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+### Package manager stores
+.pnpm-store/
+
+### Monorepo tools
+.turbo/
+
+### Deployment platforms
+.vercel/
+.netlify/
+
+### VS Code extension packaging
+**/.vsce-staging/
+
+### Electron (common outputs)
+release/
+dist-electron/
+
+### Misc
+*.local
