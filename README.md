@@ -310,20 +310,21 @@ Version 0.1.0:
 - [x] Validation aware of GTS IDs; invalid file detection and reporting
 - [x] Visual diagram editor (drag, expand/collapse, raw view)
 - [x] Persistent layout storage (repo `.gts-viewer/` + server snapshots)
-- [x] VS Code: auto-rescan on save/change, initial selection
-- [x] VS Code: validation status sync, per-file layout refresh
+- [x] VS Code viewer: auto-rescan on save/change, initial selection
+- [x] VS Code viewer: validation status sync, per-file layout refresh
 - [x] Refresh resilience: restore selected entity and viewport after reload
 - [x] Secure webview (CSP + nonce) and asset routing in extension
 
 Backlog:
-- [ ] VS Code: jump to entity file / peek references
-- [ ] VS Code: inline diagnostics and quick fixes (code actions)
+- [x] VS Code editor: inline diagnostics and quick fixes (code actions)
+- [ ] VS Code editor: jump to entity file / peek references
 - [ ] Diagram: multi-select, align/distribute, grouping and subgraphs
 - [ ] Diagram: export PNG/SVG; import/export layout snapshots
 - [ ] Performance: worker-based parsing, incremental graph build, virtualized lists
 - [ ] Collaboration: layout versioning/history and remote sync
 - [ ] Plugin API for custom relationships/edge styles
 - [ ] UX: accessibility (ARIA/keyboard), theming, i18n
+- [ ] Entity editor mode
 
 ## License
 
