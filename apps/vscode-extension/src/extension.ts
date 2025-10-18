@@ -3,7 +3,7 @@ import * as path from 'path'
 import { parseJSONC, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation } from './validation'
+import { initValidation, notifyInitialScanComplete } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
 
@@ -99,6 +99,12 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInit
 export async function activate(context: vscode.ExtensionContext) {
   console.log('[GTS] Extension activating...')
 
+  // Perform initial workspace scan for validation (background, non-blocking)
+  console.log('[GTS] Starting initial workspace scan for validation...')
+  performInitialScan().catch(error => {
+    console.error('[GTS] Initial scan failed:', error)
+  })
+
   initValidation(context)
 
   // Register commands
@@ -110,6 +116,53 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Show welcome message
   vscode.window.showInformationMessage('GTS Viewer is ready! Use "GTS: Open Viewer" to start.')
+}
+
+/**
+ * Perform initial workspace scan to populate the registry for validation
+ * This runs in the background and doesn't block extension activation
+ */
+async function performInitialScan() {
+  try {
+    const include = '**/*.{json,jsonc,gts}'
+    const exclude = '**/{node_modules,.gts-viewer,dist,.git}/**'
+    const uris = await vscode.workspace.findFiles(include, exclude, 10000)
+
+    console.log(`[GTS] Found ${uris.length} JSON/JSONC/GTS files in workspace`)
+
+    const files: Array<{ path: string; name: string; content: any }> = []
+
+    for (const uri of uris) {
+      try {
+        const data = await vscode.workspace.fs.readFile(uri)
+        const text = Buffer.from(data).toString('utf8')
+        try {
+          const content = parseJSONC(text)
+          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
+        } catch (e) {
+          // If JSONC parsing fails, store as text for later validation
+          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content: text })
+        }
+      } catch (e) {
+        // Skip files that can't be read
+        console.warn(`[GTS] Could not read file: ${uri.fsPath}`, e)
+      }
+    }
+
+    console.log(`[GTS] Successfully loaded ${files.length} files for validation registry`)
+    setLastScanFiles(files)
+
+    // Also ingest into a registry to verify schemas are loading
+    const registry = new JsonRegistry()
+    await registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
+    console.log(`[GTS] Registry initialized: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects`)
+
+    // Notify validation system that initial scan is complete
+    notifyInitialScanComplete()
+  } catch (error) {
+    console.error('[GTS] Initial scan error:', error)
+    throw error
+  }
 }
 
 export async function deactivate() {
