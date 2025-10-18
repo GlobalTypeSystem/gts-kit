@@ -282,13 +282,6 @@ See [docker/README.md](docker/README.md) for comprehensive Docker troubleshootin
 lsof -ti:7806 | xargs kill -9
 ```
 
-### Electron Build Fails
-```bash
-# Rebuild native modules for Electron
-cd apps/electron
-npm rebuild better-sqlite3 --runtime=electron --target=28.0.0
-```
-
 ### VS Code Extension Not Loading
 1. Check Output panel → "Extension Host"
 2. Ensure `npm run build:vscode` completed successfully

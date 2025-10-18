@@ -6,7 +6,6 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "predev": "npm rebuild better-sqlite3",
     "dev": "tsx watch src/index-cli.ts",
     "start": "node dist/index-cli.js",
     "build": "tsc -b tsconfig.json",
@@ -14,7 +13,7 @@
   },
   "dependencies": {
     "@gts/shared": "*",
-    "better-sqlite3": "9.4.3",
+    "sql.js": "^1.12.0",
     "express": "4.19.2",
     "cors": "2.8.5",
     "zod": "3.23.8"
@@ -25,7 +24,6 @@
     "@types/express": "4.17.21",
     "@types/cors": "2.8.17",
     "@types/node": "20.11.30",
-    "@types/better-sqlite3": "7.6.9",
     "tsx": "4.7.0"
   }
 }
