@@ -1,12 +1,79 @@
-import Database from 'better-sqlite3'
-import { mkdirSync } from 'node:fs'
+import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-export interface DB {
-  sql: Database.Database
+class DatabaseWrapper {
+  private db: SqlJsDatabase
+  private filename: string
+  private statements: Map<string, any> = new Map()
+
+  constructor(db: SqlJsDatabase, filename: string) {
+    this.db = db
+    this.filename = filename
+  }
+
+  exec(sql: string): void {
+    this.db.exec(sql)
+    this.save()
+  }
+
+  prepare(sql: string) {
+    // Return a statement-like object
+    return {
+      run: (...params: any[]) => {
+        this.db.run(sql, params)
+        this.save()
+        return { changes: this.db.getRowsModified() }
+      },
+      get: (...params: any[]) => {
+        const stmt = this.db.prepare(sql)
+        stmt.bind(params)
+        if (stmt.step()) {
+          const row = stmt.getAsObject()
+          stmt.free()
+          return row
+        }
+        stmt.free()
+        return undefined
+      },
+      all: (...params: any[]) => {
+        const stmt = this.db.prepare(sql)
+        stmt.bind(params)
+        const results: any[] = []
+        while (stmt.step()) {
+          results.push(stmt.getAsObject())
+        }
+        stmt.free()
+        return results
+      }
+    }
+  }
+
+  private save(): void {
+    const data = this.db.export()
+    writeFileSync(this.filename, data)
+  }
+
+  close(): void {
+    this.save()
+    this.db.close()
+  }
 }
 
-export function openSqlite(filename: string, defaultWorkspace: string = 'default') {
+export interface DB {
+  sql: DatabaseWrapper
+}
+
+let SQL: any = null
+
+async function initSql() {
+  if (!SQL) {
+    SQL = await initSqlJs()
+  }
+  return SQL
+}
+
+export async function openSqlite(filename: string, defaultWorkspace: string = 'default'): Promise<DB> {
   // Ensure the directory exists before opening the database
   const dir = dirname(filename)
   try {
@@ -15,8 +82,20 @@ export function openSqlite(filename: string, defaultWorkspace: string = 'default
     // Directory might already exist, ignore
   }
 
-  const sql = new Database(filename)
-  sql.pragma('journal_mode = WAL')
+  const SQL = await initSql()
+
+  // Load existing database or create new one
+  let db: SqlJsDatabase
+  if (existsSync(filename)) {
+    const buffer = readFileSync(filename)
+    db = new SQL.Database(buffer)
+  } else {
+    db = new SQL.Database()
+  }
+
+  const sql = new DatabaseWrapper(db, filename)
+
+  // Note: sql.js doesn't support WAL mode (it's in-memory with periodic saves)
 
   // Tables
   sql.exec(`

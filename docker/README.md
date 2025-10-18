@@ -36,12 +36,12 @@ make docker-up
 
 The Docker setup consists of two services:
 
-1. **gts-server** - Backend API server
+1. **gts-backend** - Backend API server
    - Built from `docker/Dockerfile.server`
    - Runs on port 7806 (configurable)
    - Stores data in `${HOME}/.gts-viewer/server/` (mounted volume)
 
-2. **gts-web** - Frontend web application
+2. **gts-frontend** - Frontend web application
    - Built from `docker/Dockerfile.web`
    - Runs on port 7805 (configurable)
    - Served by nginx
@@ -162,29 +162,29 @@ docker-compose -f docker/docker-compose.yml up -d --build
 docker-compose -f docker/docker-compose.yml ps
 
 # Resource usage
-docker stats gts-server gts-web
+docker stats gts-backend gts-frontend
 ```
 
 ## Building Individual Images
 
 ```bash
 # Build server image
-docker build -f docker/Dockerfile.server -t gts-server:latest .
+docker build -f docker/Dockerfile.server -t gts-backend:latest .
 
 # Build web image
-docker build -f docker/Dockerfile.web -t gts-web:latest .
+docker build -f docker/Dockerfile.web -t gts-frontend:latest .
 
 # Run manually
 docker run -d \
   -p 7806:7806 \
   -v ${HOME}/.gts-viewer/server:/data \
   -e GTS_SERVER_VERBOSITY=normal \
-  gts-server:latest
+  gts-backend:latest
 
 docker run -d \
   -p 7805:80 \
   -e GTS_SERVER_API_BASE=http://localhost:7806 \
-  gts-web:latest
+  gts-frontend:latest
 ```
 
 ## Data Management
@@ -196,7 +196,7 @@ docker run -d \
 cp -r ~/.gts-viewer/server ~/.gts-viewer/server.backup
 
 # Or use docker cp
-docker cp gts-server:/data ./backup
+docker cp gts-backend:/data ./backup
 ```
 
 ### Restore
@@ -230,7 +230,7 @@ docker-compose -f docker/docker-compose.yml up -d
 docker-compose -f docker/docker-compose.yml ps
 
 # Check server logs
-docker-compose -f docker/docker-compose.yml logs gts-server
+docker-compose -f docker/docker-compose.yml logs gts-backend
 
 # Test server health
 curl http://localhost:7806/health
@@ -256,7 +256,7 @@ mkdir -p ~/.gts-viewer/server
 chmod 755 ~/.gts-viewer/server
 
 # Check container user
-docker-compose -f docker/docker-compose.yml exec gts-server id
+docker-compose -f docker/docker-compose.yml exec gts-backend id
 ```
 
 ### Web App Cannot Connect to Server
@@ -284,13 +284,13 @@ docker system prune -a
 
 ```bash
 # Check logs for errors
-docker-compose -f docker/docker-compose.yml logs gts-server
+docker-compose -f docker/docker-compose.yml logs gts-backend
 
 # Run without restart policy
-docker-compose -f docker/docker-compose.yml up gts-server
+docker-compose -f docker/docker-compose.yml up gts-backend
 
 # Check resource limits
-docker stats gts-server
+docker stats gts-backend
 ```
 
 ## Production Considerations
@@ -307,7 +307,7 @@ docker stats gts-server
 1. **Resource limits**: Add to `docker/docker-compose.yml`:
    ```yaml
    services:
-     gts-server:
+     gts-backend:
        deploy:
          resources:
            limits:
@@ -320,7 +320,7 @@ docker stats gts-server
    volumes:
      gts-data:
    services:
-     gts-server:
+     gts-backend:
        volumes:
          - gts-data:/data
    ```
@@ -329,7 +329,7 @@ docker stats gts-server
 
 ```bash
 # Resource usage
-docker stats gts-server gts-web
+docker stats gts-backend gts-frontend
 
 # Health checks
 curl http://localhost:7806/health

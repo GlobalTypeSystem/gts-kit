@@ -1,9 +1,10 @@
+name: GTS-viewer
 services:
-  gts-server:
+  gts-backend:
     build:
       context: ..
       dockerfile: docker/Dockerfile.server
-    container_name: gts-server
+    container_name: gts-backend
     ports:
       - "${SERVER_PORT:-7806}:7806"
     volumes:
@@ -16,11 +17,11 @@ services:
     networks:
       - gts-network
 
-  gts-web:
+  gts-frontend:
     build:
       context: ..
       dockerfile: docker/Dockerfile.web
-    container_name: gts-web
+    container_name: gts-frontend
     ports:
       - "${WEB_PORT:-7805}:80"
     environment:
@@ -28,7 +29,7 @@ services:
       # not the internal Docker network hostname
       - GTS_SERVER_API_BASE=${GTS_SERVER_API_BASE:-http://localhost:7806}
     depends_on:
-      - gts-server
+      - gts-backend
     restart: unless-stopped
     networks:
       - gts-network

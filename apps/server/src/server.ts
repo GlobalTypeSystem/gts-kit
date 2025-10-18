@@ -104,7 +104,7 @@ export async function loadGtsEntities(scanFolder: string, cfg: GtsConfig, verbos
   return registry
 }
 
-export function createApp(dbFile: string, defaultWorkspace: string = 'default'): Express {
+export async function createApp(dbFile: string, defaultWorkspace: string = 'default'): Promise<Express> {
   const app = express()
   app.use(cors())
   app.use(express.json({ limit: '2mb' }))
@@ -169,7 +169,7 @@ export function createApp(dbFile: string, defaultWorkspace: string = 'default'):
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
   // Open database
-  const { sql } = openSqlite(dbFile, defaultWorkspace)
+  const { sql } = await openSqlite(dbFile, defaultWorkspace)
 
   // Helpers
   function nowIso() { return new Date().toISOString() }
@@ -417,7 +417,7 @@ export async function startServer(config: ServerConfig | ServerOptions = {}): Pr
     await loadGtsEntities(scanFolder, gtsConfig, verbosity)
   }
 
-  const app = createApp(dbFile, defaultWorkspace)
+  const app = await createApp(dbFile, defaultWorkspace)
 
   return new Promise((resolve, reject) => {
     let server: Server | null = null
