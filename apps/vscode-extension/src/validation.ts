@@ -16,20 +16,25 @@ function validationErrorsToDiagnostics(errors: ValidationError[], document: vsco
   const diagnostics: vscode.Diagnostic[] = []
 
   for (const error of errors) {
+    console.log(`[GTS Validation] Processing error:`, {
+      keyword: error.keyword,
+      instancePath: error.instancePath,
+      message: error.message,
+      params: error.params
+    })
+
     // Try to find the error location in the document
     let range: vscode.Range
 
-    // If we have an instancePath, try to locate it in the document
-    if (error.instancePath) {
-      const position = findErrorPosition(document, error.instancePath, error)
-      if (position) {
-        range = position
-      } else {
-        // Fallback to start of document
-        range = new vscode.Range(0, 0, 0, 1)
-      }
+    // Try to find position using instancePath (even if empty) or error-specific logic
+    const position = findErrorPosition(document, error.instancePath || '', error)
+    console.log(`[GTS Validation] Position found for path '${error.instancePath}':`, position ? `line ${position.start.line}` : 'null')
+
+    if (position) {
+      range = position
     } else {
-      // General error at start of document
+      // Fallback to start of document
+      console.log(`[GTS Validation] Using fallback position (start of document)`)
       range = new vscode.Range(0, 0, 0, 1)
     }
 
@@ -55,6 +60,28 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
 
   // Remove leading slash from instancePath (e.g., '/users/0/email' -> 'users/0/email')
   const path = instancePath.replace(/^\//, '')
+
+  // For schema errors, find the object that references the missing schema
+  if (error.keyword === 'schema') {
+    console.log(`[GTS Validation] Schema error detected, path='${path}'`)
+
+    // If instancePath is empty, search by schemaId in params
+    if (!path && error.params && 'schemaId' in error.params) {
+      const schemaId = (error.params as any).schemaId as string
+      console.log(`[GTS Validation] Searching for type field with value: ${schemaId}`)
+      const position = findTypeFieldByValue(text, document, schemaId)
+      console.log(`[GTS Validation] findTypeFieldByValue returned:`, position)
+      if (position) {
+        return position
+      }
+    } else if (path) {
+      const position = findObjectAtPath(text, document, path)
+      console.log(`[GTS Validation] findObjectAtPath returned:`, position)
+      if (position) {
+        return position
+      }
+    }
+  }
 
   // For additionalProperties errors, look for the actual property mentioned in params
   if (error.keyword === 'additionalProperties' && error.params && 'additionalProperty' in error.params) {
@@ -82,18 +109,9 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
       }
     } else {
       // Find the object that should contain this property
-      const segments = path.split('/')
-      const lastSegment = segments[segments.length - 1]
-
-      if (lastSegment && !/^\d+$/.test(lastSegment)) {
-        // Find the parent property
-        const searchPattern = new RegExp(`["']${escapeRegex(lastSegment)}["']\\s*:\\s*\\{`, 'g')
-        const match = searchPattern.exec(text)
-        if (match) {
-          const pos = document.positionAt(match.index + 1)
-          const endPos = document.positionAt(match.index + 1 + lastSegment.length)
-          return new vscode.Range(pos, endPos)
-        }
+      const position = findObjectAtPath(text, document, path)
+      if (position) {
+        return position
       }
     }
   }
@@ -116,6 +134,151 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   }
 
   // Fallback: return null to use default position
+  return null
+}
+
+/**
+ * Find a "type" field with a specific value in the JSON
+ * Returns a range highlighting the "type" field name
+ */
+function findTypeFieldByValue(text: string, document: vscode.TextDocument, typeValue: string): vscode.Range | null {
+  console.log(`[GTS Validation] Searching for "type" field with value: ${typeValue}`)
+
+  // Escape the typeValue for use in regex
+  const escapedValue = escapeRegex(typeValue)
+
+  // Search for: "type": "typeValue"
+  const searchPattern = new RegExp(`"type"\\s*:\\s*"${escapedValue}"`, 'g')
+  const match = searchPattern.exec(text)
+
+  if (match) {
+    // Highlight the "type" property name (not the value)
+    const typeKeyStart = match.index + 1 // +1 to skip opening quote
+    const typeKeyEnd = match.index + 5 // "type" is 4 characters, +1 for the quote
+
+    const startPos = document.positionAt(typeKeyStart)
+    const endPos = document.positionAt(typeKeyEnd)
+
+    console.log(`[GTS Validation] Found "type" field at line ${startPos.line}, col ${startPos.character}`)
+    return new vscode.Range(startPos, endPos)
+  }
+
+  console.log(`[GTS Validation] Did not find "type" field with value: ${typeValue}`)
+  return null
+}
+
+/**
+ * Find an object in the JSON at the given path (handles array indices)
+ * Returns a range highlighting the object's "id" or "type" field, or opening brace
+ */
+function findObjectAtPath(text: string, document: vscode.TextDocument, path: string): vscode.Range | null {
+  if (!path) {
+    // Root level - find first opening brace
+    const rootMatch = text.match(/\{/)
+    if (rootMatch && rootMatch.index !== undefined) {
+      const pos = document.positionAt(rootMatch.index)
+      return new vscode.Range(pos, pos.translate(0, 1))
+    }
+    return null
+  }
+
+  const segments = path.split('/')
+
+  // Check if we're dealing with an array index at the root or deeper level
+  if (segments.length === 1 && /^\d+$/.test(segments[0])) {
+    // Root-level array, e.g., path = "1" means second item in array
+    const arrayIndex = parseInt(segments[0], 10)
+    return findNthObjectInArray(text, document, arrayIndex)
+  }
+
+  // For nested paths, navigate through the structure
+  // For now, handle the simple case of array indices
+  const lastSegment = segments[segments.length - 1]
+  if (/^\d+$/.test(lastSegment)) {
+    const arrayIndex = parseInt(lastSegment, 10)
+    return findNthObjectInArray(text, document, arrayIndex)
+  }
+
+  // Try to find a property by name
+  const searchPattern = new RegExp(`["']${escapeRegex(lastSegment)}["']\\s*:\\s*\\{`, 'g')
+  const match = searchPattern.exec(text)
+  if (match) {
+    const pos = document.positionAt(match.index + 1)
+    const endPos = document.positionAt(match.index + 1 + lastSegment.length)
+    return new vscode.Range(pos, endPos)
+  }
+
+  return null
+}
+
+/**
+ * Find the Nth object in a root-level array
+ * Highlights the object's "id" or "type" field, or opening brace
+ */
+function findNthObjectInArray(text: string, document: vscode.TextDocument, index: number): vscode.Range | null {
+  console.log(`[GTS Validation] findNthObjectInArray looking for index=${index}`)
+  let braceCount = 0
+  let objectCount = 0
+  let inArray = false
+  let currentObjectStart = -1
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+
+    if (char === '[' && braceCount === 0) {
+      inArray = true
+      console.log(`[GTS Validation] Found array start at position ${i}`)
+      continue
+    }
+
+    if (!inArray) continue
+
+    if (char === '{') {
+      if (braceCount === 0) {
+        // Start of a new object at array level
+        currentObjectStart = i
+        console.log(`[GTS Validation] Found object start at position ${i}, objectCount=${objectCount}`)
+      }
+      braceCount++
+    } else if (char === '}') {
+      braceCount--
+      if (braceCount === 0) {
+        // End of object at array level
+        console.log(`[GTS Validation] Object ${objectCount} ended at position ${i}`)
+        if (objectCount === index) {
+          // Found the target object, now find its "id" or "type" field
+          const objectText = text.substring(currentObjectStart, i + 1)
+          console.log(`[GTS Validation] Found target object at index ${index}, text length=${objectText.length}`)
+
+          // Try to find "id" field first
+          const idMatch = objectText.match(/"id"\s*:\s*"([^"]+)"/)
+          if (idMatch && idMatch.index !== undefined) {
+            const idStartPos = document.positionAt(currentObjectStart + idMatch.index + 1) // +1 to skip opening quote
+            const idEndPos = document.positionAt(currentObjectStart + idMatch.index + 3) // "id" length
+            console.log(`[GTS Validation] Highlighting "id" field at line ${idStartPos.line}`)
+            return new vscode.Range(idStartPos, idEndPos)
+          }
+
+          // Try "type" field as fallback
+          const typeMatch = objectText.match(/"type"\s*:\s*"([^"]+)"/)
+          if (typeMatch && typeMatch.index !== undefined) {
+            const typeStartPos = document.positionAt(currentObjectStart + typeMatch.index + 1)
+            const typeEndPos = document.positionAt(currentObjectStart + typeMatch.index + 5) // "type" length
+            console.log(`[GTS Validation] Highlighting "type" field at line ${typeStartPos.line}`)
+            return new vscode.Range(typeStartPos, typeEndPos)
+          }
+
+          // Fallback: highlight opening brace
+          const pos = document.positionAt(currentObjectStart)
+          console.log(`[GTS Validation] Highlighting opening brace at line ${pos.line}`)
+          return new vscode.Range(pos, pos.translate(0, 1))
+        }
+        objectCount++
+      }
+    }
+  }
+
+  console.log(`[GTS Validation] Did not find object at index ${index}, only found ${objectCount} objects`)
   return null
 }
 
