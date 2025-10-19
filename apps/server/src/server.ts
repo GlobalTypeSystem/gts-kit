@@ -222,7 +222,7 @@ export async function createApp(dbFile: string, defaultWorkspace: string = 'defa
   // Health
   app.get('/health', (_req, res) => {
     const totalEntities = registry.jsonObjs.size + registry.jsonSchemas.size
-    res.json({ status: 'ok', db: 'ok', backendVersion: '0.1.0', gtsEntities: totalEntities })
+    res.json({ status: 'ok', db: 'ok', backendVersion: '0.2.0', gtsEntities: totalEntities })
   })
 
   // Get GTS entity by ID
