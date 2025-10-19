@@ -3,6 +3,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Event Envelope (Common Fields)",
   "type": "object",
+  "description": "Base event type definition",
   "required": [
     "id",
     "type",
@@ -14,7 +15,7 @@
     "topicRef": {
       "description": "ID of the topic where events of this type are stored.",
       "type": "string",
-      "x-gts-type": "gts.x.core.events.topic.v1~"
+      "x-gts-type":"gts.x.core.events.topic.v1~"
     }
   },
   "properties": {

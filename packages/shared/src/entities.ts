@@ -7,6 +7,33 @@ export const GTS_OBJ_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_
 export const GTS_TYPE_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~\s*$/
 export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
+// ---- Color Definitions ----
+
+/**
+ * Color scheme for GTS entities
+ * Used consistently across web, VS Code extension, and other UIs
+ */
+export const GTS_COLORS = {
+  schema: {
+    // Schema entities (JsonSchema): blue colors
+    foreground: '#bae6fd',  // Tailwind text-sky-200
+    background: '#0369a1',  // Tailwind bg-sky-700
+    background_transparent: '#0369a1f0',  // Tailwind bg-sky-700
+  },
+  instance: {
+    // Instance entities (JsonObj): green colors
+    foreground: '#bbf7d0',  // Tailwind text-green-200
+    background: '#15803d',  // Tailwind bg-green-700
+    background_transparent: '#15803df0',  // Tailwind green-200
+  },
+  invalid: {
+    // Invalid files: red colors
+    foreground: '#fecaca',  // Tailwind text-red-200
+    background: '#b91c1c',  // Tailwind bg-red-700
+    background_transparent: '#b91c1cf0',  // Tailwind bg-red-700
+  }
+} as const
+
 /**
  * Decode a GTS entity ID from URL encoding to ASCII.
  * Handles multiple levels of encoding (e.g., %257E -> %7E -> ~).
@@ -134,6 +161,7 @@ export class JsonEntity {
     gtsRefs?: Array<{ id: string; sourcePath: string }>
     validation?: ValidationResult
     schemaId?: string
+    description?: string
     constructor(params: {
         file?: JsonFile
         listSequence?: number
@@ -147,6 +175,7 @@ export class JsonEntity {
         this.content = params.content
         this.label = (params.listSequence !== undefined ? `${params.file?.name}#${params.listSequence}` : params.file?.name) || ''
         this.gtsRefs = this.extractGtsIdsFromJsonWithPaths()
+        this.description = this.content?.description || ''
     }
     isGtsEntity(): boolean {
         if (this.id?.startsWith('gts.')) return true

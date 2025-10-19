@@ -5,11 +5,13 @@ import { setLastScanFiles } from './scanStore'
 import { RepoLayoutStorage } from './storage'
 import { initValidation, notifyInitialScanComplete } from './validation'
 import { isGtsCandidateFile } from './helpers'
+import { GtsLinkProvider } from './linkProvider'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
 
 let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
+let gtsLinkProvider: GtsLinkProvider | null = null
 
 function getNonce(): string {
   let text = ''
@@ -75,6 +77,15 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInit
     viewerPanel!.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
     try { setLastScanFiles(files) } catch {}
 
+    // Refresh the link provider with the latest registry
+    if (gtsLinkProvider) {
+      try {
+        await gtsLinkProvider.refresh()
+      } catch (e) {
+        console.error('[GTS] Error refreshing link provider:', e)
+      }
+    }
+
     try {
       const objs = Array.from(registry.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
       const schemas = Array.from(registry.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
@@ -107,10 +118,101 @@ export async function activate(context: vscode.ExtensionContext) {
 
   initValidation(context)
 
+  // Create diagnostic collection for GTS validation
+  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts')
+  context.subscriptions.push(gtsDiagnostics)
+
+  // Initialize and register GTS link provider for clickable GTS IDs
+  gtsLinkProvider = new GtsLinkProvider(gtsDiagnostics)
+
+  // Register link provider for JSON, JSONC, and GTS files
+  const documentSelector: vscode.DocumentSelector = [
+    { language: 'json', scheme: 'file' },
+    { language: 'jsonc', scheme: 'file' },
+    { language: 'gts', scheme: 'file' }
+  ]
+
+  context.subscriptions.push(
+    vscode.languages.registerDocumentLinkProvider(documentSelector, gtsLinkProvider)
+  )
+
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(documentSelector, gtsLinkProvider)
+  )
+
+  // Update decorations when active editor changes
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (editor && gtsLinkProvider) {
+        gtsLinkProvider.updateDecorations(editor)
+      }
+    })
+  )
+
+  // Update decorations when document changes
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument(event => {
+      const editor = vscode.window.activeTextEditor
+      if (editor && editor.document === event.document && gtsLinkProvider) {
+        gtsLinkProvider.updateDecorations(editor)
+      }
+    })
+  )
+
+  // Initial decoration for all visible editors
+  if (gtsLinkProvider) {
+    for (const editor of vscode.window.visibleTextEditors) {
+      gtsLinkProvider.updateDecorations(editor)
+    }
+  }
+
+  console.log('[GTS] Link provider registered for JSON/JSONC/GTS files')
+
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('gts.openViewer', (resource?: vscode.Uri) => {
       openViewer(context, resource)
+    })
+  )
+
+  // Register command to replace erroneous GTS ID with suggestion
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gts.replaceGtsId', async (documentUri: string, rangeData: any, newText: string, includeQuotes: boolean) => {
+      try {
+        const uri = vscode.Uri.parse(documentUri)
+        const document = await vscode.workspace.openTextDocument(uri)
+        const editor = await vscode.window.showTextDocument(document)
+
+        // Reconstruct the Range from serialized data
+        let range = new vscode.Range(
+          rangeData.start.line,
+          rangeData.start.character,
+          rangeData.end.line,
+          rangeData.end.character
+        )
+
+        // If we need to include quotes, extend the range and wrap the text
+        let replacementText = newText
+        if (includeQuotes) {
+          // Extend range to include the quotes (one character before and after)
+          range = new vscode.Range(
+            rangeData.start.line,
+            rangeData.start.character - 1,
+            rangeData.end.line,
+            rangeData.end.character + 1
+          )
+          replacementText = `"${newText}"`
+        }
+
+        await editor.edit(editBuilder => {
+          editBuilder.replace(range, replacementText)
+        })
+
+        // Show success message
+        vscode.window.showInformationMessage(`Replaced with: ${newText}`)
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to replace GTS ID: ${error}`)
+      }
     })
   )
 
@@ -157,6 +259,16 @@ async function performInitialScan() {
     await registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Registry initialized: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects`)
 
+    // Refresh the link provider with the initial scan data
+    if (gtsLinkProvider) {
+      try {
+        await gtsLinkProvider.refresh()
+        console.log('[GTS] Link provider refreshed with initial scan data')
+      } catch (e) {
+        console.error('[GTS] Error refreshing link provider:', e)
+      }
+    }
+
     // Notify validation system that initial scan is complete
     notifyInitialScanComplete()
   } catch (error) {
@@ -171,6 +283,11 @@ export async function deactivate() {
   if (viewerPanel) {
     viewerPanel.dispose()
     viewerPanel = null
+  }
+
+  if (gtsLinkProvider) {
+    gtsLinkProvider.dispose()
+    gtsLinkProvider = null
   }
 
   layoutStorage = null

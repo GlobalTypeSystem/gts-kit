@@ -308,9 +308,13 @@ Version 0.1.0:
 - [x] Refresh resilience: restore selected entity and viewport after reload
 - [x] Secure webview (CSP + nonce) and asset routing in extension
 
-Backlog:
+Version 0.2.0:
 - [x] VS Code editor: inline diagnostics and quick fixes (code actions)
-- [ ] VS Code editor: jump to entity file / peek references
+- [x] VS Code editor: jump to entity file / peek references
+- [x] VS Code editor: ensure referred GTS ID exists in the project
+- [x] VS Code editor: suggest GTS IDs in case of misprints
+
+Backlog:
 - [ ] Diagram: multi-select, align/distribute, grouping and subgraphs
 - [ ] Diagram: export PNG/SVG; import/export layout snapshots
 - [ ] Performance: worker-based parsing, incremental graph build, virtualized lists
