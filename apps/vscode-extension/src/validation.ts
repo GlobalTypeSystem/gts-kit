@@ -8,7 +8,6 @@ let diagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
 const changeTimers = new Map<string, NodeJS.Timeout>()
 
-
 /**
  * Convert validation errors to VSCode diagnostics
  */

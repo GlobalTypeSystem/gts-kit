@@ -20,6 +20,8 @@ export class JsonRegistry {
   jsonSchemas: Map<string, JsonSchema>
   jsonFiles: Map<string, JsonFile>
   invalidFiles: Map<string, JsonFile>
+  jsonFileObjs: Map<string, JsonObj[]>
+  jsonFileSchemas: Map<string, JsonSchema[]>
 
   // Centralized fetch cache
   private fetchCache: Map<string, Promise<any>>
@@ -32,6 +34,8 @@ export class JsonRegistry {
     this.jsonFiles = new Map<string, JsonFile>()
     this.invalidFiles = new Map<string, JsonFile>()
     this.fetchCache = new Map<string, Promise<any>>()
+    this.jsonFileObjs = new Map<string, JsonObj[]>()
+    this.jsonFileSchemas = new Map<string, JsonSchema[]>()
     this.defaultFilePath = null
   }
 
@@ -41,6 +45,8 @@ export class JsonRegistry {
     this.jsonFiles.clear()
     this.invalidFiles.clear()
     this.fetchCache.clear()
+    this.jsonFileObjs.clear()
+    this.jsonFileSchemas.clear()
     this.defaultFilePath = null
   }
 
@@ -60,14 +66,29 @@ export class JsonRegistry {
   }
 
   /**
-   * Read a JSON file and upsert its JsonFile record in the registry.
+   * Invalidate a file and remove its JsonFile and associated records from the registry.
    */
-  async upsertFileFromPath(path: string, force = false): Promise<JsonFile> {
-    const content = await this.fetchJson(path, force)
-    const name = path.split('/').pop() || path
-    const file: JsonFile = new JsonFile(path, name, content)
-    this.jsonFiles.set(path, file)
-    return file
+  invalidateFile(path: string): void {
+    if (this.jsonFiles.has(path)) {
+      this.jsonFiles.delete(path)
+    }
+    if (this.invalidFiles.has(path)) {
+      this.invalidFiles.delete(path)
+    }
+    if (this.jsonFileObjs.has(path)) {
+      for (const obj of this.jsonFileObjs.get(path)!) {
+        this.jsonObjs.delete(obj.id)
+      }
+      this.jsonFileObjs.delete(path)
+      this.jsonFileObjs.set(path, [])
+    }
+    if (this.jsonFileSchemas.has(path)) {
+      for (const schema of this.jsonFileSchemas.get(path)!) {
+        this.jsonSchemas.delete(schema.id)
+      }
+      this.jsonFileSchemas.delete(path)
+      this.jsonFileSchemas.set(path, [])
+    }
   }
 
   /**
@@ -75,6 +96,9 @@ export class JsonRegistry {
    * This is a helper used by both scanFile and ingestFiles.
    */
   private processFileContent(path: string, name: string, content: any, cfg: GtsConfig): void {
+    // Cleanup any existing records for this file
+    this.invalidateFile(path)
+
     // Create JsonFile
     const jsonFile = new JsonFile(path, name, content)
 
@@ -102,8 +126,10 @@ export class JsonRegistry {
         hasGtsEntities = true
         if (entity instanceof JsonSchema) {
           this.jsonSchemas.set(entity.id, entity)
+          this.jsonFileSchemas.set(path, [...this.jsonFileSchemas.get(path) || [], entity])
         } else {
           this.jsonObjs.set(entity.id, entity as JsonObj)
+          this.jsonFileObjs.set(path, [...this.jsonFileObjs.get(path) || [], entity as JsonObj])
         }
       }
     })
@@ -111,28 +137,6 @@ export class JsonRegistry {
     // Only store the JsonFile once if it contains GTS entities
     if (hasGtsEntities && !this.jsonFiles.has(path)) {
       this.jsonFiles.set(path, jsonFile)
-    }
-  }
-
-  /**
-   * Scan a single file and add its GTS entities to the registry.
-   * Returns true if the file was successfully processed.
-   */
-  async scanFile(path: string, cfg: GtsConfig): Promise<boolean> {
-    try {
-      // Ensure file is JSON by checking extension
-      if (!isGtsCandidateFileName(path)) {
-        return false
-      }
-
-      const content = await this.fetchJson(path)
-      const name = path.split('/').pop() || path
-
-      this.processFileContent(path, name, content, cfg)
-      return true
-    } catch (error) {
-      console.error(`Failed to scan file ${path}:`, error)
-      return false
     }
   }
 
@@ -303,6 +307,12 @@ export class JsonRegistry {
       // Custom schema loader for GTS ID resolution
       loadSchema: async (uri: string): Promise<any> => {
         const schemaId = decodeGtsId(uri)
+
+        // Allow standard JSON Schema references
+        if (schemaId.startsWith('https://json-schema.org') || schemaId.startsWith('http://json-schema.org')) {
+          return true
+        }
+
         // This is called by Ajv when it encounters a $ref it can't resolve
         const schema = registry.resolveSchema(schemaId)
         if (!schema) {
