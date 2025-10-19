@@ -4,6 +4,7 @@
   "title": "Event Topic (Stream)",
   "type": "object",
   "required": ["id", "name", "retention", "ordering"],
+  "description": "Event Topic (Stream) definition",
   "properties": {
     "$schema": {
       "description": "Link to the topic schema.",
