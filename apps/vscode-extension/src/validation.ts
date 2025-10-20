@@ -325,14 +325,14 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 
     const invalid = registry.invalidFiles.get(filePath)
 
-    if (invalid?.validation && !invalid.validation.valid && invalid.validation.errors.length > 0) {
+    if (invalid?.validation && invalid.validation.errors.length > 0) {
       errors = invalid.validation.errors
     } else {
       const fileObjs = Array.from(registry.jsonObjs.values()).filter(o => o.file?.path === filePath)
       const fileSchemas = Array.from(registry.jsonSchemas.values()).filter(s => s.file?.path === filePath)
 
       for (const e of [...fileObjs, ...fileSchemas]) {
-        if (e.validation && e.validation.valid === false && e.validation.errors.length > 0) {
+        if (e.validation && e.validation.errors.length > 0) {
           errors.push(...e.validation.errors)
         }
       }

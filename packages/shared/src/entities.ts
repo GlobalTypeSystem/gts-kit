@@ -185,6 +185,7 @@ export class JsonEntity {
     }
     extractGtsIdsFromJsonWithPaths(): Array<{ id: string; sourcePath: string }> {
         const found: Array<{ id: string; sourcePath: string }> = []
+        console.log('walking on ', this.id)
         function walk(node: any, currentPath = ''): void {
           if (node === null || node === undefined) return
           if (typeof node === 'string') {
@@ -198,6 +199,13 @@ export class JsonEntity {
           if (typeof node === 'object') {
             Object.entries(node).forEach(([k, v]) => {
               const nextPath = currentPath ? `${currentPath}.${k}` : k
+
+              console.log(' - walk', k, v, typeof v)
+              // Check if this is a field with a GTS ID value
+              if (typeof v === 'string' && GTS_REGEX.test(v)) {
+                found.push({ id: v, sourcePath: nextPath })
+              }
+
               walk(v, nextPath)
             })
           }

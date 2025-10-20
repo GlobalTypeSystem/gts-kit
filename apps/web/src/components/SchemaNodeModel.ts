@@ -1,4 +1,4 @@
-import type { JsonObj, JsonSchema, ValidationResult } from '@gts/shared'
+import type { JsonObj, JsonSchema } from '@gts/shared'
 import { SchemaEdgeModel } from './SchemaEdgeModel'
 import { parseJsonToProperties, parseSchemaToProperties } from '../lib/schemaParser'
 import { debug } from '@/lib/debug'
@@ -13,7 +13,6 @@ export class SchemaNodeModel {
   rawView: boolean
   sections: Record<string, boolean>
   properties?: any[]
-  validation?: ValidationResult
   edges: SchemaEdgeModel[]
   isMaximized: boolean
   snapshotChecked: boolean
@@ -38,7 +37,6 @@ export class SchemaNodeModel {
     this.expanded = params.expanded ?? true
     this.rawView = params.rawView ?? false
     this.sections = params.sections || {}
-    this.validation = params.entity.validation
     this.edges = []
     this.isMaximized = params.isMaximized ?? false
     this.snapshotChecked = false

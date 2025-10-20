@@ -11,7 +11,6 @@ export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 // ---- Entities ----
 
 export interface ValidationResult {
-    valid: boolean
     errors: string[]
 }
 

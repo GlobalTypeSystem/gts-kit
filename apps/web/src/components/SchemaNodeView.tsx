@@ -70,10 +70,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   }
 
   private getIcon() {
-    const validation = this.model?.validation
+    // Read validation directly from entity (not cached in model) to get latest state
+    const validation = this.model?.entity?.validation
     const isSchema = this.isSchemaNode()
 
-    if (validation && !validation.valid) {
+    if (validation && validation.errors.length > 0) {
       return <AlertCircle className="h-4 w-4 text-red-100 bg-red-500 rounded-full" />
     }
 
@@ -199,11 +200,12 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   }
 
   private renderCodeWithErrors(code: string): JSX.Element {
-    const validation = this.model?.validation
+    // Read validation directly from entity to get latest state
+    const validation = this.model?.entity?.validation
     const registry = (this.props.data as any)?.registry || null
 
     // If no validation or valid, render with just GTS highlighting
-    if (!validation || validation.valid || !validation.errors.length) {
+    if (!validation || !validation.errors.length) {
       return <JsonCode code={code} registry={registry} />
     }
 
@@ -386,11 +388,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                 </Button>
               </div>
             )}
-            {(this.model?.validation || d.validation) && !(this.model?.validation || d.validation).valid && (
+            {(this.model?.entity?.validation || d.entity?.validation) && (this.model?.entity?.validation || d.entity?.validation).errors.length > 0 && (
               <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded select-text cursor-text">
                 <div className="text-xs font-medium text-red-800 mb-1">Validation Errors:</div>
                 <div className="space-y-1">
-                  {(this.model?.validation || d.validation).errors.map((error: any, index: number) => (
+                  {(this.model?.entity?.validation || d.entity?.validation).errors.map((error: any, index: number) => (
                     <div key={index} className="text-xs text-red-700 select-text cursor-text">
                       <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
                       {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
@@ -429,7 +431,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     properties={this.model.properties}
                     sectionStates={sectionStates}
                     onToggleSection={this.handleToggleSection}
-                    validationErrors={this.model?.validation?.errors}
+                    validationErrors={this.model?.entity?.validation?.errors}
                     registry={registry}
                   />
                 </div>
@@ -479,11 +481,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     </Button>
                   </div>
                 )}
-                {this.model?.validation && !this.model.validation.valid && (
+                {this.model?.entity?.validation && this.model.entity.validation.errors.length > 0 && (
                   <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text">
                     <div className="text-sm font-medium text-red-800 mb-2">Validation Errors:</div>
                     <div className="space-y-1">
-                      {this.model.validation.errors.map((error: any, index: number) => (
+                      {this.model.entity.validation.errors.map((error: any, index: number) => (
                         <div key={index} className="text-sm text-red-700 select-text cursor-text">
                           <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
                           {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
@@ -503,7 +505,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                         properties={this.model.properties}
                         sectionStates={this.model.sections}
                         onToggleSection={this.handleToggleSection}
-                        validationErrors={this.model?.validation?.errors}
+                        validationErrors={this.model?.entity?.validation?.errors}
                         registry={registry}
                       />
                     </div>

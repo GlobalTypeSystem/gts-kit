@@ -43,7 +43,7 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
     const validation = entity.validation
     const isSchema = entity.isSchema
 
-    if (validation && !validation.valid) {
+    if (validation && validation.errors.length > 0) {
       return <AlertCircle className="h-4 w-4 bg-red-500 text-white rounded-full" />
     }
 
