@@ -425,6 +425,20 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
           }
           break
         }
+
+        case 'openFile': {
+          try {
+            const filePath = message.filePath
+            if (filePath) {
+              const uri = vscode.Uri.file(filePath)
+              await vscode.window.showTextDocument(uri, { preview: false })
+            }
+          } catch (error: any) {
+            console.error('[GTS] Error opening file:', error)
+            vscode.window.showErrorMessage(`Failed to open file: ${error.message || String(error)}`)
+          }
+          break
+        }
       }
     },
     undefined,
@@ -503,6 +517,10 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
           const id = messageId++;
           // fire-and-forget; results come via gts-scan-* events
           vscodeApi.postMessage({ type: 'scanWorkspaceJson', id, options: opts || {} });
+        },
+        openFile(filePath) {
+          // fire-and-forget; open file in VS Code editor
+          vscodeApi.postMessage({ type: 'openFile', filePath });
         },
         // Trigger auto-scan on load
         autoScan: true

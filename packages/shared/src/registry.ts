@@ -147,28 +147,6 @@ export class JsonRegistry {
     // Initialize validation result
     entity.validation = { valid: true, errors: [] }
 
-    // Check if all GTS references exist in the registry
-    if (entity.gtsRefs && entity.gtsRefs.length > 0) {
-      for (const ref of entity.gtsRefs) {
-        const refExists = this.jsonSchemas.has(ref.id) || this.jsonObjs.has(ref.id)
-        if (!refExists) {
-          entity.validation.valid = false
-          // Convert sourcePath from dot notation to slash notation for instancePath
-          // e.g., "contact.gtsIid" -> "/contact/gtsIid", "gtsIid" -> "/gtsIid"
-          const instancePath = ref.sourcePath === 'root'
-            ? '/'
-            : '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
-          entity.validation.errors.push({
-            instancePath,
-            schemaPath: '#',
-            keyword: '',
-            message: `GTS reference not found: ${ref.id}`,
-            params: { gtsId: ref.id, sourcePath: ref.sourcePath }
-          })
-        }
-      }
-    }
-
     // In VS Code webview environment, skip Ajv validation to comply with CSP
     const g: any = (typeof globalThis !== 'undefined') ? (globalThis as any) : {}
     if (g && (g.acquireVsCodeApi || (g.__GTS_APP_API__ && (g.__GTS_APP_API__.type === 'vscode' || g.__GTS_APP_API__.disableValidation === true)))) {
