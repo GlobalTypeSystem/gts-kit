@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, parseJSONC, createEntity, JsonFile, GTS_COLORS } from '@gts/shared'
+import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, parseJSONC, createEntity, JsonFile, GTS_COLORS, parseGtsIdParts } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import * as jsonc from 'jsonc-parser'
 
@@ -11,37 +11,6 @@ interface GtsIdReference {
   range: vscode.Range
   sourcePath: string
   isValid: boolean // Whether the ID matches GTS_REGEX
-}
-
-/**
- * Parse a GTS ID string and extract its parts
- * For example: "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~"
- * Returns:
- * - Part 1: "gts.x.core.events.type.v1~" (schema type)
- * - Part 2: "x.commerce.orders.order_placed.v1.0~" (instance, if exists)
- */
-function parseGtsIdParts(gtsId: string): string[] {
-  const parts: string[] = []
-
-  // Find the first tilde
-  const firstTildeIndex = gtsId.indexOf('~')
-  if (firstTildeIndex === -1) {
-    // No tilde found, return the whole ID
-    return [gtsId]
-  }
-
-  // First part: from start to first tilde (inclusive)
-  const firstPart = gtsId.substring(0, firstTildeIndex + 1)
-  parts.push(firstPart)
-
-  // Check if there's a second part after the first tilde
-  const remainingPart = gtsId.substring(firstTildeIndex + 1)
-  if (remainingPart.length > 0) {
-    // Second part exists
-    parts.push(remainingPart)
-  }
-
-  return parts
 }
 
 /**

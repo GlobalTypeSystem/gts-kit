@@ -478,6 +478,7 @@ export function SharedApp({
                 jsonObjs={jsonObjs}
                 dataVersion={model.version}
                 onDirtyChange={setLayoutDirty}
+                registry={model.registry}
               />
             ) : (
               <div className="h-full flex items-center justify-center">

@@ -10,6 +10,7 @@ import { cn, renderGtsNameWithBreak } from '@/lib/utils'
 import { diagramRegistry } from '@/lib/diagramRegistry'
 import { Popup, PopupTrigger, PopupContent } from '@/components/ui/popup'
 import type { SchemaNodeModel } from './SchemaNodeModel'
+import type { ValidationIssues, OffsetValidationIssue, LineValidationIssue } from '@gts/shared'
 
 
 export class SchemaNodeView extends Component<NodeProps<any>, {}> {
@@ -199,74 +200,40 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
 
   private renderCodeWithErrors(code: string): JSX.Element {
     const validation = this.model?.validation
+    const registry = (this.props.data as any)?.registry || null
+
+    // If no validation or valid, render with just GTS highlighting
     if (!validation || validation.valid || !validation.errors.length) {
-      return <JsonCode code={code} />
+      return <JsonCode code={code} registry={registry} />
     }
 
-    // Extract error positions from validation errors
-    // First try JSONC parser errors (with offset)
-    const errorRegions: Array<{ start: number; end: number; message: string }> = []
+    // Prepare validation issues from validation errors
+    const validationIssues: ValidationIssues = []
 
+    // First, check for JSONC parser errors (with offset)
     validation.errors.forEach((error) => {
       // Try to extract offset from error message like "at offset 123 (length: 5)"
       const match = error.message.match(/at offset (\d+) \(length: (\d+)\)/)
       if (match) {
         const offset = parseInt(match[1], 10)
         const length = parseInt(match[2], 10)
-        errorRegions.push({
+        const issue: OffsetValidationIssue = {
+          type: 'offset',
           start: offset,
           end: offset + length,
-          message: error.message
-        })
+          message: error.message,
+          keyword: error.keyword
+        }
+        validationIssues.push(issue)
       }
     })
 
-    // If we have offset-based errors (JSONC parse errors), use character-level highlighting
-    if (errorRegions.length > 0) {
-      const segments: Array<{ text: string; isError: boolean; message?: string }> = []
-      let lastIndex = 0
-
-      errorRegions.sort((a, b) => a.start - b.start).forEach((region) => {
-        if (region.start > lastIndex) {
-          segments.push({ text: code.substring(lastIndex, region.start), isError: false })
-        }
-        segments.push({
-          text: code.substring(region.start, region.end),
-          isError: true,
-          message: region.message
-        })
-        lastIndex = region.end
-      })
-
-      if (lastIndex < code.length) {
-        segments.push({ text: code.substring(lastIndex), isError: false })
-      }
-
-      return (
-        <div className="bg-[#011627] rounded-md overflow-auto">
-          <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-            {segments.map((segment, index) =>
-              segment.isError ? (
-                <span
-                  key={index}
-                  className="bg-red-500 text-white px-1 rounded cursor-help"
-                  title={segment.message}
-                >
-                  {segment.text}
-                </span>
-              ) : (
-                <span key={index}>{segment.text}</span>
-              )
-            )}
-          </pre>
-        </div>
-      )
+    // If we have offset-based issues, return early with those
+    if (validationIssues.length > 0) {
+      return <JsonCode code={code} registry={registry} validationIssues={validationIssues} />
     }
 
-    // Otherwise, use line-based highlighting for JSON schema validation errors
-    const lines = code.split('\n')
-    const errorLines = new Map<number, Array<{ message: string; keyword?: string }>>()
-
+    // Otherwise, process line-based validation errors (JSON schema validation errors)
     validation.errors.forEach((error) => {
       let targetPath = error.instancePath
 
@@ -282,42 +249,19 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
       if (targetPath) {
         const location = this.findPropertyInJson(code, targetPath)
         if (location) {
-          for (let i = location.lineStart; i <= location.lineEnd; i++) {
-            if (!errorLines.has(i)) {
-              errorLines.set(i, [])
-            }
-            errorLines.get(i)!.push({
-              message: error.message,
-              keyword: error.keyword
-            })
+          const issue: LineValidationIssue = {
+            type: 'line',
+            lineStart: location.lineStart,
+            lineEnd: location.lineEnd,
+            message: error.message,
+            keyword: error.keyword
           }
+          validationIssues.push(issue)
         }
       }
     })
 
-    return (
-      <div className="bg-[#011627] rounded-md overflow-auto">
-        <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-          {lines.map((line, index) => {
-            const errors = errorLines.get(index)
-            if (errors && errors.length > 0) {
-              const errorMessage = errors.map(e => `${e.message}${e.keyword ? ` (${e.keyword})` : ''}`).join('; ')
-              return (
-                <div key={index}>
-                  <span
-                    className="bg-red-500/20 border-l-2 border-red-500 block cursor-help"
-                    title={errorMessage}
-                  >
-                    {line}
-                  </span>
-                </div>
-              )
-            }
-            return <div key={index}>{line}</div>
-          })}
-        </pre>
-      </div>
-    )
+    return <JsonCode code={code} registry={registry} validationIssues={validationIssues} />
   }
 
   private handleToggleSection = (path: string, open: boolean) => {
@@ -358,6 +302,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     const isExpanded = this.model ? !!this.model.expanded : true // Default to expanded if no model
     const sectionStates = this.model ? (this.model.sections || {}) : {} // Default to empty sections if no model
     const overlayContainer: HTMLElement | null = (d.overlayContainer?.current as HTMLElement | null) || null
+    const registry = (d as any).registry || null
     let rawView = false
     if (this.model && this.model.isMaximized) {
         rawView = diagramRegistry.getViewState().globalRawViewPreference
@@ -485,6 +430,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     sectionStates={sectionStates}
                     onToggleSection={this.handleToggleSection}
                     validationErrors={this.model?.validation?.errors}
+                    registry={registry}
                   />
                 </div>
               )
@@ -558,6 +504,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                         sectionStates={this.model.sections}
                         onToggleSection={this.handleToggleSection}
                         validationErrors={this.model?.validation?.errors}
+                        registry={registry}
                       />
                     </div>
                   )

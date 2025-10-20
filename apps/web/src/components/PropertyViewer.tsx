@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
-import { GTS_TYPE_REGEX, GTS_OBJ_REGEX } from '@gts/shared'
+import { GTS_TYPE_REGEX, GTS_OBJ_REGEX, GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment } from '@gts/shared'
 import { TIMING } from '@/lib/timing'
 import { PropertyInfo } from '@/lib/schemaParser'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,80 @@ interface ValidationError {
   params?: any
 }
 
+/**
+ * Render a GTS ID value with proper color-coding for each part
+ */
+function renderGtsValue(value: string, registry: JsonRegistry | null) {
+  // Remove quotes if present
+  const raw = value.replace(/^"/, '').replace(/"$/, '')
+
+  // Check if this looks like a GTS ID
+  if (!raw.startsWith('gts.')) {
+    return <span>{value}</span>
+  }
+
+  // Analyze the GTS ID for styling
+  const analysis = analyzeGtsIdForStyling(raw, (entityId: string) => {
+    if (!registry) return { exists: false }
+    const schema = registry.jsonSchemas.get(entityId)
+    const obj = registry.jsonObjs.get(entityId)
+    if (schema) return { exists: true, isSchema: true }
+    if (obj) return { exists: true, isSchema: false }
+    return { exists: false }
+  })
+
+  // If invalid format, show as error
+  if (!analysis.isValid) {
+    return (
+      <span
+        className="rounded px-1"
+        style={{
+          color: GTS_COLORS.invalid.foreground,
+          backgroundColor: GTS_COLORS.invalid.background
+        }}
+      >
+        {value}
+      </span>
+    )
+  }
+
+  // Render each segment with appropriate styling
+  const openQuote = value.startsWith('"') ? '"' : ''
+  const closeQuote = value.endsWith('"') ? '"' : ''
+
+  return (
+    <>
+      {openQuote}
+      {analysis.segments.map((segment: GtsStyledSegment, idx: number) => {
+        let bgColor: string
+        let textColor: string
+
+        if (segment.type === 'schema') {
+          bgColor = '#dbeafe' // blue-100
+          textColor = '#1e40af' // blue-800
+        } else if (segment.type === 'instance') {
+          bgColor = '#dcfce7' // green-100
+          textColor = '#166534' // green-800
+        } else {
+          bgColor = '#fee2e2' // red-100
+          textColor = '#991b1b' // red-800
+        }
+
+        return (
+          <span
+            key={idx}
+            className="rounded px-0.5"
+            style={{ backgroundColor: bgColor, color: textColor }}
+          >
+            {segment.text}
+          </span>
+        )
+      })}
+      {closeQuote}
+    </>
+  )
+}
+
 interface PropertyViewerProps {
   properties: PropertyInfo[]
   level?: number
@@ -20,9 +94,10 @@ interface PropertyViewerProps {
   sectionStates?: Record<string, boolean>
   onToggleSection?: (path: string, open: boolean) => void
   validationErrors?: ValidationError[]
+  registry?: JsonRegistry | null
 }
 
-export function PropertyViewer({ properties, level = 0, basePath = '', sectionStates, onToggleSection, validationErrors }: PropertyViewerProps) {
+export function PropertyViewer({ properties, level = 0, basePath = '', sectionStates, onToggleSection, validationErrors, registry = null }: PropertyViewerProps) {
   return (
     <div className="space-y-0">
       {properties.map((property, index) => (
@@ -34,6 +109,7 @@ export function PropertyViewer({ properties, level = 0, basePath = '', sectionSt
           sectionStates={sectionStates}
           onToggleSection={onToggleSection}
           validationErrors={validationErrors}
+          registry={registry}
         />
       ))}
     </div>
@@ -47,9 +123,10 @@ interface PropertyItemProps {
   sectionStates?: Record<string, boolean>
   onToggleSection?: (path: string, open: boolean) => void
   validationErrors?: ValidationError[]
+  registry?: JsonRegistry | null
 }
 
-function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection, validationErrors }: PropertyItemProps) {
+function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection, validationErrors, registry = null }: PropertyItemProps) {
   const [localOpen, setLocalOpen] = useState(level < 2) // Auto-expand first 2 levels
   const isOpen = (sectionStates && pathKey in sectionStates) ? !!sectionStates[pathKey] : localOpen
   const [copied, setCopied] = useState(false)
@@ -163,14 +240,14 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                   </span>
                 )}
                 {property.required && (
-                  <span className="text-xs bg-red-100 text-red-800 px-1.5 py-0 rounded whitespace-nowrap">
+                  <span className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0 rounded whitespace-nowrap">
                     required
                   </span>
                 )}
 
-                {isGtsObj && property.value !== undefined && (
+                {(isGtsObj || isGtsType) && property.value !== undefined && (
                   <span
-                    className="text-xs bg-green-100 text-green-800 px-1.5 py-0 rounded whitespace-nowrap overflow-hidden"
+                    className="text-xs px-1.5 py-0 rounded whitespace-nowrap overflow-hidden inline-flex items-center gap-0.5"
                     style={{ cursor: 'copy', textOverflow: 'ellipsis' }}
                     title={String(property.value)}
                     onDoubleClick={async (e) => {
@@ -182,25 +259,7 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                       } catch {}
                     }}
                   >
-                    {formatValue(property.value)}
-                  </span>
-                )}
-
-                {isGtsType && property.value !== undefined && (
-                  <span
-                    className="text-xs bg-blue-100 text-blue-800 px-1.5 py-0 rounded whitespace-nowrap overflow-hidden"
-                    style={{ cursor: 'copy', textOverflow: 'ellipsis' }}
-                    title={String(property.value)}
-                    onDoubleClick={async (e) => {
-                      e.stopPropagation()
-                      try {
-                        await navigator.clipboard.writeText(String(property.value))
-                        setCopied(true)
-                        setTimeout(() => setCopied(false), TIMING.COPY_INDICATOR_DURATION)
-                      } catch {}
-                    }}
-                  >
-                    {formatValue(property.value)}
+                    {renderGtsValue(String(property.value), registry)}
                   </span>
                 )}
 
@@ -264,6 +323,7 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
               sectionStates={sectionStates}
               onToggleSection={onToggleSection}
               validationErrors={validationErrors}
+              registry={registry}
             />
           </CollapsibleContent>
         )}
