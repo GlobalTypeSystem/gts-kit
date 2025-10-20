@@ -609,7 +609,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
                 document.uri.toString(),
                 rangeData,
                 suggestion,
-                true  // includeQuotes
+                false  // includeQuotes - range already excludes quotes
               ]))}`
             )
             markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
@@ -683,7 +683,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
                 document.uri.toString(),
                 rangeData,
                 suggestion,
-                true  // includeQuotes
+                false  // includeQuotes - range already excludes quotes
               ]))}`
             )
             markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
