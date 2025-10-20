@@ -4,9 +4,8 @@ import { JsonRegistry, ValidationError, DEFAULT_GTS_CONFIG, parseJSONC } from '@
 import { getLastScanFiles } from './scanStore'
 import { isGtsCandidateFile } from './helpers'
 
-let diagnosticCollection: vscode.DiagnosticCollection
+// let diagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
-const changeTimers = new Map<string, NodeJS.Timeout>()
 
 /**
  * Convert validation errors to VSCode diagnostics
@@ -291,11 +290,8 @@ function escapeRegex(str: string): string {
 /**
  * Validate a document and update diagnostics
  */
-async function validateDocument(document: vscode.TextDocument) {
-  // Only validate JSON and GTS files
-  const isJsonOrGts = isGtsCandidateFile(document)
-
-  if (!isJsonOrGts) {
+export async function validateOpenDocument(document: vscode.TextDocument) {
+  if (!isGtsCandidateFile(document)) {
     return
   }
 
@@ -317,10 +313,6 @@ async function validateDocument(document: vscode.TextDocument) {
     }
 
     const files = getLastScanFiles()
-
-    if (files.length === 0 && !isInitialScanComplete) {
-      console.log(`[GTS Validation] ⚠️  Initial workspace scan not yet complete - validation may be incomplete`)
-    }
 
     const withoutCurrent = files.filter(f => f.path !== filePath)
     const merged = [...withoutCurrent, { path: filePath, name: fileName, content }]
@@ -348,15 +340,15 @@ async function validateDocument(document: vscode.TextDocument) {
 
     if (errors.length > 0) {
       const diagnostics = validationErrorsToDiagnostics(errors, document)
-      diagnosticCollection.set(document.uri, diagnostics)
+      // diagnosticCollection.set(document.uri, diagnostics)
       console.log(`[GTS Validation] ✗ Got ${diagnostics.length} GTS diagnostics errors for ${fileName} - Errors:`, diagnostics.map(d => ({ message: d.message, range: d.range })))
     } else {
-      diagnosticCollection.delete(document.uri)
+      // diagnosticCollection.delete(document.uri)
       console.log(`[GTS Validation] ✓ No errors, cleared diagnostics for ${fileName}`)
     }
   } catch (error) {
     console.error('[GTS Validation] ✗ Error validating document:', error)
-    diagnosticCollection.delete(document.uri)
+    //diagnosticCollection.delete(document.uri)
   }
 }
 
@@ -364,14 +356,14 @@ export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 
     // Create diagnostic collection for validation errors
-    diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
-    context.subscriptions.push(diagnosticCollection)
+    // diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
+    // context.subscriptions.push(diagnosticCollection)
 
     // Validate all open documents on activation
     const openDocs = vscode.workspace.textDocuments
     console.log(`[GTS Validation] Validating ${openDocs.length} open documents on activation`)
     openDocs.forEach(doc => {
-      void validateDocument(doc)
+      void validateOpenDocument(doc)
     })
 
     // Validate document when it's opened
@@ -379,49 +371,7 @@ export function initValidation(context: vscode.ExtensionContext) {
       vscode.workspace.onDidOpenTextDocument(doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document opened: ${doc.fileName} (language: ${doc.languageId})`)
-        void validateDocument(doc)
-      })
-    )
-
-    // Validate document when it changes (debounced - 1 second after user stops typing)
-    context.subscriptions.push(
-      vscode.workspace.onDidChangeTextDocument(event => {
-        if (!isGtsCandidateFile(event.document)) return
-
-        const docUri = event.document.uri.toString()
-
-        // Clear any existing timer for this document
-        const existingTimer = changeTimers.get(docUri)
-        if (existingTimer) {
-          clearTimeout(existingTimer)
-        }
-
-        // Set new timer to validate 0.5 seconds after user stops typing
-        const timer = setTimeout(() => {
-          console.log(`[GTS Validation] Document changed (after 0.5s delay): ${event.document.fileName}`)
-          changeTimers.delete(docUri)
-          void validateDocument(event.document)
-        }, 500)
-
-        changeTimers.set(docUri, timer)
-      })
-    )
-
-    // Validate document when it's saved
-    context.subscriptions.push(
-      vscode.workspace.onDidSaveTextDocument(doc => {
-        if (!isGtsCandidateFile(doc)) return
-        console.log(`[GTS Validation] Document saved: ${doc.fileName}`)
-
-        // Clear any pending validation timer since we're validating now
-        const docUri = doc.uri.toString()
-        const existingTimer = changeTimers.get(docUri)
-        if (existingTimer) {
-          clearTimeout(existingTimer)
-          changeTimers.delete(docUri)
-        }
-
-        void validateDocument(doc)
+        void validateOpenDocument(doc)
       })
     )
 
@@ -430,35 +380,9 @@ export function initValidation(context: vscode.ExtensionContext) {
       vscode.workspace.onDidCloseTextDocument(doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document closed: ${doc.fileName}`)
-
-        // Clear any pending validation timer for this document
-        const docUri = doc.uri.toString()
-        const existingTimer = changeTimers.get(docUri)
-        if (existingTimer) {
-          clearTimeout(existingTimer)
-          changeTimers.delete(docUri)
-        }
-
-        diagnosticCollection.delete(doc.uri)
+        // diagnosticCollection.delete(doc.uri)
       })
     )
 
     console.log('[GTS Validation] Validation system initialized successfully')
-}
-
-/**
- * Notify validation system that initial workspace scan is complete
- * This will trigger re-validation of all open documents
- */
-export function notifyInitialScanComplete() {
-  console.log('[GTS Validation] Initial scan complete, re-validating open documents...')
-  isInitialScanComplete = true
-
-  // Re-validate all open documents now that we have the full registry
-  vscode.workspace.textDocuments.forEach(doc => {
-    if (isGtsCandidateFile(doc)) {
-      console.log(`[GTS Validation] Re-validating after scan: ${doc.fileName}`)
-      void validateDocument(doc)
-    }
-  })
 }
