@@ -1,0 +1,264 @@
+{
+  "$id": "gts.x.commerce.orders.order.v1.0~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Order",
+  "description": "Base order schema definition for e-commerce orders",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for the order"
+    },
+    "orderNumber": {
+      "type": "string",
+      "description": "Human-readable order number"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "confirmed",
+        "processing",
+        "shipped",
+        "delivered",
+        "cancelled",
+        "refunded",
+        "returned"
+      ],
+      "default": "pending",
+      "description": "Current status of the order"
+    },
+    "customerId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the customer who placed the order"
+    },
+    "customerEmail": {
+      "type": "string",
+      "format": "email",
+      "description": "Email address of the customer"
+    },
+    "subtotal": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Subtotal amount before tax and shipping"
+    },
+    "taxAmount": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Tax amount applied to the order"
+    },
+    "discountAmount": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Discount amount applied to the order"
+    },
+    "totalAmount": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Final total amount including all charges"
+    },
+    "currency": {
+      "type": "string",
+      "default": "USD",
+      "description": "Currency code for all monetary amounts"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/OrderItem"
+      },
+      "description": "List of items in the order"
+    },
+    "shippingAddress": {
+      "$ref": "#/definitions/Address",
+      "description": "Shipping address for the order"
+    },
+    "billingAddress": {
+      "$ref": "#/definitions/Address",
+      "description": "Billing address for the order"
+    },
+    "shippingMethod": {
+      "type": "string",
+      "description": "Shipping method selected for the order"
+    },
+    "shippingCost": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Shipping cost for the order"
+    },
+    "paymentMethod": {
+      "type": "string",
+      "enum": [
+        "credit_card",
+        "debit_card",
+        "paypal",
+        "bank_transfer",
+        "cash_on_delivery",
+        "gift_card"
+      ],
+      "description": "Payment method used for the order"
+    },
+    "paymentStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "cancelled",
+        "refunded"
+      ],
+      "default": "pending",
+      "description": "Payment status of the order"
+    },
+    "paymentReference": {
+      "type": "string",
+      "description": "Payment provider reference number"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Additional notes or comments for the order"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Tags for categorizing or flagging the order"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when the order was created"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when the order was last updated"
+    },
+    "shippedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when the order was shipped"
+    },
+    "deliveredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when the order was delivered"
+    }
+  },
+  "definitions": {
+    "OrderItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique identifier for the order item"
+        },
+        "productId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Reference to the product"
+        },
+        "productName": {
+          "type": "string",
+          "description": "Name of the product"
+        },
+        "productSku": {
+          "type": "string",
+          "description": "Stock keeping unit of the product"
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Quantity of the product ordered"
+        },
+        "unitPrice": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Price per unit of the product"
+        },
+        "totalPrice": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total price for this line item"
+        },
+        "discountAmount": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Discount applied to this item"
+        },
+        "taxAmount": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Tax amount for this item"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Additional metadata for the order item"
+        }
+      },
+      "required": ["productId", "productName", "quantity", "unitPrice", "totalPrice"]
+    },
+    "Address": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique identifier for the address"
+        },
+        "firstName": {
+          "type": "string",
+          "description": "First name of the recipient"
+        },
+        "lastName": {
+          "type": "string",
+          "description": "Last name of the recipient"
+        },
+        "company": {
+          "type": "string",
+          "description": "Company name if applicable"
+        },
+        "addressLine1": {
+          "type": "string",
+          "description": "Primary address line"
+        },
+        "addressLine2": {
+          "type": "string",
+          "description": "Secondary address line"
+        },
+        "city": {
+          "type": "string",
+          "description": "City"
+        },
+        "state": {
+          "type": "string",
+          "description": "State or province"
+        },
+        "postalCode": {
+          "type": "string",
+          "description": "Postal or ZIP code"
+        },
+        "country": {
+          "type": "string",
+          "description": "Country code (ISO 3166-1 alpha-2)"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Phone number"
+        }
+      },
+      "required": ["firstName", "lastName", "addressLine1", "city", "state", "postalCode", "country"]
+    }
+  }
+}
