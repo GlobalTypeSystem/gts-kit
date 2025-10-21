@@ -86,3 +86,26 @@ export interface GlobalSettings {
     allowAnonymous?: boolean
   }
 }
+
+// Validation issue types for code highlighting
+export type ValidationIssueType = 'offset' | 'line'
+
+export interface ValidationIssue {
+  type: ValidationIssueType
+  message: string
+  keyword?: string
+}
+
+export interface OffsetValidationIssue extends ValidationIssue {
+  type: 'offset'
+  start: number
+  end: number
+}
+
+export interface LineValidationIssue extends ValidationIssue {
+  type: 'line'
+  lineStart: number
+  lineEnd: number
+}
+
+export type ValidationIssues = Array<OffsetValidationIssue | LineValidationIssue>

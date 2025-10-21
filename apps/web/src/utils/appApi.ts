@@ -66,6 +66,9 @@ export interface AppApi {
 
   /** Layout storage (available on electron; vscode uses server) */
   readonly layoutStorage?: LayoutStorageApi
+
+  /** Open a file in the platform's editor (available on vscode) */
+  readonly openFile?: (filePath: string) => void
 }
 
 /**

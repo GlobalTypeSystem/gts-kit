@@ -1,0 +1,7 @@
+---
+description: use LLM_RULES.md
+globs:
+alwaysApply: true
+---
+
+Use ./docs/LLM_RULES.md always

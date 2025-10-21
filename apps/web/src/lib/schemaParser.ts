@@ -79,7 +79,21 @@ export function parseJsonToProperties(data: any, name = 'root'): PropertyInfo[] 
           })
         }
       } else {
-        // For nested objects, use recursive parsing
+        // Schema-like object inside arbitrary JSON (e.g., under x-*): delegate entirely to parseSchemaToProperties
+        const looksSchemaLike = (o: any) => !!(o && (o.$ref || o.type || o.allOf || o.oneOf || o.anyOf || o.properties || o.items || o.enum || o.const))
+        if (looksSchemaLike(value)) {
+          const wrapped = parseSchemaToProperties({ properties: { [key]: value } })
+          const prop = wrapped.find(p => p.name === key)
+          if (prop) return prop
+          // Fallback if parsing did not return the property for some reason
+          return {
+            name: key,
+            type: getSchemaType(value),
+            children: getSchemaChildren(value)
+          }
+        }
+
+        // For plain nested objects, use recursive parsing without any x-gts-type special handling
         return {
           name: key,
           type: 'object',

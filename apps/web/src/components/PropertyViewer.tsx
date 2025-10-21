@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
-import { GTS_TYPE_REGEX, GTS_OBJ_REGEX } from '@gts/shared'
+import { GTS_TYPE_REGEX, GTS_OBJ_REGEX, GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment } from '@gts/shared'
 import { TIMING } from '@/lib/timing'
 import { PropertyInfo } from '@/lib/schemaParser'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,105 @@ interface ValidationError {
   params?: any
 }
 
+/**
+ * Render a GTS ID value with proper color-coding for each part
+ */
+function renderGtsValue(value: string, registry: JsonRegistry | null) {
+  // Remove quotes if present
+  const raw = value.replace(/^"/, '').replace(/"$/, '')
+
+  // Check if this looks like a GTS ID
+  if (!raw.startsWith('gts.')) {
+    return <span>{value}</span>
+  }
+
+  // Analyze the GTS ID for styling
+  const analysis = analyzeGtsIdForStyling(raw, (entityId: string) => {
+    if (!registry) return { exists: false }
+    const schema = registry.jsonSchemas.get(entityId)
+    const obj = registry.jsonObjs.get(entityId)
+    if (schema) return { exists: true, isSchema: true }
+    if (obj) return { exists: true, isSchema: false }
+    return { exists: false }
+  })
+
+  // If invalid format, show as error
+  if (!analysis.isValid) {
+    return (
+      <span
+        className="rounded px-1"
+        style={{
+          color: GTS_COLORS.invalid.foreground,
+          backgroundColor: GTS_COLORS.invalid.background
+        }}
+      >
+        {value}
+      </span>
+    )
+  }
+
+  // Render each segment with appropriate styling
+  const openQuote = value.startsWith('"') ? '"' : ''
+  const closeQuote = value.endsWith('"') ? '"' : ''
+
+  return (
+    <>
+      {openQuote}
+      {analysis.segments.map((segment: GtsStyledSegment, idx: number) => {
+        let bgColor: string
+        let textColor: string
+
+        if (segment.type === 'schema') {
+          bgColor = '#dbeafe' // blue-100
+          textColor = '#1e40af' // blue-800
+        } else if (segment.type === 'instance') {
+          bgColor = '#dcfce7' // green-100
+          textColor = '#166534' // green-800
+        } else {
+          bgColor = '#fee2e2' // red-100
+          textColor = '#991b1b' // red-800
+        }
+
+        return (
+          <span
+            key={idx}
+            className="rounded px-0.5"
+            style={{ backgroundColor: bgColor, color: textColor }}
+          >
+            {segment.text}
+          </span>
+        )
+      })}
+      {closeQuote}
+    </>
+  )
+}
+
+/**
+ * Render an arbitrary text line and inline-highlight any GTS IDs it contains
+ * using the same styling as renderGtsValue().
+ */
+function renderDescriptionWithGts(text: string, registry: JsonRegistry | null) {
+  const parts: Array<JSX.Element> = []
+  // A permissive detector for GTS-like tokens in plain text
+  const regex = /gts\.[A-Za-z0-9_\.]+(?:~[A-Za-z0-9_\.]+)?~?/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    const start = match.index
+    const end = start + match[0].length
+    if (start > lastIndex) {
+      parts.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex, start)}</span>)
+    }
+    parts.push(<span key={`g-${start}`}>{renderGtsValue(match[0], registry)}</span>)
+    lastIndex = end
+  }
+  if (lastIndex < text.length) {
+    parts.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex)}</span>)
+  }
+  return <>{parts}</>
+}
+
 interface PropertyViewerProps {
   properties: PropertyInfo[]
   level?: number
@@ -20,9 +119,10 @@ interface PropertyViewerProps {
   sectionStates?: Record<string, boolean>
   onToggleSection?: (path: string, open: boolean) => void
   validationErrors?: ValidationError[]
+  registry?: JsonRegistry | null
 }
 
-export function PropertyViewer({ properties, level = 0, basePath = '', sectionStates, onToggleSection, validationErrors }: PropertyViewerProps) {
+export function PropertyViewer({ properties, level = 0, basePath = '', sectionStates, onToggleSection, validationErrors, registry = null }: PropertyViewerProps) {
   return (
     <div className="space-y-0">
       {properties.map((property, index) => (
@@ -34,6 +134,7 @@ export function PropertyViewer({ properties, level = 0, basePath = '', sectionSt
           sectionStates={sectionStates}
           onToggleSection={onToggleSection}
           validationErrors={validationErrors}
+          registry={registry}
         />
       ))}
     </div>
@@ -47,9 +148,10 @@ interface PropertyItemProps {
   sectionStates?: Record<string, boolean>
   onToggleSection?: (path: string, open: boolean) => void
   validationErrors?: ValidationError[]
+  registry?: JsonRegistry | null
 }
 
-function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection, validationErrors }: PropertyItemProps) {
+function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection, validationErrors, registry = null }: PropertyItemProps) {
   const [localOpen, setLocalOpen] = useState(level < 2) // Auto-expand first 2 levels
   const isOpen = (sectionStates && pathKey in sectionStates) ? !!sectionStates[pathKey] : localOpen
   const [copied, setCopied] = useState(false)
@@ -58,9 +160,38 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
 
   // Check if this property has validation errors
   const propertyPath = `/${pathKey}`
+
+  const normalizeInstancePath = (p: string): string => {
+    if (!p) return p
+    // Collapse /properties/ segments used by Ajv
+    let out = p.replace(/\/properties\//g, '/')
+    // Convert bracket indices to pointer-style segments: allOf[1] -> allOf/1
+    out = out.replace(/\[(\d+)\]/g, '/$1')
+    // Iteratively strip trailing leaf nodes that refer to annotations or sub-keys
+    // like /x-*, /type, /const, /$ref, /items
+    const tail = /\/(x-[^/]+|type|const|\$ref|items)$/
+    // Guard loop count to avoid infinite replaces
+    let i = 0
+    while (tail.test(out) && i++ < 10) {
+      out = out.replace(tail, '')
+    }
+    return out
+  }
+
+  const propertyPathTree = normalizeInstancePath(propertyPath)
+
   const propertyErrors = validationErrors?.filter(err => {
-    // Direct match on instancePath
-    if (err.instancePath === propertyPath) return true
+    // Normalize error paths
+    const errPath = err.instancePath || ''
+    const errNorm = normalizeInstancePath(errPath.trim())
+    const errParentNorm = normalizeInstancePath(errPath.trim().replace(/\/x-[^/]+$/, ''))
+
+    // Direct matches (raw and normalized)
+    if (errPath === propertyPath) return true
+    if (errNorm === propertyPathTree) return true
+
+    // Parent of /x-* annotation should map to the property itself
+    if (errParentNorm === propertyPathTree) return true
 
     // Handle additionalProperties errors where instancePath is parent but message contains property name
     // e.g., "must NOT have additional property 'retention2'"
@@ -163,14 +294,14 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                   </span>
                 )}
                 {property.required && (
-                  <span className="text-xs bg-red-100 text-red-800 px-1.5 py-0 rounded whitespace-nowrap">
+                  <span className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0 rounded whitespace-nowrap">
                     required
                   </span>
                 )}
 
-                {isGtsObj && property.value !== undefined && (
+                {(isGtsObj || isGtsType) && property.value !== undefined && (
                   <span
-                    className="text-xs bg-green-100 text-green-800 px-1.5 py-0 rounded whitespace-nowrap overflow-hidden"
+                    className="text-xs px-1.5 py-0 rounded whitespace-nowrap overflow-hidden inline-flex items-center gap-0.5"
                     style={{ cursor: 'copy', textOverflow: 'ellipsis' }}
                     title={String(property.value)}
                     onDoubleClick={async (e) => {
@@ -182,25 +313,7 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                       } catch {}
                     }}
                   >
-                    {formatValue(property.value)}
-                  </span>
-                )}
-
-                {isGtsType && property.value !== undefined && (
-                  <span
-                    className="text-xs bg-blue-100 text-blue-800 px-1.5 py-0 rounded whitespace-nowrap overflow-hidden"
-                    style={{ cursor: 'copy', textOverflow: 'ellipsis' }}
-                    title={String(property.value)}
-                    onDoubleClick={async (e) => {
-                      e.stopPropagation()
-                      try {
-                        await navigator.clipboard.writeText(String(property.value))
-                        setCopied(true)
-                        setTimeout(() => setCopied(false), TIMING.COPY_INDICATOR_DURATION)
-                      } catch {}
-                    }}
-                  >
-                    {formatValue(property.value)}
+                    {renderGtsValue(String(property.value), registry)}
                   </span>
                 )}
 
@@ -226,16 +339,12 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                 )}
               </div>
               {property.description && (
-                <div
-                  className={cn(
-                    "text-xs text-muted-foreground py-0 px-0 leading-[0.95] relative -top-px mt-0 pt-0 pb-1",
-                    isGtsType && "bg-blue-50 text-blue-800/80 rounded px-1.5",
-                    isGtsObj && "bg-green-50 text-green-800/80 rounded px-1.5"
-                  )}
-                >
+                <div className={cn(
+                  "text-xs text-muted-foreground py-0 px-0 leading-[0.95] relative -top-px mt-0 pt-0 pb-1"
+                )}>
                   {property.description.split('\n').map((line, index) => (
                     <div key={index} className={index > 0 ? 'mt-1' : undefined}>
-                      {line}
+                      {renderDescriptionWithGts(line, registry)}
                     </div>
                   ))}
                 </div>
@@ -264,6 +373,7 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
               sectionStates={sectionStates}
               onToggleSection={onToggleSection}
               validationErrors={validationErrors}
+              registry={registry}
             />
           </CollapsibleContent>
         )}

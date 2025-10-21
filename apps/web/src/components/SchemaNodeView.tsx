@@ -10,6 +10,7 @@ import { cn, renderGtsNameWithBreak } from '@/lib/utils'
 import { diagramRegistry } from '@/lib/diagramRegistry'
 import { Popup, PopupTrigger, PopupContent } from '@/components/ui/popup'
 import type { SchemaNodeModel } from './SchemaNodeModel'
+import type { ValidationIssues, OffsetValidationIssue, LineValidationIssue } from '@gts/shared'
 
 
 export class SchemaNodeView extends Component<NodeProps<any>, {}> {
@@ -20,6 +21,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   private onMaximize?: (isMaximized: boolean) => void
   private onMaximizeRawJson?: (isRawView: boolean) => void
   private onNodeChange?: () => void
+  private isVSCode: boolean = false
 
   constructor(props: NodeProps<any>) {
     super(props)
@@ -28,6 +30,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.onMaximize = d.onMaximize
     this.onMaximizeRawJson = d.onMaximizeRawJson
     this.onNodeChange = d.onNodeChange
+    this.isVSCode = !!d.isVSCode
   }
 
   private ensureModel() {
@@ -39,6 +42,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.onMaximize = d.onMaximize
     this.onMaximizeRawJson = d.onMaximizeRawJson
     this.onNodeChange = d.onNodeChange
+    this.isVSCode = !!d.isVSCode
   }
 
   componentDidUpdate(prevProps: NodeProps<any>) {
@@ -69,10 +73,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   }
 
   private getIcon() {
-    const validation = this.model?.validation
+    // Read validation directly from entity (not cached in model) to get latest state
+    const validation = this.model?.entity?.validation
     const isSchema = this.isSchemaNode()
 
-    if (validation && !validation.valid) {
+    if (validation && validation.errors.length > 0) {
       return <AlertCircle className="h-4 w-4 text-red-100 bg-red-500 rounded-full" />
     }
 
@@ -128,7 +133,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.forceUpdate()
   }
 
-  private findPropertyInJson(code: string, instancePath: string): { lineStart: number; lineEnd: number; charStart: number; charEnd: number } | null {
+  private findPropertyInJson(code: string, instancePath: string, rootObj?: any): { lineStart: number; lineEnd: number; charStart: number; charEnd: number } | null {
     // Parse instancePath like "/retention2" or "/nested/property"
     if (!instancePath || instancePath === '/') return null
 
@@ -136,6 +141,48 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     if (pathParts.length === 0) return null
 
     const propertyName = pathParts[pathParts.length - 1]
+
+    // If we have the root object, try to resolve the exact value at the path
+    // and locate the key: value pair precisely. This avoids matching the wrong
+    // occurrence of the same property name elsewhere.
+    if (rootObj) {
+      try {
+        const segments = pathParts
+        let parent: any = rootObj
+        for (let i = 0; i < segments.length - 1; i++) {
+          const seg = segments[i]
+          const idx = String(Number(seg)) === seg ? Number(seg) : seg
+          parent = Array.isArray(parent) ? parent[idx as number] : parent?.[idx as any]
+          if (parent == null) break
+        }
+        const last = segments[segments.length - 1]
+        const key = last
+        const idxLast = String(Number(key)) === key ? Number(key) : key
+        const value = Array.isArray(parent) ? parent?.[idxLast as number] : parent?.[idxLast as any]
+
+        if (typeof value === 'string') {
+          const lines = code.split('\n')
+          const keyString = `"${key}"`
+          const valueString = JSON.stringify(value)
+          const keyValRegex = new RegExp(`${keyString}\\s*:\\s*${valueString}`)
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            const match = keyValRegex.exec(line)
+            if (match) {
+              const startIdx = match.index
+              return {
+                lineStart: i,
+                lineEnd: i,
+                charStart: startIdx,
+                charEnd: startIdx + match[0].length
+              }
+            }
+          }
+        }
+      } catch {
+        // Fall through to generic locator below
+      }
+    }
 
     // Find all occurrences of the property name in quotes
     const regex = new RegExp(`"${propertyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g')
@@ -198,75 +245,42 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   }
 
   private renderCodeWithErrors(code: string): JSX.Element {
-    const validation = this.model?.validation
-    if (!validation || validation.valid || !validation.errors.length) {
-      return <JsonCode code={code} />
+    // Read validation directly from entity to get latest state
+    const validation = this.model?.entity?.validation
+    const registry = (this.props.data as any)?.registry || null
+
+    // If no validation or valid, render with just GTS highlighting
+    if (!validation || !validation.errors.length) {
+      return <JsonCode code={code} registry={registry} />
     }
 
-    // Extract error positions from validation errors
-    // First try JSONC parser errors (with offset)
-    const errorRegions: Array<{ start: number; end: number; message: string }> = []
+    // Prepare validation issues from validation errors
+    const validationIssues: ValidationIssues = []
 
+    // First, check for JSONC parser errors (with offset)
     validation.errors.forEach((error) => {
       // Try to extract offset from error message like "at offset 123 (length: 5)"
       const match = error.message.match(/at offset (\d+) \(length: (\d+)\)/)
       if (match) {
         const offset = parseInt(match[1], 10)
         const length = parseInt(match[2], 10)
-        errorRegions.push({
+        const issue: OffsetValidationIssue = {
+          type: 'offset',
           start: offset,
           end: offset + length,
-          message: error.message
-        })
+          message: error.message,
+          keyword: error.keyword
+        }
+        validationIssues.push(issue)
       }
     })
 
-    // If we have offset-based errors (JSONC parse errors), use character-level highlighting
-    if (errorRegions.length > 0) {
-      const segments: Array<{ text: string; isError: boolean; message?: string }> = []
-      let lastIndex = 0
-
-      errorRegions.sort((a, b) => a.start - b.start).forEach((region) => {
-        if (region.start > lastIndex) {
-          segments.push({ text: code.substring(lastIndex, region.start), isError: false })
-        }
-        segments.push({
-          text: code.substring(region.start, region.end),
-          isError: true,
-          message: region.message
-        })
-        lastIndex = region.end
-      })
-
-      if (lastIndex < code.length) {
-        segments.push({ text: code.substring(lastIndex), isError: false })
-      }
-
-      return (
-        <div className="bg-[#011627] rounded-md overflow-auto">
-          <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-            {segments.map((segment, index) =>
-              segment.isError ? (
-                <span
-                  key={index}
-                  className="bg-red-500 text-white px-1 rounded cursor-help"
-                  title={segment.message}
-                >
-                  {segment.text}
-                </span>
-              ) : (
-                <span key={index}>{segment.text}</span>
-              )
-            )}
-          </pre>
-        </div>
-      )
+    // If we have offset-based issues, return early with those
+    if (validationIssues.length > 0) {
+      return <JsonCode code={code} registry={registry} validationIssues={validationIssues} />
     }
 
-    // Otherwise, use line-based highlighting for JSON schema validation errors
-    const lines = code.split('\n')
-    const errorLines = new Map<number, Array<{ message: string; keyword?: string }>>()
-
+    // Otherwise, process line-based validation errors (JSON schema validation errors)
     validation.errors.forEach((error) => {
       let targetPath = error.instancePath
 
@@ -280,44 +294,27 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
       }
 
       if (targetPath) {
-        const location = this.findPropertyInJson(code, targetPath)
+        const location = this.findPropertyInJson(code, targetPath, (this.model?.entity?.content ?? (this.props.data as any)?.entity?.content))
         if (location) {
-          for (let i = location.lineStart; i <= location.lineEnd; i++) {
-            if (!errorLines.has(i)) {
-              errorLines.set(i, [])
-            }
-            errorLines.get(i)!.push({
-              message: error.message,
-              keyword: error.keyword
-            })
+          // For GTS reference errors, only highlight the single line where the GTS ID is,
+          // not the entire object
+          const lineStart = location.lineStart + 1 // Convert to 1-based
+          const isGtsReferenceError = error.message.includes('GTS reference not found')
+          const lineEnd = isGtsReferenceError ? lineStart : location.lineEnd + 1 // Convert to 1-based
+
+          const issue: LineValidationIssue = {
+            type: 'line',
+            lineStart: lineStart,
+            lineEnd: lineEnd,
+            message: error.message,
+            keyword: error.keyword
           }
+          validationIssues.push(issue)
         }
       }
     })
 
-    return (
-      <div className="bg-[#011627] rounded-md overflow-auto">
-        <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-          {lines.map((line, index) => {
-            const errors = errorLines.get(index)
-            if (errors && errors.length > 0) {
-              const errorMessage = errors.map(e => `${e.message}${e.keyword ? ` (${e.keyword})` : ''}`).join('; ')
-              return (
-                <div key={index}>
-                  <span
-                    className="bg-red-500/20 border-l-2 border-red-500 block cursor-help"
-                    title={errorMessage}
-                  >
-                    {line}
-                  </span>
-                </div>
-              )
-            }
-            return <div key={index}>{line}</div>
-          })}
-        </pre>
-      </div>
-    )
+    return <JsonCode code={code} registry={registry} validationIssues={validationIssues} />
   }
 
   private handleToggleSection = (path: string, open: boolean) => {
@@ -358,6 +355,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     const isExpanded = this.model ? !!this.model.expanded : true // Default to expanded if no model
     const sectionStates = this.model ? (this.model.sections || {}) : {} // Default to empty sections if no model
     const overlayContainer: HTMLElement | null = (d.overlayContainer?.current as HTMLElement | null) || null
+    const registry = (d as any).registry || null
     let rawView = false
     if (this.model && this.model.isMaximized) {
         rawView = diagramRegistry.getViewState().globalRawViewPreference
@@ -400,6 +398,35 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
             <div className="flex items-center space-x-2 overflow-hidden">
               {this.getIcon()}
               <span className="truncate leading-[1.0]" dangerouslySetInnerHTML={{ __html: renderGtsNameWithBreak(this.displayLabel()) }} />
+              {(this.model?.entity?.file?.name || d.entity?.file?.name) && (
+                this.isVSCode ? (
+                  <a
+                    className="ml-2 max-w-[40%] truncate text-muted-foreground hover:underline cursor-pointer"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const filePath = (this.model?.entity?.file?.path || d.entity?.file?.path)
+                      const appApi: any = (window as any).__GTS_APP_API__
+                      try { appApi?.openFile?.(filePath) } catch {}
+                    }}
+                    title={(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                  >
+                    {(this.model?.entity?.file?.name || d.entity?.file?.name)}
+                  </a>
+                ) : (
+                  !isExpanded ? (
+                    <div className="ml-2 max-w-[40%] truncate">
+                      <Popup closeDelay={200}>
+                        <PopupTrigger>
+                          <span className="block truncate cursor-default text-gray-700">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
+                        </PopupTrigger>
+                        <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
+                          {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                        </PopupContent>
+                      </Popup>
+                    </div>
+                  ) : null
+                )
+              )}
             </div>
             <Button
               variant="ghost"
@@ -421,14 +448,29 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
             {(this.model?.entity?.file?.name || d.entity?.file?.name) && (
               <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
                 <div className="min-w-0 max-w-[90%] overflow-hidden">
-                  <Popup closeDelay={200}>
-                    <PopupTrigger>
-                      <span className="block truncate cursor-default">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
-                    </PopupTrigger>
-                    <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
-                      {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
-                    </PopupContent>
-                  </Popup>
+                  {this.isVSCode ? (
+                    <a
+                      className="block truncate text-muted-foreground hover:underline cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const filePath = (this.model?.entity?.file?.path || d.entity?.file?.path)
+                        const appApi: any = (window as any).__GTS_APP_API__
+                        try { appApi?.openFile?.(filePath) } catch {}
+                      }}
+                      title={(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                    >
+                      {(this.model?.entity?.file?.name || d.entity?.file?.name)}
+                    </a>
+                  ) : (
+                    <Popup closeDelay={200}>
+                      <PopupTrigger>
+                        <span className="block truncate cursor-default">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
+                      </PopupTrigger>
+                      <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
+                        {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                      </PopupContent>
+                    </Popup>
+                  )}
                 </div>
                 <Button
                   variant="ghost"
@@ -441,11 +483,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                 </Button>
               </div>
             )}
-            {(this.model?.validation || d.validation) && !(this.model?.validation || d.validation).valid && (
+            {(this.model?.entity?.validation || d.entity?.validation) && (this.model?.entity?.validation || d.entity?.validation).errors.length > 0 && (
               <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded select-text cursor-text">
                 <div className="text-xs font-medium text-red-800 mb-1">Validation Errors:</div>
                 <div className="space-y-1">
-                  {(this.model?.validation || d.validation).errors.map((error: any, index: number) => (
+                  {(this.model?.entity?.validation || d.entity?.validation).errors.map((error: any, index: number) => (
                     <div key={index} className="text-xs text-red-700 select-text cursor-text">
                       <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
                       {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
@@ -484,7 +526,8 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     properties={this.model.properties}
                     sectionStates={sectionStates}
                     onToggleSection={this.handleToggleSection}
-                    validationErrors={this.model?.validation?.errors}
+                    validationErrors={this.model?.entity?.validation?.errors}
+                    registry={registry}
                   />
                 </div>
               )
@@ -521,7 +564,22 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
               <div className="flex-1 p-4 overflow-auto text-sm">
                 {this.model?.entity?.file?.name && (
                   <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
-                    <span className="truncate cursor-default overflow-hidden">{this.model?.entity?.file?.name}</span>
+                    {this.isVSCode ? (
+                      <a
+                        className="truncate text-muted-foreground hover:underline cursor-pointer overflow-hidden"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          const filePath = this.model?.entity?.file?.path
+                          const appApi: any = (window as any).__GTS_APP_API__
+                          try { appApi?.openFile?.(filePath) } catch {}
+                        }}
+                        title={this.model?.entity?.file?.path || ''}
+                      >
+                        {this.model?.entity?.file?.name}
+                      </a>
+                    ) : (
+                      <span className="truncate cursor-default overflow-hidden">{this.model?.entity?.file?.name}</span>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -533,11 +591,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     </Button>
                   </div>
                 )}
-                {this.model?.validation && !this.model.validation.valid && (
+                {this.model?.entity?.validation && this.model.entity.validation.errors.length > 0 && (
                   <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text">
                     <div className="text-sm font-medium text-red-800 mb-2">Validation Errors:</div>
                     <div className="space-y-1">
-                      {this.model.validation.errors.map((error: any, index: number) => (
+                      {this.model.entity.validation.errors.map((error: any, index: number) => (
                         <div key={index} className="text-sm text-red-700 select-text cursor-text">
                           <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
                           {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
@@ -557,7 +615,8 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                         properties={this.model.properties}
                         sectionStates={this.model.sections}
                         onToggleSection={this.handleToggleSection}
-                        validationErrors={this.model?.validation?.errors}
+                        validationErrors={this.model?.entity?.validation?.errors}
+                        registry={registry}
                       />
                     </div>
                   )

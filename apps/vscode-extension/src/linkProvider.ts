@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, parseJSONC, createEntity, JsonFile, GTS_COLORS } from '@gts/shared'
+import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, parseJSONC, createEntity, JsonFile, GTS_COLORS, parseGtsIdParts } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import * as jsonc from 'jsonc-parser'
 
@@ -11,37 +11,6 @@ interface GtsIdReference {
   range: vscode.Range
   sourcePath: string
   isValid: boolean // Whether the ID matches GTS_REGEX
-}
-
-/**
- * Parse a GTS ID string and extract its parts
- * For example: "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~"
- * Returns:
- * - Part 1: "gts.x.core.events.type.v1~" (schema type)
- * - Part 2: "x.commerce.orders.order_placed.v1.0~" (instance, if exists)
- */
-function parseGtsIdParts(gtsId: string): string[] {
-  const parts: string[] = []
-
-  // Find the first tilde
-  const firstTildeIndex = gtsId.indexOf('~')
-  if (firstTildeIndex === -1) {
-    // No tilde found, return the whole ID
-    return [gtsId]
-  }
-
-  // First part: from start to first tilde (inclusive)
-  const firstPart = gtsId.substring(0, firstTildeIndex + 1)
-  parts.push(firstPart)
-
-  // Check if there's a second part after the first tilde
-  const remainingPart = gtsId.substring(firstTildeIndex + 1)
-  if (remainingPart.length > 0) {
-    // Second part exists
-    parts.push(remainingPart)
-  }
-
-  return parts
 }
 
 /**
@@ -196,23 +165,47 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   constructor(diagnosticCollection: vscode.DiagnosticCollection) {
     this.diagnosticCollection = diagnosticCollection
 
+    const schemaBackgroundColor = 'background-color: ' + GTS_COLORS.schema.background_transparent
+    const instanceBackgroundColor = 'background-color: ' + GTS_COLORS.instance.background_transparent
+
     // Create decoration types with colors from shared constants
     this.schemaDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.schema.foreground,
-      backgroundColor: GTS_COLORS.schema.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.schema.background_transparent,
+        'background-color: ' + GTS_COLORS.schema.background_transparent,
+        'border-radius: 4px',
+      ].join('; ')
     })
 
     this.instanceDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.instance.foreground,
-      backgroundColor: GTS_COLORS.instance.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.instance.background_transparent,
+        'background-color: ' + GTS_COLORS.instance.background_transparent,
+        'border-radius: 4px',       // ← side margins around the span
+      ].join('; ')
     })
 
     this.errorDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.invalid.foreground,
-      backgroundColor: GTS_COLORS.invalid.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.invalid.background_transparent,
+        'background-color: ' + GTS_COLORS.invalid.background_transparent,
+        'border-radius: 4px',    // ← side margins around the span
+      ].join('; ')
     })
 
     this.updateRegistry()
@@ -609,7 +602,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
                 document.uri.toString(),
                 rangeData,
                 suggestion,
-                true  // includeQuotes
+                false  // includeQuotes - range already excludes quotes
               ]))}`
             )
             markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
@@ -683,7 +676,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
                 document.uri.toString(),
                 rangeData,
                 suggestion,
-                true  // includeQuotes
+                false  // includeQuotes - range already excludes quotes
               ]))}`
             )
             markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)

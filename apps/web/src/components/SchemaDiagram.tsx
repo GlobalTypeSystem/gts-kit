@@ -20,7 +20,7 @@ import type { SchemaNodeModel } from './SchemaNodeModel'
 import type { SchemaEdgeModel } from './SchemaEdgeModel'
 import EdgeView from './SchemaEdgeView'
 import { Toast, type ToastType } from './ui/toast'
-import { JsonObj, JsonSchema } from '@gts/shared'
+import { JsonObj, JsonSchema, JsonRegistry } from '@gts/shared'
 // Node presentation is handled inside SchemaNodeView
 import { DiagramModel } from './DiagramModel'
 import { AppConfig } from '@/lib/config'
@@ -73,7 +73,9 @@ function enrichNodesWithHandlers(
     onMaximizeRawJson: (value: boolean) => void
   },
   overlayContainer: React.RefObject<HTMLDivElement>,
-  selectedEntity: JsonObj | JsonSchema | null
+  selectedEntity: JsonObj | JsonSchema | null,
+  registry?: JsonRegistry | null,
+  isVSCode?: boolean
 ): RFNode[] {
   return nodes.map((node) => {
     const canonicalModel = diagram.getNodeModel(node.id)
@@ -88,6 +90,8 @@ function enrichNodesWithHandlers(
         onMaximizeRawJson: handlers.onMaximizeRawJson,
         overlayContainer,
         rootNodeId: selectedEntity?.id,
+        registry,
+        isVSCode: !!isVSCode,
       },
     }
   })
@@ -186,6 +190,8 @@ interface SchemaDiagramProps {
   jsonObjs?: JsonObj[]
   onDirtyChange?: (dirty: boolean) => void
   dataVersion?: number
+  registry?: JsonRegistry | null
+  isVSCode?: boolean
 }
 
 export type SchemaDiagramHandle = {
@@ -199,7 +205,7 @@ export type SchemaDiagramHandle = {
 }
 
 export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>(
-  ({ selectedEntity, jsonSchemas, jsonObjs = [], onDirtyChange = () => {}, dataVersion = 0 }: SchemaDiagramProps, ref) => {
+  ({ selectedEntity, jsonSchemas, jsonObjs = [], onDirtyChange = () => {}, dataVersion = 0, registry = null, isVSCode = false }: SchemaDiagramProps, ref) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
@@ -301,7 +307,9 @@ export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>
         onMaximizeRawJson: handleMaximizeNodeRawJson,
       },
       overlayContainerRef,
-      selectedEntity
+      selectedEntity,
+      registry,
+      isVSCode
     )
 
     const edgesWithHandlers = enrichEdgesWithHandlers(diagram.edges, handleEdgeChange)

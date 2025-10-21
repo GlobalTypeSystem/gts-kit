@@ -3,7 +3,7 @@ import * as path from 'path'
 import { parseJSONC, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, notifyInitialScanComplete } from './validation'
+import { initValidation, validateOpenDocument } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
@@ -23,6 +23,8 @@ function getNonce(): string {
 }
 
 async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInitialScan: boolean = false, refreshFilePath?: string | null) {
+  const hasViewer = viewerPanel !== null
+
   try {
     let selectedFilePath: string | null = null
     const activeDoc = vscode.window.activeTextEditor?.document
@@ -56,11 +58,11 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInit
       } finally {
         processed++
         const elapsed = Date.now() - startTime
-        if (!progressShown && elapsed > 500) {
+        if (hasViewer && !progressShown && elapsed > 500) {
           progressShown = true
           viewerPanel!.webview.postMessage({ type: 'gts-scan-started', detail: { total } })
         }
-        if (progressShown && (processed % 50 === 0 || processed === total)) {
+        if (hasViewer && progressShown && (processed % 50 === 0 || processed === total)) {
           viewerPanel!.webview.postMessage({ type: 'gts-scan-progress', detail: { processed, total } })
         }
       }
@@ -74,7 +76,9 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInit
     await registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
 
     // Send scan result with default file path so the webview can compute initial selection
-    viewerPanel!.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
+    if (hasViewer) {
+      viewerPanel!.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
+    }
     try { setLastScanFiles(files) } catch {}
 
     // Refresh the link provider with the latest registry
@@ -86,24 +90,35 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInit
       }
     }
 
-    try {
-      const objs = Array.from(registry.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-      const schemas = Array.from(registry.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-      const invalidFilesHost = Array.from(registry.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
-      viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: { objs, schemas, invalidFiles: invalidFilesHost } })
-    } catch (ve: any) {
-      viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
+    if (hasViewer) {
+      try {
+        const objs = Array.from(registry.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
+        const schemas = Array.from(registry.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
+        const invalidFilesHost = Array.from(registry.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
+        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: { objs, schemas, invalidFiles: invalidFilesHost } })
+      } catch (ve: any) {
+        viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
+      }
     }
 
     // After scan + validation updates are delivered, instruct the webview to refresh diagrams for the updated file
-    if (refreshFilePath) {
+    if (hasViewer && refreshFilePath) {
       try {
         viewerPanel!.webview.postMessage({ type: 'gts-refresh-layout', detail: { filePath: refreshFilePath } })
       } catch {}
     }
 
+    // Re-validate all open documents now that we have the full registry
+    console.log('[GTS] Re-validating all open documents...')
+    vscode.workspace.textDocuments.forEach(doc => {
+      if (isGtsCandidateFile(doc)) {
+        void validateOpenDocument(doc)
+      }
+    })
   } catch (error: any) {
-    viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
+    if (hasViewer) {
+      viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
+    }
   }
 }
 
@@ -216,6 +231,18 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   )
 
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(async (doc) => {
+      handleFileChange(doc, 0)
+    })
+  )
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument(async (event) => {
+      handleFileChange(event.document, 500)
+    })
+  )
+
   // Show welcome message
   vscode.window.showInformationMessage('GTS Viewer is ready! Use "GTS: Open Viewer" to start.')
 }
@@ -268,9 +295,6 @@ async function performInitialScan() {
         console.error('[GTS] Error refreshing link provider:', e)
       }
     }
-
-    // Notify validation system that initial scan is complete
-    notifyInitialScanComplete()
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -291,6 +315,19 @@ export async function deactivate() {
   }
 
   layoutStorage = null
+}
+
+// Debounced rescan on change to auto-refresh layout view while typing
+let changeTimer: NodeJS.Timeout | null = null
+
+function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
+  console.log(`[GTS] File changed 1: ${doc.uri.fsPath}`)
+  if (!isGtsCandidateFile(doc)) return
+  if (changeTimer) clearTimeout(changeTimer)
+  console.log(`[GTS] File changed 2: ${doc.uri.fsPath}`)
+  changeTimer = setTimeout(() => {
+    scanAndPost('**/*.{json,jsonc,gts}', false, doc.uri.fsPath)
+  }, delayMsec)
 }
 
 function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
@@ -388,6 +425,20 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
           }
           break
         }
+
+        case 'openFile': {
+          try {
+            const filePath = message.filePath
+            if (filePath) {
+              const uri = vscode.Uri.file(filePath)
+              await vscode.window.showTextDocument(uri, { preview: false })
+            }
+          } catch (error: any) {
+            console.error('[GTS] Error opening file:', error)
+            vscode.window.showErrorMessage(`Failed to open file: ${error.message || String(error)}`)
+          }
+          break
+        }
       }
     },
     undefined,
@@ -467,6 +518,10 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
           // fire-and-forget; results come via gts-scan-* events
           vscodeApi.postMessage({ type: 'scanWorkspaceJson', id, options: opts || {} });
         },
+        openFile(filePath) {
+          // fire-and-forget; open file in VS Code editor
+          vscodeApi.postMessage({ type: 'openFile', filePath });
+        },
         // Trigger auto-scan on load
         autoScan: true
       };
@@ -486,35 +541,13 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
     } catch {}
   }
 
+  console.log('[GTS] Viewer panel created. Subscribing to file changes...')
+
+  // Handle viewer panel disposal
   viewerPanel.onDidDispose(() => {
     console.log('[GTS] Viewer panel disposed')
     viewerPanel = null
     layoutStorage = null
     hasPerformedInitialScan = false // Reset for next viewer session
   }, null, context.subscriptions)
-
-  context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(async (doc) => {
-      if (!viewerPanel) return
-      const isJsonOrGts = isGtsCandidateFile(doc)
-      if (isJsonOrGts) {
-        await scanAndPost('**/*.{json,jsonc,gts}', false, doc.uri.fsPath)
-      }
-    })
-  )
-
-  // Debounced rescan on change to auto-refresh layout view while typing
-  let changeTimer: NodeJS.Timeout | null = null
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeTextDocument(async (event) => {
-      if (!viewerPanel) return
-      const doc = event.document
-      const isJsonOrGts = isGtsCandidateFile(doc)
-      if (!isJsonOrGts) return
-      if (changeTimer) clearTimeout(changeTimer)
-      changeTimer = setTimeout(() => {
-        scanAndPost('**/*.{json,jsonc,gts}', false, doc.uri.fsPath)
-      }, 500)
-    })
-  )
 }
