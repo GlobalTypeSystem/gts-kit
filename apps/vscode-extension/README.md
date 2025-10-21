@@ -1,17 +1,18 @@
-# GTS Viewer - VSCode Extension
+# GTS Viewer — VS Code Extension
 
-Visual layout viewer for GTS (Global Type System) JSON schemas and instances. Preview and manage your JSON files with an interactive visual interface.
+<img src="./resources/gts_logo.jpeg" alt="GTS Logo" width="50%" />
 
-## Features
+Visual layout preview for GTS ([Global Type System](https://github.com/globaltypesystem/gts-spec)) JSON schemas and instances. Inspect relationships between schemas and instances with an interactive diagram and save/share custom layouts via your repository.
 
-✨ **Visual JSON Preview** - View JSON files and their schema relationships in an interactive diagram
-📁 **Context Menu Integration** - Right-click any .json or .gts file to open the preview
-💾 **Layout Persistence** - Save custom layouts to your repository's `.gts-viewer` folder
-🔄 **Auto-sync** - Layouts are stored locally in your workspace and can be committed to version control
+Key features
 
-## Getting Started
+- **Visual JSON Preview** — Interactive diagram of JSON schemas, instances and their relationship
+- **Explorer / Context Menu** — Right-click a `.json`, `.jsonc` or `.gts` file and choose **GTS: Preview Layout**
+- **Command Palette** — Run **GTS: Preview Layout** from the Command Palette
+- **Layout Persistence** — Save layouts to `.gts-viewer/` in the workspace
+- **Shareable Layouts** — Commit `.gts-viewer` to share layouts across your team
 
-### Opening Files
+Getting started
 
 There are two ways to preview a JSON or GTS file:
 
