@@ -314,6 +314,11 @@ Version 0.2.0:
 - [x] VS Code editor: ensure referred GTS ID exists in the project
 - [x] VS Code editor: suggest GTS IDs in case of misprints
 
+Version 0.2.1:
+- [x] VS Code editor: nice visual styles for GTS parts
+- [x] VS Code editor: open file in VS Code when clicked in the file name
+- [x] Web viewer: improve the error reporting
+
 Backlog:
 - [ ] Diagram: multi-select, align/distribute, grouping and subgraphs
 - [ ] Diagram: export PNG/SVG; import/export layout snapshots
