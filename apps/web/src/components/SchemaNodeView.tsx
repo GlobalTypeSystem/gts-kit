@@ -21,6 +21,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
   private onMaximize?: (isMaximized: boolean) => void
   private onMaximizeRawJson?: (isRawView: boolean) => void
   private onNodeChange?: () => void
+  private isVSCode: boolean = false
 
   constructor(props: NodeProps<any>) {
     super(props)
@@ -29,6 +30,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.onMaximize = d.onMaximize
     this.onMaximizeRawJson = d.onMaximizeRawJson
     this.onNodeChange = d.onNodeChange
+    this.isVSCode = !!d.isVSCode
   }
 
   private ensureModel() {
@@ -40,6 +42,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.onMaximize = d.onMaximize
     this.onMaximizeRawJson = d.onMaximizeRawJson
     this.onNodeChange = d.onNodeChange
+    this.isVSCode = !!d.isVSCode
   }
 
   componentDidUpdate(prevProps: NodeProps<any>) {
@@ -395,6 +398,35 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
             <div className="flex items-center space-x-2 overflow-hidden">
               {this.getIcon()}
               <span className="truncate leading-[1.0]" dangerouslySetInnerHTML={{ __html: renderGtsNameWithBreak(this.displayLabel()) }} />
+              {(this.model?.entity?.file?.name || d.entity?.file?.name) && (
+                this.isVSCode ? (
+                  <a
+                    className="ml-2 max-w-[40%] truncate text-muted-foreground hover:underline cursor-pointer"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const filePath = (this.model?.entity?.file?.path || d.entity?.file?.path)
+                      const appApi: any = (window as any).__GTS_APP_API__
+                      try { appApi?.openFile?.(filePath) } catch {}
+                    }}
+                    title={(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                  >
+                    {(this.model?.entity?.file?.name || d.entity?.file?.name)}
+                  </a>
+                ) : (
+                  !isExpanded ? (
+                    <div className="ml-2 max-w-[40%] truncate">
+                      <Popup closeDelay={200}>
+                        <PopupTrigger>
+                          <span className="block truncate cursor-default text-gray-700">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
+                        </PopupTrigger>
+                        <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
+                          {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                        </PopupContent>
+                      </Popup>
+                    </div>
+                  ) : null
+                )
+              )}
             </div>
             <Button
               variant="ghost"
@@ -416,14 +448,29 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
             {(this.model?.entity?.file?.name || d.entity?.file?.name) && (
               <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
                 <div className="min-w-0 max-w-[90%] overflow-hidden">
-                  <Popup closeDelay={200}>
-                    <PopupTrigger>
-                      <span className="block truncate cursor-default">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
-                    </PopupTrigger>
-                    <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
-                      {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
-                    </PopupContent>
-                  </Popup>
+                  {this.isVSCode ? (
+                    <a
+                      className="block truncate text-muted-foreground hover:underline cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const filePath = (this.model?.entity?.file?.path || d.entity?.file?.path)
+                        const appApi: any = (window as any).__GTS_APP_API__
+                        try { appApi?.openFile?.(filePath) } catch {}
+                      }}
+                      title={(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                    >
+                      {(this.model?.entity?.file?.name || d.entity?.file?.name)}
+                    </a>
+                  ) : (
+                    <Popup closeDelay={200}>
+                      <PopupTrigger>
+                        <span className="block truncate cursor-default">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
+                      </PopupTrigger>
+                      <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
+                        {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                      </PopupContent>
+                    </Popup>
+                  )}
                 </div>
                 <Button
                   variant="ghost"
@@ -517,7 +564,22 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
               <div className="flex-1 p-4 overflow-auto text-sm">
                 {this.model?.entity?.file?.name && (
                   <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
-                    <span className="truncate cursor-default overflow-hidden">{this.model?.entity?.file?.name}</span>
+                    {this.isVSCode ? (
+                      <a
+                        className="truncate text-muted-foreground hover:underline cursor-pointer overflow-hidden"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          const filePath = this.model?.entity?.file?.path
+                          const appApi: any = (window as any).__GTS_APP_API__
+                          try { appApi?.openFile?.(filePath) } catch {}
+                        }}
+                        title={this.model?.entity?.file?.path || ''}
+                      >
+                        {this.model?.entity?.file?.name}
+                      </a>
+                    ) : (
+                      <span className="truncate cursor-default overflow-hidden">{this.model?.entity?.file?.name}</span>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"

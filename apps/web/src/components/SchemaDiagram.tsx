@@ -74,7 +74,8 @@ function enrichNodesWithHandlers(
   },
   overlayContainer: React.RefObject<HTMLDivElement>,
   selectedEntity: JsonObj | JsonSchema | null,
-  registry?: JsonRegistry | null
+  registry?: JsonRegistry | null,
+  isVSCode?: boolean
 ): RFNode[] {
   return nodes.map((node) => {
     const canonicalModel = diagram.getNodeModel(node.id)
@@ -90,6 +91,7 @@ function enrichNodesWithHandlers(
         overlayContainer,
         rootNodeId: selectedEntity?.id,
         registry,
+        isVSCode: !!isVSCode,
       },
     }
   })
@@ -189,6 +191,7 @@ interface SchemaDiagramProps {
   onDirtyChange?: (dirty: boolean) => void
   dataVersion?: number
   registry?: JsonRegistry | null
+  isVSCode?: boolean
 }
 
 export type SchemaDiagramHandle = {
@@ -202,7 +205,7 @@ export type SchemaDiagramHandle = {
 }
 
 export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>(
-  ({ selectedEntity, jsonSchemas, jsonObjs = [], onDirtyChange = () => {}, dataVersion = 0, registry = null }: SchemaDiagramProps, ref) => {
+  ({ selectedEntity, jsonSchemas, jsonObjs = [], onDirtyChange = () => {}, dataVersion = 0, registry = null, isVSCode = false }: SchemaDiagramProps, ref) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
@@ -305,7 +308,8 @@ export const SchemaDiagram = forwardRef<SchemaDiagramHandle, SchemaDiagramProps>
       },
       overlayContainerRef,
       selectedEntity,
-      registry
+      registry,
+      isVSCode
     )
 
     const edgesWithHandlers = enrichEdgesWithHandlers(diagram.edges, handleEdgeChange)

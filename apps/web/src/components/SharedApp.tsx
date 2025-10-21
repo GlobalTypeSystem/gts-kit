@@ -479,6 +479,7 @@ export function SharedApp({
                 dataVersion={model.version}
                 onDirtyChange={setLayoutDirty}
                 registry={model.registry}
+                isVSCode={isVSCode}
               />
             ) : (
               <div className="h-full flex items-center justify-center">
