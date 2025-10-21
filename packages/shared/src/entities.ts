@@ -107,8 +107,6 @@ export interface ValidationError {
  * Result of validating a JSON entity against its schema
  */
 export interface ValidationResult {
-    /** Whether the entity is valid */
-    valid: boolean
     /** Detailed errors for each validation failure */
     errors: ValidationError[]
 }
@@ -127,13 +125,12 @@ export class JsonFile {
         this.sequencesCount = 0
         this.sequenceContent = new Map<number, any>()
 
-        this.validation = { valid: true, errors: [] }
+        this.validation = { errors: [] }
         if (typeof content === 'string') {
             try {
               const parsed = parseJSONC(content)
               this.content = parsed
             } catch (e) {
-              this.validation.valid = false
               this.validation.errors.push({
                   instancePath: '',
                   schemaPath: '#',
@@ -161,6 +158,10 @@ export class JsonEntity {
     gtsRefs?: Array<{ id: string; sourcePath: string }>
     validation?: ValidationResult
     schemaId?: string
+    /** Which field produced id (e.g., "$id", "id") */
+    selectedEntityIdField?: string
+    /** Which field produced schemaId (e.g., "$schema", "type"); if derived from id, equals selectedEntityIdField */
+    selectedSchemaIdField?: string
     description?: string
     constructor(params: {
         file?: JsonFile
@@ -176,6 +177,7 @@ export class JsonEntity {
         this.label = (params.listSequence !== undefined ? `${params.file?.name}#${params.listSequence}` : params.file?.name) || ''
         this.gtsRefs = this.extractGtsIdsFromJsonWithPaths()
         this.description = this.content?.description || ''
+        this.validation = { errors: [] }
     }
     isGtsEntity(): boolean {
         if (this.id?.startsWith('gts.')) return true
@@ -185,7 +187,6 @@ export class JsonEntity {
     }
     extractGtsIdsFromJsonWithPaths(): Array<{ id: string; sourcePath: string }> {
         const found: Array<{ id: string; sourcePath: string }> = []
-        console.log('walking on ', this.id)
         function walk(node: any, currentPath = ''): void {
           if (node === null || node === undefined) return
           if (typeof node === 'string') {
@@ -199,13 +200,10 @@ export class JsonEntity {
           if (typeof node === 'object') {
             Object.entries(node).forEach(([k, v]) => {
               const nextPath = currentPath ? `${currentPath}.${k}` : k
-
-              console.log(' - walk', k, v, typeof v)
               // Check if this is a field with a GTS ID value
               if (typeof v === 'string' && GTS_REGEX.test(v)) {
                 found.push({ id: v, sourcePath: nextPath })
               }
-
               walk(v, nextPath)
             })
           }
@@ -215,28 +213,34 @@ export class JsonEntity {
         for (const e of found) uniq.set(`${e.id}|${e.sourcePath}`, e)
         return Array.from(uniq.values())
     }
-    firstNonEmptyField(fields: string[]): string | undefined {
+    firstNonEmptyField(fields: string[]): { field: string, value: string } | undefined {
         // Prefer fields that look like GTS IDs
         for (const f of fields) {
           const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim() && GTS_REGEX.test(v)) return v
+          if (typeof v === 'string' && v.trim() && GTS_REGEX.test(v)) return { field: f, value: v }
         }
         for (const f of fields) {
           const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim()) return v
+          if (typeof v === 'string' && v.trim()) return { field: f, value: v }
         }
         return undefined
     }
     calcJsonEntityId(cfg: GtsConfig): string {
       const fields: string[] = cfg.entity_id_fields
       const candidate = this.firstNonEmptyField(fields)
-      if (candidate) return candidate
+      if (candidate) {
+        this.selectedEntityIdField = candidate.field
+        return candidate.value
+      }
       return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
     }
     calcJsonSchemaId(cfg: GtsConfig): string {
         const fields: string[] = cfg.schema_id_fields
         const candidate = this.firstNonEmptyField(fields)
-        if (candidate) return candidate
+        if (candidate) {
+          this.selectedSchemaIdField = candidate.field
+          return candidate.value
+        }
 
         // No explicit schema id found in configured fields.
         // If the object id is a GTS id, derive the schema type as the left part up to the last '~' (inclusive).
@@ -247,6 +251,8 @@ export class JsonEntity {
           // Otherwise, trim to the last '~' to get the type id
           const lastTilde = id.lastIndexOf('~')
           if (lastTilde > 0) {
+            // Mark schema derived from the entity id field
+            this.selectedSchemaIdField = this.selectedEntityIdField
             return id.substring(0, lastTilde + 1)
           }
         }
@@ -356,4 +362,22 @@ export function createEntity(params: {
   }
 
   return new JsonObj({ file: params.file, listSequence: params.listSequence, content: params.content, cfg: params.cfg })
+}
+
+export function createAbsentEntity(id: string): JsonEntity {
+  let entity = new JsonEntity({
+    file: undefined,
+    listSequence: undefined,
+    content: undefined,
+    cfg: getGtsConfig()
+  })
+  entity.id = id
+  entity.validation = { errors: [{
+    instancePath: '',
+    schemaPath: '#',
+    keyword: '',
+    message: `GTS entity not found: ${id}`,
+    params: { gtsId: id }
+  }] }
+  return entity
 }

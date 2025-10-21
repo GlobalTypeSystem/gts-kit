@@ -21,15 +21,3 @@ export function populateRegistry(
   for (const o of objs) JsonObjHash.set(o.id, o)
   for (const s of schemas) JsonSchemaHash.set(s.id, s)
 }
-
-/**
- * Fetch JSON with centralized caching. Path can be repo-relative or absolute; we normalize to leading '/'.
- */
-export async function fetchJson(path: string): Promise<any> {
-  const p = (async () => {
-    const res = await fetch(path)
-    if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status} ${res.statusText}`)
-    return res.json()
-  })()
-  return p
-}

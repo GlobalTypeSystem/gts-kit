@@ -10,24 +10,9 @@ export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 // ---- Entities ----
 
+
 export interface ValidationResult {
     errors: string[]
-}
-
-export interface SchemaNode {
-    id: string  // Node ID based on content $id or fallback
-    type: 'json' | 'schema'
-    data: {
-        label: string
-        nodeId: string  // Same as parent id, for consistency
-        content: any
-        properties?: PropertyInfo[]
-        schemaId?: string  // Schema ID reference, not path
-        validation?: ValidationResult
-        references?: Array<{ id: string, sourcePath: string }>
-        gtsIds?: Array<{ id: string, sourcePath: string }>
-    }
-    position: { x: number; y: number }
 }
 
 export interface PropertyInfo {

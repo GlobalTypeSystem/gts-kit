@@ -130,18 +130,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.forceUpdate()
   }
 
-  private handleFileNameClick = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    const appApi = (window as any).__GTS_APP_API__
-    if (appApi?.type === 'vscode' && appApi.openFile) {
-      const filePath = this.model?.entity?.file?.path
-      if (filePath) {
-        appApi.openFile(filePath)
-      }
-    }
-  }
-
-  private findPropertyInJson(code: string, instancePath: string): { lineStart: number; lineEnd: number; charStart: number; charEnd: number } | null {
+  private findPropertyInJson(code: string, instancePath: string, rootObj?: any): { lineStart: number; lineEnd: number; charStart: number; charEnd: number } | null {
     // Parse instancePath like "/retention2" or "/nested/property"
     if (!instancePath || instancePath === '/') return null
 
@@ -149,6 +138,48 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     if (pathParts.length === 0) return null
 
     const propertyName = pathParts[pathParts.length - 1]
+
+    // If we have the root object, try to resolve the exact value at the path
+    // and locate the key: value pair precisely. This avoids matching the wrong
+    // occurrence of the same property name elsewhere.
+    if (rootObj) {
+      try {
+        const segments = pathParts
+        let parent: any = rootObj
+        for (let i = 0; i < segments.length - 1; i++) {
+          const seg = segments[i]
+          const idx = String(Number(seg)) === seg ? Number(seg) : seg
+          parent = Array.isArray(parent) ? parent[idx as number] : parent?.[idx as any]
+          if (parent == null) break
+        }
+        const last = segments[segments.length - 1]
+        const key = last
+        const idxLast = String(Number(key)) === key ? Number(key) : key
+        const value = Array.isArray(parent) ? parent?.[idxLast as number] : parent?.[idxLast as any]
+
+        if (typeof value === 'string') {
+          const lines = code.split('\n')
+          const keyString = `"${key}"`
+          const valueString = JSON.stringify(value)
+          const keyValRegex = new RegExp(`${keyString}\\s*:\\s*${valueString}`)
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            const match = keyValRegex.exec(line)
+            if (match) {
+              const startIdx = match.index
+              return {
+                lineStart: i,
+                lineEnd: i,
+                charStart: startIdx,
+                charEnd: startIdx + match[0].length
+              }
+            }
+          }
+        }
+      } catch {
+        // Fall through to generic locator below
+      }
+    }
 
     // Find all occurrences of the property name in quotes
     const regex = new RegExp(`"${propertyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g')
@@ -260,12 +291,18 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
       }
 
       if (targetPath) {
-        const location = this.findPropertyInJson(code, targetPath)
+        const location = this.findPropertyInJson(code, targetPath, (this.model?.entity?.content ?? (this.props.data as any)?.entity?.content))
         if (location) {
+          // For GTS reference errors, only highlight the single line where the GTS ID is,
+          // not the entire object
+          const lineStart = location.lineStart + 1 // Convert to 1-based
+          const isGtsReferenceError = error.message.includes('GTS reference not found')
+          const lineEnd = isGtsReferenceError ? lineStart : location.lineEnd + 1 // Convert to 1-based
+
           const issue: LineValidationIssue = {
             type: 'line',
-            lineStart: location.lineStart,
-            lineEnd: location.lineEnd,
+            lineStart: lineStart,
+            lineEnd: lineEnd,
             message: error.message,
             keyword: error.keyword
           }
@@ -376,46 +413,29 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
 
         {isExpanded && (
           <CardContent className="pt-0 p-2 nodrag">
-            {(this.model?.entity?.file?.name || d.entity?.file?.name) && (() => {
-              const appApi = (window as any).__GTS_APP_API__
-              const isVSCode = appApi?.type === 'vscode'
-              const fileName = this.model?.entity?.file?.name || d.entity?.file?.name
-              const filePath = this.model?.entity?.file?.path || d.entity?.file?.path
-
-              return (
-                <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
-                  <div className="min-w-0 max-w-[90%] overflow-hidden">
-                    {isVSCode ? (
-                      <span
-                        className="block truncate cursor-pointer hover:text-blue-600 hover:underline"
-                        onClick={this.handleFileNameClick}
-                        title="Click to open file in VS Code"
-                      >
-                        {fileName}
-                      </span>
-                    ) : (
-                      <Popup closeDelay={200}>
-                        <PopupTrigger>
-                          <span className="block truncate cursor-default">{fileName}</span>
-                        </PopupTrigger>
-                        <PopupContent side="bottom" copyableText={filePath}>
-                          {filePath || ''}
-                        </PopupContent>
-                      </Popup>
-                    )}
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 bg-gray-200"
-                    onClick={this.handleToggleRawView}
-                    title={rawView ? 'Switch to formatted view' : 'Switch to raw JSON'}
-                  >
-                    {rawView ? <List className="h-3.5 w-3.5" /> : <Code2 className="h-3.5 w-3.5" />}
-                  </Button>
+            {(this.model?.entity?.file?.name || d.entity?.file?.name) && (
+              <div className="mb-2 rounded border bg-muted/40 text-muted-foreground px-2 py-1 text-xs flex items-center justify-between overflow-hidden" style={{ textOverflow: 'ellipsis' }}>
+                <div className="min-w-0 max-w-[90%] overflow-hidden">
+                  <Popup closeDelay={200}>
+                    <PopupTrigger>
+                      <span className="block truncate cursor-default">{(this.model?.entity?.file?.name || d.entity?.file?.name)}</span>
+                    </PopupTrigger>
+                    <PopupContent side="bottom" copyableText={(this.model?.entity?.file?.path || d.entity?.file?.path)}>
+                      {(this.model?.entity?.file?.path || d.entity?.file?.path) || ''}
+                    </PopupContent>
+                  </Popup>
                 </div>
-              )
-            })()}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 bg-gray-200"
+                  onClick={this.handleToggleRawView}
+                  title={rawView ? 'Switch to formatted view' : 'Switch to raw JSON'}
+                >
+                  {rawView ? <List className="h-3.5 w-3.5" /> : <Code2 className="h-3.5 w-3.5" />}
+                </Button>
+              </div>
+            )}
             {(this.model?.entity?.validation || d.entity?.validation) && (this.model?.entity?.validation || d.entity?.validation).errors.length > 0 && (
               <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded select-text cursor-text">
                 <div className="text-xs font-medium text-red-800 mb-1">Validation Errors:</div>

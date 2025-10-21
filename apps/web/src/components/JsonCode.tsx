@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
-import type { Language, PrismTheme } from 'prism-react-renderer'
-import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues, type OffsetValidationIssue, type LineValidationIssue } from '@gts/shared'
+import type { Language } from 'prism-react-renderer'
+import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues } from '@gts/shared'
 
 interface JsonCodeProps {
   code: string
@@ -14,103 +14,30 @@ interface JsonCodeProps {
 export function JsonCode({ code, language = 'json', className, registry = null, validationIssues }: JsonCodeProps) {
   const safeCode = typeof code === 'string' ? code : (code == null ? '' : String(code))
 
-  // If we have validation issues, render with error highlighting
-  if (validationIssues && validationIssues.length > 0) {
-    // Check if we have offset-based issues (JSONC parse errors)
-    const offsetIssues = validationIssues.filter((issue): issue is OffsetValidationIssue => issue.type === 'offset')
-
-    if (offsetIssues.length > 0) {
-      // Render with character-level error highlighting
-      const segments: Array<{ text: string; isError: boolean; message?: string }> = []
-      let lastIndex = 0
-
-      offsetIssues.sort((a, b) => a.start - b.start).forEach((issue) => {
-        if (issue.start > lastIndex) {
-          segments.push({ text: safeCode.substring(lastIndex, issue.start), isError: false })
+  // Build a map of line numbers to validation error messages
+  const errorLineMessages = new Map<number, string[]>()
+  if (validationIssues) {
+    validationIssues.forEach((issue) => {
+      if (issue.type === 'line') {
+        // Add all lines in the range
+        // lineStart and lineEnd are 1-based and inclusive
+        for (let lineNum = issue.lineStart; lineNum <= issue.lineEnd; lineNum++) {
+          const messages = errorLineMessages.get(lineNum) || []
+          messages.push(issue.message)
+          errorLineMessages.set(lineNum, messages)
         }
-        segments.push({
-          text: safeCode.substring(issue.start, issue.end),
-          isError: true,
-          message: issue.message
-        })
-        lastIndex = issue.end
-      })
-
-      if (lastIndex < safeCode.length) {
-        segments.push({ text: safeCode.substring(lastIndex), isError: false })
-      }
-
-      return (
-        <div className="bg-[#011627] rounded-md overflow-auto">
-          <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-            {segments.map((segment, index) =>
-              segment.isError ? (
-                <span
-                  key={index}
-                  className="bg-red-500 text-white px-1 rounded cursor-help"
-                  title={segment.message}
-                >
-                  {segment.text}
-                </span>
-              ) : (
-                <span key={index}>{segment.text}</span>
-              )
-            )}
-          </pre>
-        </div>
-      )
-    }
-
-    // Otherwise, render with line-based error highlighting
-    const lineIssues = validationIssues.filter((issue): issue is LineValidationIssue => issue.type === 'line')
-    const lines = safeCode.split('\n')
-    const errorLines = new Map<number, Array<{ message: string; keyword?: string }>>()
-
-    lineIssues.forEach((issue) => {
-      for (let i = issue.lineStart; i <= issue.lineEnd; i++) {
-        if (!errorLines.has(i)) {
-          errorLines.set(i, [])
-        }
-        errorLines.get(i)!.push({
-          message: issue.message,
-          keyword: issue.keyword
-        })
       }
     })
-
-    return (
-      <div className="bg-[#011627] rounded-md overflow-auto">
-        <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">
-          {lines.map((line, index) => {
-            const errors = errorLines.get(index)
-            if (errors && errors.length > 0) {
-              const errorMessage = errors.map(e => `${e.message}${e.keyword ? ` (${e.keyword})` : ''}`).join('; ')
-              return (
-                <div key={index}>
-                  <span
-                    className="bg-red-500/20 border-l-2 border-red-500 block cursor-help"
-                    title={errorMessage}
-                  >
-                    {line}
-                  </span>
-                </div>
-              )
-            }
-            return <div key={index}>{line}</div>
-          })}
-        </pre>
-      </div>
-    )
   }
 
-  // No validation issues - render with GTS highlighting
-  const renderWithGtsHighlights = (text: string) => {
+  // Define GTS highlighting function - returns JSX for GTS IDs, null for non-GTS
+  const renderGtsOverlay = (text: string): React.ReactNode => {
     // Remove surrounding quotes if present to test the raw value
     const raw = text.replace(/^"/, '').replace(/"$/, '')
 
     // Check if this looks like a GTS ID
     if (!raw.startsWith('gts.')) {
-      return <span>{text}</span>
+      return null // Not a GTS ID, no overlay needed
     }
 
     // Analyze the GTS ID for styling
@@ -127,24 +54,19 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
     if (!analysis.isValid) {
       return (
         <span
-          className="rounded px-1"
-          style={{
-            color: GTS_COLORS.invalid.foreground,
-            backgroundColor: GTS_COLORS.invalid.background
-          }}
+          className="text-red-400"
+          style={{ textDecoration: 'underline wavy red' }}
         >
           {text}
         </span>
       )
     }
 
-    // Render each segment with appropriate styling
-    const openQuote = text.startsWith('"') ? '"' : ''
-    const closeQuote = text.endsWith('"') ? '"' : ''
-
+    // Render styled segments
+    const hasQuotes = text.startsWith('"')
     return (
-      <span>
-        {openQuote}
+      <>
+        {hasQuotes && '"'}
         {analysis.segments.map((segment: GtsStyledSegment, idx: number) => {
           let style: CSSProperties
           if (segment.type === 'schema') {
@@ -165,19 +87,21 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
           }
 
           return (
-            <span key={idx} className="rounded px-0.5" style={style}>
+            <span key={idx} className="rounded px-0.5 mx-[0.1em]" style={style}>
               {segment.text}
             </span>
           )
         })}
-        {closeQuote}
-      </span>
+        {hasQuotes && '"'}
+      </>
     )
   }
 
+  // Always render with Prism syntax highlighting + GTS highlights
+  // If there are JSON parse errors, we'll overlay inline spans on top of the Prism tokens below
   return (
     <div className={`h-full rounded-md overflow-auto bg-[#011627] ${className || ''}`}>
-      <Highlight theme={themes.nightOwl as PrismTheme} code={safeCode} language={language}>
+      <Highlight theme={themes.nightOwl} code={safeCode} language={language}>
         {({ className: cls, style, tokens, getLineProps, getTokenProps }: {
           className: string
           style: CSSProperties
@@ -186,25 +110,53 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
           getTokenProps: (input: any) => any
         }) => (
           <pre className={`${cls} m-0 p-3 text-xs leading-5 select-text cursor-text`} style={style}>
-            {tokens.map((line: any[], i: number) => (
-              <div key={i} {...getLineProps({ line })}>
+            {tokens.map((line: any[], i: number) => {
+              const lineProps = getLineProps({ line })
+              // Convert 0-based index to 1-based line number for lookup
+              const errorMessages = errorLineMessages.get(i + 1)
+              const hasError = errorMessages && errorMessages.length > 0
+
+              return (
+              <div
+                key={i}
+                {...lineProps}
+                title={hasError ? errorMessages.join('\n') : undefined}
+                style={{
+                  ...lineProps.style,
+                  backgroundColor: hasError ? 'rgba(220, 38, 38, 0.3)' : lineProps.style?.backgroundColor,
+                  borderLeft: hasError ? '3px solid #dc2626' : 'none',
+                  paddingLeft: hasError ? '0px' : lineProps.style?.paddingLeft,
+                  left: hasError ? '-2px' : lineProps.style?.left,
+                  position: 'relative',
+                  cursor: hasError ? 'help' : lineProps.style?.cursor
+                }}
+              >
                 {line.map((token: any, key: number) => {
                   const props = getTokenProps({ token })
-                  // Prism tokens have types; we only want to process JSON string values, not property names
                   const types: string[] = token.types || (token.type ? [token.type] : [])
                   const isString = types.includes('string')
                   const isProperty = types.includes('property')
+
+                  // For string values (not property names), check if GTS overlay exists
                   if (isString && !isProperty && typeof token.content === 'string') {
-                    return (
-                      <span key={key} className={props.className} style={props.style}>
-                        {renderWithGtsHighlights(token.content)}
-                      </span>
-                    )
+                    const gtsOverlay = renderGtsOverlay(token.content)
+
+                    if (gtsOverlay) {
+                      // GTS ID detected - render overlay INSTEAD of Prism styling
+                      // The overlay has its own colors that override Prism
+                      return <span key={key}>{gtsOverlay}</span>
+                    }
+
+                    // Not a GTS ID - use Prism styling
+                    return <span key={key} className={props.className} style={props.style}>{props.children}</span>
                   }
-                  return <span key={key} {...props} />
+
+                  // For all other tokens (property names, punctuation, etc) - use Prism styling
+                  return <span key={key} className={props.className} style={props.style}>{props.children}</span>
                 })}
               </div>
-            ))}
+              )
+            })}
           </pre>
         )}
       </Highlight>

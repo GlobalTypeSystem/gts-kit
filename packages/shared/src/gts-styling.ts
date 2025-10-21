@@ -61,11 +61,11 @@ export interface GtsStyleAnalysis {
 
 /**
  * Analyze a GTS ID and determine how each part should be styled
- * 
+ *
  * @param gtsId - The GTS ID to analyze
  * @param entityLookup - Function to look up whether an entity exists and its type
  * @returns Analysis result with styled segments
- * 
+ *
  * @example
  * ```typescript
  * const analysis = analyzeGtsIdForStyling(
@@ -138,26 +138,26 @@ export function analyzeGtsIdForStyling(
 /**
  * Extract GTS IDs from a JSON string
  * This finds all string values that start with "gts."
- * 
+ *
  * @param jsonText - The JSON text to search
  * @returns Array of objects containing the GTS ID and its position
  */
 export function extractGtsIdsFromJson(jsonText: string): Array<{ id: string; start: number; end: number }> {
   const results: Array<{ id: string; start: number; end: number }> = []
-  
+
   // Match string values that contain GTS IDs
   // This regex looks for quoted strings that start with "gts."
   const stringPattern = /"(gts\.[^"]+)"/g
-  
+
   let match: RegExpExecArray | null
   while ((match = stringPattern.exec(jsonText)) !== null) {
     const gtsId = match[1]
     // The start position is after the opening quote
     const start = match.index + 1
     const end = start + gtsId.length
-    
+
     results.push({ id: gtsId, start, end })
   }
-  
+
   return results
 }

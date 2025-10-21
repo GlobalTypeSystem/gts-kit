@@ -1,4 +1,4 @@
-import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId } from './entities.js'
+import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
@@ -22,6 +22,7 @@ export class JsonRegistry {
   invalidFiles: Map<string, JsonFile>
   jsonFileObjs: Map<string, JsonObj[]>
   jsonFileSchemas: Map<string, JsonSchema[]>
+  absentGtsEntities: Map<string, JsonEntity>
 
   // Centralized fetch cache
   private fetchCache: Map<string, Promise<any>>
@@ -36,6 +37,7 @@ export class JsonRegistry {
     this.fetchCache = new Map<string, Promise<any>>()
     this.jsonFileObjs = new Map<string, JsonObj[]>()
     this.jsonFileSchemas = new Map<string, JsonSchema[]>()
+    this.absentGtsEntities = new Map<string, JsonEntity>()
     this.defaultFilePath = null
   }
 
@@ -48,21 +50,6 @@ export class JsonRegistry {
     this.jsonFileObjs.clear()
     this.jsonFileSchemas.clear()
     this.defaultFilePath = null
-  }
-
-  /**
-   * Fetch JSON with centralized caching. Path can be repo-relative or absolute; we normalize to leading '/'.
-   */
-  async fetchJson(path: string, force = false): Promise<any> {
-    const key = path.startsWith('/') ? path : `/${path}`
-    if (!force && this.fetchCache.has(key)) return this.fetchCache.get(key)!
-    const p = (async () => {
-      const res = await fetch(key)
-      if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status} ${res.statusText}`)
-      return res.json()
-    })()
-    this.fetchCache.set(key, p)
-    return p
   }
 
   /**
@@ -105,7 +92,7 @@ export class JsonRegistry {
     // Track if we found any GTS entities in this file
     let hasGtsEntities = false
 
-    if (jsonFile.validation && !jsonFile.validation.valid) {
+    if (jsonFile.validation && jsonFile.validation.errors.length > 0) {
       // Store JsonFile if it's invalid to show it in the UI
       this.invalidFiles.set(path, jsonFile)
       return
@@ -145,7 +132,29 @@ export class JsonRegistry {
    */
   async validateEntity(entity: JsonEntity): Promise<void> {
     // Initialize validation result
-    entity.validation = { valid: true, errors: [] }
+    entity.validation = { errors: [] }
+
+    // Check if all GTS references exist in the registry
+    if (entity.gtsRefs && entity.gtsRefs.length > 0) {
+      for (const ref of entity.gtsRefs) {
+        const refExists = this.jsonSchemas.has(ref.id) || this.jsonObjs.has(ref.id)
+        if (!refExists) {
+          this.absentGtsEntities.set(ref.id, createAbsentEntity(ref.id))
+          // Convert sourcePath from dot notation to slash notation for instancePath
+          // e.g., "contact.gtsIid" -> "/contact/gtsIid", "gtsIid" -> "/gtsIid"
+          const instancePath = ref.sourcePath === 'root'
+            ? '/'
+            : '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+          entity.validation.errors.push({
+            instancePath,
+            schemaPath: '#',
+            keyword: '',
+            message: `GTS reference not found: ${ref.id}`,
+            params: { gtsId: ref.id, sourcePath: ref.sourcePath }
+          })
+        }
+      }
+    }
 
     // In VS Code webview environment, skip Ajv validation to comply with CSP
     const g: any = (typeof globalThis !== 'undefined') ? (globalThis as any) : {}
@@ -159,16 +168,29 @@ export class JsonRegistry {
         const ajv = this.createAjvInstance()
         // Try to compile the schema to check if it's valid (async to support $ref resolution)
         await ajv.compileAsync(entity.content)
-        entity.validation.valid = true
       } catch (error: any) {
-        entity.validation.valid = false
-        entity.validation.errors.push({
-          instancePath: '',
-          schemaPath: '#',
-          keyword: 'schema',
-          message: `Invalid JSON Schema: ${error.message}`,
-          params: { error: error.message }
-        })
+        // If Ajv provides a detailed errors array, use it for precise paths
+        if (Array.isArray(error?.errors) && error.errors.length > 0) {
+          const detailed = this.formatValidationErrors(error.errors)
+          // Prefix message to indicate schema invalid, but keep per-error granularity
+          detailed.forEach((e) => {
+            e.keyword = e.keyword || 'schema'
+            e.message = e.message || 'Invalid JSON Schema'
+          })
+          entity.validation.errors.push(...detailed)
+        } else {
+          // Fallback: try to extract a path from error.message like "data/xxx ..."
+          const msg: string = String(error?.message || 'Unknown schema error')
+          const m = msg.match(/data(\/[A-Za-z0-9_\-\.\[\]\/]+)\b/)
+          const instancePath = m ? m[1] : ''
+          entity.validation.errors.push({
+            instancePath,
+            schemaPath: '#',
+            keyword: 'schema',
+            message: `Invalid JSON Schema: ${msg}`,
+            params: { error: msg }
+          })
+        }
       }
     } else if (entity instanceof JsonObj) {
       // Validate the object against its schema
@@ -179,9 +201,11 @@ export class JsonRegistry {
 
       const schema = this.resolveSchema(entity.schemaId)
       if (!schema) {
-        entity.validation.valid = false
+        // Prefer pointing to the field that produced schemaId
+        const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
+        const instancePath = '/' + String(idField)
         entity.validation.errors.push({
-          instancePath: '',
+          instancePath,
           schemaPath: '#',
           keyword: 'schema',
           message: `Schema not found: ${entity.schemaId}`,
@@ -198,12 +222,12 @@ export class JsonRegistry {
 
         const valid = validate(entity.content) as boolean
 
-        entity.validation.valid = valid
+        // Merge AJV errors with previously collected GTS reference errors
         if (!valid && validate.errors) {
-          entity.validation.errors = this.formatValidationErrors(validate.errors)
+          const formatted = this.formatValidationErrors(validate.errors)
+          entity.validation.errors.push(...formatted)
         }
       } catch (error: any) {
-        entity.validation.valid = false
         entity.validation.errors.push({
           instancePath: '',
           schemaPath: '#',

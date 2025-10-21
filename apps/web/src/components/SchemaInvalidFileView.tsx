@@ -11,7 +11,7 @@ interface SchemaInvalidFileViewProps {
 export class SchemaInvalidFileView extends Component<SchemaInvalidFileViewProps> {
   private renderCodeWithErrors(code: string): JSX.Element {
     const validation = this.props.model.file.validation
-    if (!validation || validation.valid || !validation.errors.length) {
+    if (!validation || validation.errors.length === 0) {
       return <pre className="m-0 p-3 text-xs leading-5 font-mono text-gray-200 select-text cursor-text">{code}</pre>
     }
 
@@ -101,7 +101,7 @@ export class SchemaInvalidFileView extends Component<SchemaInvalidFileViewProps>
           </div>
         </div>
         <div className="flex-1 p-4 overflow-auto text-sm">
-          {validation && !validation.valid && (
+          {validation && validation.errors.length > 0 && (
             <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text">
               <div className="text-sm font-medium text-red-800 mb-2">Invalid JSON File:</div>
               <div className="space-y-1">

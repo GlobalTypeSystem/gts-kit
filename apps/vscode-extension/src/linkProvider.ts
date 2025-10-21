@@ -165,23 +165,47 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   constructor(diagnosticCollection: vscode.DiagnosticCollection) {
     this.diagnosticCollection = diagnosticCollection
 
+    const schemaBackgroundColor = 'background-color: ' + GTS_COLORS.schema.background_transparent
+    const instanceBackgroundColor = 'background-color: ' + GTS_COLORS.instance.background_transparent
+
     // Create decoration types with colors from shared constants
     this.schemaDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.schema.foreground,
-      backgroundColor: GTS_COLORS.schema.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.schema.background_transparent,
+        'background-color: ' + GTS_COLORS.schema.background_transparent,
+        'border-radius: 4px',
+      ].join('; ')
     })
 
     this.instanceDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.instance.foreground,
-      backgroundColor: GTS_COLORS.instance.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.instance.background_transparent,
+        'background-color: ' + GTS_COLORS.instance.background_transparent,
+        'border-radius: 4px',       // ← side margins around the span
+      ].join('; ')
     })
 
     this.errorDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.invalid.foreground,
-      backgroundColor: GTS_COLORS.invalid.background_transparent,
-      textDecoration: 'none'
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
+      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.invalid.background_transparent,
+        'background-color: ' + GTS_COLORS.invalid.background_transparent,
+        'border-radius: 4px',    // ← side margins around the span
+      ].join('; ')
     })
 
     this.updateRegistry()

@@ -87,6 +87,31 @@ function renderGtsValue(value: string, registry: JsonRegistry | null) {
   )
 }
 
+/**
+ * Render an arbitrary text line and inline-highlight any GTS IDs it contains
+ * using the same styling as renderGtsValue().
+ */
+function renderDescriptionWithGts(text: string, registry: JsonRegistry | null) {
+  const parts: Array<JSX.Element> = []
+  // A permissive detector for GTS-like tokens in plain text
+  const regex = /gts\.[A-Za-z0-9_\.]+(?:~[A-Za-z0-9_\.]+)?~?/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    const start = match.index
+    const end = start + match[0].length
+    if (start > lastIndex) {
+      parts.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex, start)}</span>)
+    }
+    parts.push(<span key={`g-${start}`}>{renderGtsValue(match[0], registry)}</span>)
+    lastIndex = end
+  }
+  if (lastIndex < text.length) {
+    parts.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex)}</span>)
+  }
+  return <>{parts}</>
+}
+
 interface PropertyViewerProps {
   properties: PropertyInfo[]
   level?: number
@@ -135,9 +160,38 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
 
   // Check if this property has validation errors
   const propertyPath = `/${pathKey}`
+
+  const normalizeInstancePath = (p: string): string => {
+    if (!p) return p
+    // Collapse /properties/ segments used by Ajv
+    let out = p.replace(/\/properties\//g, '/')
+    // Convert bracket indices to pointer-style segments: allOf[1] -> allOf/1
+    out = out.replace(/\[(\d+)\]/g, '/$1')
+    // Iteratively strip trailing leaf nodes that refer to annotations or sub-keys
+    // like /x-*, /type, /const, /$ref, /items
+    const tail = /\/(x-[^/]+|type|const|\$ref|items)$/
+    // Guard loop count to avoid infinite replaces
+    let i = 0
+    while (tail.test(out) && i++ < 10) {
+      out = out.replace(tail, '')
+    }
+    return out
+  }
+
+  const propertyPathTree = normalizeInstancePath(propertyPath)
+
   const propertyErrors = validationErrors?.filter(err => {
-    // Direct match on instancePath
-    if (err.instancePath === propertyPath) return true
+    // Normalize error paths
+    const errPath = err.instancePath || ''
+    const errNorm = normalizeInstancePath(errPath.trim())
+    const errParentNorm = normalizeInstancePath(errPath.trim().replace(/\/x-[^/]+$/, ''))
+
+    // Direct matches (raw and normalized)
+    if (errPath === propertyPath) return true
+    if (errNorm === propertyPathTree) return true
+
+    // Parent of /x-* annotation should map to the property itself
+    if (errParentNorm === propertyPathTree) return true
 
     // Handle additionalProperties errors where instancePath is parent but message contains property name
     // e.g., "must NOT have additional property 'retention2'"
@@ -285,16 +339,12 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                 )}
               </div>
               {property.description && (
-                <div
-                  className={cn(
-                    "text-xs text-muted-foreground py-0 px-0 leading-[0.95] relative -top-px mt-0 pt-0 pb-1",
-                    isGtsType && "bg-blue-50 text-blue-800/80 rounded px-1.5",
-                    isGtsObj && "bg-green-50 text-green-800/80 rounded px-1.5"
-                  )}
-                >
+                <div className={cn(
+                  "text-xs text-muted-foreground py-0 px-0 leading-[0.95] relative -top-px mt-0 pt-0 pb-1"
+                )}>
                   {property.description.split('\n').map((line, index) => (
                     <div key={index} className={index > 0 ? 'mt-1' : undefined}>
-                      {line}
+                      {renderDescriptionWithGts(line, registry)}
                     </div>
                   ))}
                 </div>
