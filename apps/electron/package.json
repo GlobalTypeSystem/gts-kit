@@ -1,6 +1,6 @@
 {
   "name": "@gts-viewer/electron",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "GTS Viewer Electron Application",
   "main": "dist/main/main.js",
   "scripts": {
