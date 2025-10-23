@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Web App (Chrome)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:7805",
+      "webRoot": "${workspaceFolder}/apps/web",
+      "sourceMaps": true,
+      "sourceMapPathOverrides": {
+        "webpack:///./~/*": "${workspaceFolder}/apps/web/node_modules/*",
+        "webpack:///./*": "${workspaceFolder}/apps/web/*",
+        "webpack:///*": "*"
+      },
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/apps/web/**",
+        "!**/node_modules/**"
+      ]
+    },
+    {
+      "name": "Attach to Chrome",
+      "type": "chrome",
+      "request": "attach",
+      "port": 9222,
+      "webRoot": "${workspaceFolder}/apps/web",
+      "sourceMaps": true,
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/apps/web/**",
+        "!**/node_modules/**"
+      ]
+    }
+  ]
+}
