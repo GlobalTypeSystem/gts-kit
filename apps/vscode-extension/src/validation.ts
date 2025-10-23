@@ -4,7 +4,7 @@ import { JsonRegistry, ValidationError, DEFAULT_GTS_CONFIG, parseJSONC } from '@
 import { getLastScanFiles } from './scanStore'
 import { isGtsCandidateFile } from './helpers'
 
-// let diagnosticCollection: vscode.DiagnosticCollection
+let diagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
 
 /**
@@ -340,15 +340,15 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 
     if (errors.length > 0) {
       const diagnostics = validationErrorsToDiagnostics(errors, document)
-      // diagnosticCollection.set(document.uri, diagnostics)
+      diagnosticCollection.set(document.uri, diagnostics)
       console.log(`[GTS Validation] ✗ Got ${diagnostics.length} GTS diagnostics errors for ${fileName} - Errors:`, diagnostics.map(d => ({ message: d.message, range: d.range })))
     } else {
-      // diagnosticCollection.delete(document.uri)
+      diagnosticCollection.delete(document.uri)
       console.log(`[GTS Validation] ✓ No errors, cleared diagnostics for ${fileName}`)
     }
   } catch (error) {
     console.error('[GTS Validation] ✗ Error validating document:', error)
-    //diagnosticCollection.delete(document.uri)
+    diagnosticCollection.delete(document.uri)
   }
 }
 
@@ -356,8 +356,8 @@ export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 
     // Create diagnostic collection for validation errors
-    // diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
-    // context.subscriptions.push(diagnosticCollection)
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
+    context.subscriptions.push(diagnosticCollection)
 
     // Validate all open documents on activation
     const openDocs = vscode.workspace.textDocuments
@@ -380,7 +380,7 @@ export function initValidation(context: vscode.ExtensionContext) {
       vscode.workspace.onDidCloseTextDocument(doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document closed: ${doc.fileName}`)
-        // diagnosticCollection.delete(doc.uri)
+        diagnosticCollection.delete(doc.uri)
       })
     )
 
