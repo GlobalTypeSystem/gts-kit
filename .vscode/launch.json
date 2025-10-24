@@ -29,6 +29,19 @@
         "${workspaceFolder}/apps/web/**",
         "!**/node_modules/**"
       ]
+    },
+    {
+      "name": "Run VSCode Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/apps/vscode-extension"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/apps/vscode-extension/dist/**/*.js"
+      ],
+      "preLaunchTask": "${defaultBuildTask}",
+      "sourceMaps": true
     }
   ]
 }
