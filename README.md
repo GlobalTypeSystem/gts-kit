@@ -320,6 +320,19 @@ Version 0.2.1:
 - [x] Web viewer: improve the error reporting
 
 Backlog:
+- [ ] CLI tool: base node.js cli app
+- [ ] CLI tool: ID Validation - Verify identifier syntax using regex patterns
+- [ ] CLI tool: ID Extraction - Fetch identifiers from JSON objects or JSON Schema documents
+- [ ] CLI tool: ID Parsing - Decompose identifiers into constituent parts (vendor, package, namespace, type, version, etc.)
+- [ ] CLI tool: ID Pattern Matching - Match identifiers against patterns containing wildcards
+- [ ] CLI tool: ID to UUID Mapping - Generate deterministic UUIDs from GTS identifiers
+- [ ] CLI tool: Schema Validation - Validate object instances against their corresponding schemas
+- [ ] CLI tool: Relationship Resolution - Load all schemas and instances, resolve inter-dependencies, and detect broken references
+- [ ] CLI tool: Compatibility Checking - Verify that schemas with different MINOR versions are compatible
+- [ ] CLI tool: Version Casting - Transform instances between compatible MINOR versions
+- [ ] CLI tool: Query Execution - Filter identifier collections using the GTS query language
+- [ ] CLI tool: Attribute Access - Retrieve property values and metadata using the attribute selector (`@`)
+- [ ] JSON schema annotations: to support internal schema fields cross-references (e.g. properies.id references to schema $id using something like "./$id", see (gts.x.core.events.topic.v1~.schema.json)[examples/events/schemas/gts.x.core.events.topic.v1~.schema.json])
 - [ ] Diagram: multi-select, align/distribute, grouping and subgraphs
 - [ ] Diagram: export PNG/SVG; import/export layout snapshots
 - [ ] Performance: worker-based parsing, incremental graph build, virtualized lists
