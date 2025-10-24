@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, parseJSONC, createEntity, JsonFile, GTS_COLORS, parseGtsIdParts } from '@gts/shared'
+import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, GTS_COLORS, parseGtsIdParts, findSimilarEntityIds } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import * as jsonc from 'jsonc-parser'
 
@@ -26,53 +26,6 @@ function escapeMarkdown(text: string): string {
     .replace(/\]/g, '\\]')
     .replace(/</g, '\\<')
     .replace(/>/g, '\\>')
-}
-
-/**
- * Calculate Levenshtein distance between two strings
- */
-function levenshteinDistance(a: string, b: string): number {
-  const matrix: number[][] = []
-
-  for (let i = 0; i <= b.length; i++) {
-    matrix[i] = [i]
-  }
-
-  for (let j = 0; j <= a.length; j++) {
-    matrix[0][j] = j
-  }
-
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1]
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1, // substitution
-          matrix[i][j - 1] + 1,     // insertion
-          matrix[i - 1][j] + 1      // deletion
-        )
-      }
-    }
-  }
-
-  return matrix[b.length][a.length]
-}
-
-/**
- * Find similar entity IDs based on Levenshtein distance
- */
-function findSimilarEntityIds(targetId: string, allIds: string[], maxResults: number = 3): string[] {
-  const similarities = allIds.map(id => ({
-    id,
-    distance: levenshteinDistance(targetId, id)
-  }))
-
-  // Sort by distance (lower is more similar)
-  similarities.sort((a, b) => a.distance - b.distance)
-
-  // Return top N results
-  return similarities.slice(0, maxResults).map(s => s.id)
 }
 
 /**
@@ -580,7 +533,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const allEntityIds = [
         ...Array.from(this.registry.jsonSchemas.keys()),
         ...Array.from(this.registry.jsonObjs.keys())
-      ]
+      ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
 
       // Find similar entities
       const suggestions = findSimilarEntityIds(gtsId, allEntityIds, 3)
@@ -654,7 +607,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const allEntityIds = [
         ...Array.from(this.registry.jsonSchemas.keys()),
         ...Array.from(this.registry.jsonObjs.keys())
-      ]
+      ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
 
       // Find similar entities
       const suggestions = findSimilarEntityIds(entityIdToLookup, allEntityIds, 3)

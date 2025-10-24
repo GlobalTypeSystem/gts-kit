@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
 import type { Language } from 'prism-react-renderer'
-import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues } from '@gts/shared'
+import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues, GTS_REGEX, findSimilarEntityIds } from '@gts/shared'
+import { Popup, PopupTrigger, PopupContent } from '@/components/ui/popup'
 
 interface JsonCodeProps {
   code: string
@@ -50,15 +51,63 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
       return { exists: false }
     })
 
-    // If invalid format, show as error
+    // If invalid format, show as error with detailed tooltip
     if (!analysis.isValid) {
+      // Check if it's a valid GTS format according to regex
+      const isValidFormat = GTS_REGEX.test(raw)
+
+      // Build detailed error message
+      let errorMessage = `⚠️ Invalid GTS ID Format!\n\nID: ${raw}\n\n`
+
+      if (!isValidFormat) {
+        errorMessage += `This string starts with "gts." but doesn't match the valid GTS ID pattern.\n\n`
+        errorMessage += `Expected pattern:\ngts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~...]]\n\n`
+        errorMessage += `Where:\n`
+        errorMessage += `- <VENDOR>: Vendor name\n`
+        errorMessage += `- <PACKAGE>: Package name\n`
+        errorMessage += `- <NAMESPACE>: Namespace name\n`
+        errorMessage += `- <TYPE>: Type or instance name\n`
+        errorMessage += `- <MAJOR>: Major version\n`
+        errorMessage += `- <MINOR>: Minor version (optional)\n\n`
+      }
+
+      // Get similar entity suggestions if registry is available
+      if (registry) {
+        const allEntityIds = [
+          ...Array.from(registry.jsonSchemas.keys()),
+          ...Array.from(registry.jsonObjs.keys())
+        ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+
+        const suggestions = findSimilarEntityIds(raw, allEntityIds, 3)
+
+        if (suggestions.length > 0) {
+          errorMessage += `Did you mean:\n`
+          suggestions.forEach((suggestion, idx) => {
+            const entity = registry.jsonSchemas.get(suggestion) || registry.jsonObjs.get(suggestion)
+            const entityType = entity?.isSchema ? '📘 Schema' : '📄 Instance'
+            errorMessage += `${idx + 1}. ${entityType}: ${suggestion}\n`
+          })
+        } else {
+          errorMessage += `No similar entities found in the registry.`
+        }
+      }
+
+      console.log('GTS ID Format Error:', errorMessage)
+
       return (
-        <span
-          className="text-red-400"
-          style={{ textDecoration: 'underline wavy red' }}
-        >
-          {text}
-        </span>
+        <Popup>
+          <PopupTrigger>
+            <span
+              className="text-red-400"
+              style={{ textDecoration: 'underline wavy red', cursor: 'help' }}
+            >
+              {text}
+            </span>
+          </PopupTrigger>
+          <PopupContent side="top" className="border-red-700">
+            {errorMessage}
+          </PopupContent>
+        </Popup>
       )
     }
 
@@ -69,6 +118,8 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
         {hasQuotes && '"'}
         {analysis.segments.map((segment: GtsStyledSegment, idx: number) => {
           let style: CSSProperties
+          let tooltip: string | undefined
+
           if (segment.type === 'schema') {
             style = {
               color: GTS_COLORS.schema.foreground,
@@ -80,14 +131,46 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
               backgroundColor: GTS_COLORS.instance.background
             }
           } else {
+            // Invalid segment - entity not found
             style = {
               color: GTS_COLORS.invalid.foreground,
               backgroundColor: GTS_COLORS.invalid.background
             }
+
+            // Build detailed error message for missing entity
+            let errorMessage = `⚠️ GTS Entity Not Found!\n\nID: ${segment.text}\n\n`
+
+            // Get similar entity suggestions if registry is available
+            if (registry) {
+              const allEntityIds = [
+                ...Array.from(registry.jsonSchemas.keys()),
+                ...Array.from(registry.jsonObjs.keys())
+              ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+
+              const suggestions = findSimilarEntityIds(segment.text, allEntityIds, 3)
+
+              if (suggestions.length > 0) {
+                errorMessage += `Did you mean:\n`
+                suggestions.forEach((suggestion, idx) => {
+                  const entity = registry.jsonSchemas.get(suggestion) || registry.jsonObjs.get(suggestion)
+                  const entityType = entity?.isSchema ? '📘 Schema' : '📄 Instance'
+                  errorMessage += `${idx + 1}. ${entityType}: ${suggestion}\n`
+                })
+              } else {
+                errorMessage += `No similar entities found in the registry.`
+              }
+            }
+
+            tooltip = errorMessage
           }
 
           return (
-            <span key={idx} className="rounded px-0.5 mx-[0.1em]" style={style}>
+            <span
+              key={idx}
+              className={`rounded px-0.5 mx-[0.1em] ${segment.type === 'invalid' ? 'cursor-help' : ''}`}
+              style={style}
+              title={tooltip}
+            >
               {segment.text}
             </span>
           )

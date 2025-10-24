@@ -161,3 +161,77 @@ export function extractGtsIdsFromJson(jsonText: string): Array<{ id: string; sta
 
   return results
 }
+
+/**
+ * Calculate Levenshtein distance between two strings
+ * This measures the minimum number of single-character edits (insertions, deletions, substitutions)
+ * needed to transform one string into another.
+ *
+ * @param a - First string
+ * @param b - Second string
+ * @returns The Levenshtein distance between the two strings
+ *
+ * @example
+ * ```typescript
+ * levenshteinDistance('gts.acme.core.auth.Usr.v1', 'gts.acme.core.auth.User.v1') // Returns 1
+ * ```
+ */
+export function levenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = []
+
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i]
+  }
+
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j
+  }
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1]
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        )
+      }
+    }
+  }
+
+  return matrix[b.length][a.length]
+}
+
+/**
+ * Find similar entity IDs based on Levenshtein distance
+ * This is useful for providing "Did you mean...?" suggestions when a GTS ID is invalid or not found.
+ *
+ * @param targetId - The target GTS ID to find matches for
+ * @param allIds - Array of all available entity IDs
+ * @param maxResults - Maximum number of results to return (default: 3)
+ * @returns Array of similar entity IDs, sorted by similarity (most similar first)
+ *
+ * @example
+ * ```typescript
+ * const suggestions = findSimilarEntityIds(
+ *   'gts.acme.core.auth.Usr.v1',
+ *   ['gts.acme.core.auth.User.v1', 'gts.acme.core.auth.Group.v1'],
+ *   3
+ * )
+ * // Returns: ['gts.acme.core.auth.User.v1'] (only returns entities within distance threshold)
+ * ```
+ */
+export function findSimilarEntityIds(targetId: string, allIds: string[], maxResults: number = 3): string[] {
+  const similarities = allIds.map(id => ({
+    id,
+    distance: levenshteinDistance(targetId, id)
+  }))
+
+  // Sort by distance (lower is more similar)
+  similarities.sort((a, b) => a.distance - b.distance)
+
+  // Return top N results
+  return similarities.slice(0, maxResults).map(s => s.id)
+}
