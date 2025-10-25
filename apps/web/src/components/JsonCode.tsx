@@ -104,7 +104,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
               {text}
             </span>
           </PopupTrigger>
-          <PopupContent side="top" className="border-red-700">
+          <PopupContent side="bottom" className="border-red-700">
             {errorMessage}
           </PopupContent>
         </Popup>
