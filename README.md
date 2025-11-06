@@ -320,6 +320,7 @@ Version 0.2.1:
 - [x] Web viewer: improve the error reporting
 
 Backlog:
+- [ ] Add https://typespec.io/ files support (*.tsp) in parser and visual editor
 - [ ] CLI tool: base node.js cli app
 - [ ] CLI tool: ID Validation - Verify identifier syntax using regex patterns
 - [ ] CLI tool: ID Extraction - Fetch identifiers from JSON objects or JSON Schema documents
