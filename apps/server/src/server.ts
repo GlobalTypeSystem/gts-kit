@@ -6,7 +6,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join, basename } from 'node:path'
 import { openSqlite } from './db.js'
 import type { LayoutSaveRequest, LayoutSnapshot, GlobalSettings } from '@gts/shared'
-import { JsonRegistry, getGtsConfig, GtsConfig, DEFAULT_GTS_CONFIG, parseJSONC, decodeGtsId, isGtsCandidateFileName } from '@gts/shared'
+import { JsonRegistry, getGtsConfig, GtsConfig, DEFAULT_GTS_CONFIG, parseJSONC, parseYAML, decodeGtsId, isGtsCandidateFileName } from '@gts/shared'
 import { randomUUID } from 'crypto'
 import type { Server } from 'node:http'
 import type { ServerConfig } from './config.js'
@@ -48,14 +48,15 @@ async function scanDirectory(dir: string, files: Array<{ path: string; name: str
       } else if (entry.isFile() && isGtsCandidateFileName(entry.name)) {
         try {
           const content = await readFile(fullPath, 'utf-8')
-          const parsed = parseJSONC(content)
+          const isYaml = entry.name.endsWith('.yaml') || entry.name.endsWith('.yml')
+          const parsed = isYaml ? parseYAML(content) : parseJSONC(content)
           files.push({
             path: fullPath,
             name: basename(fullPath),
             content: parsed
           })
         } catch (error) {
-          // Skip invalid JSON files
+          // Skip invalid files
         }
       }
     }

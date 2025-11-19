@@ -22,7 +22,7 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts}', isInitialScan: boolean = false, refreshFilePath?: string | null) {
+async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts,yaml,yml}', isInitialScan: boolean = false, refreshFilePath?: string | null) {
   const hasViewer = viewerPanel !== null
 
   try {
@@ -253,7 +253,7 @@ export async function activate(context: vscode.ExtensionContext) {
  */
 async function performInitialScan() {
   try {
-    const include = '**/*.{json,jsonc,gts}'
+    const include = '**/*.{json,jsonc,gts,yaml,yml}'
     const exclude = '**/{node_modules,.gts-viewer,dist,.git}/**'
     const uris = await vscode.workspace.findFiles(include, exclude, 10000)
 
@@ -326,7 +326,7 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   if (changeTimer) clearTimeout(changeTimer)
   console.log(`[GTS] File changed 2: ${doc.uri.fsPath}`)
   changeTimer = setTimeout(() => {
-    scanAndPost('**/*.{json,jsonc,gts}', false, doc.uri.fsPath)
+    scanAndPost('**/*.{json,jsonc,gts,yaml,yml}', false, doc.uri.fsPath)
   }, delayMsec)
 }
 
@@ -414,7 +414,7 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
 
         case 'scanWorkspaceJson': {
           try {
-            const include: string = message.options?.include || '**/*.{json,jsonc,gts}'
+            const include: string = message.options?.include || '**/*.{json,jsonc,gts,yaml,yml}'
             const isInitialScan = !hasPerformedInitialScan
             if (isInitialScan) {
               hasPerformedInitialScan = true

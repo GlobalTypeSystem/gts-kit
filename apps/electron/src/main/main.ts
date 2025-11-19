@@ -9,10 +9,12 @@ let layoutStorage: HomeFolderLayoutStorage
 
 // Lazy-load ESM module from CJS using dynamic import
 let parseJSONCFn: ((s: string) => any) | null = null
+let parseYAMLFn: ((s: string) => any) | null = null
 async function ensureSharedLoaded() {
   if (!parseJSONCFn) {
     const mod: any = await import('@gts-viewer/shared')
     parseJSONCFn = mod.parseJSONC
+    parseYAMLFn = mod.parseYAML
   }
 }
 
@@ -89,10 +91,11 @@ ipcMain.handle('read-directory', async (_, directoryPath: string) => {
 
         if (entry.isDirectory()) {
           await readDirectory(fullPath)
-        } else if (entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.jsonc') || entry.name.endsWith('.gts'))) {
+        } else if (entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.jsonc') || entry.name.endsWith('.gts') || entry.name.endsWith('.yaml') || entry.name.endsWith('.yml'))) {
           try {
             const content = await fs.readFile(fullPath, 'utf-8')
-            const jsonContent = parseJSONCFn!(content)
+            const isYaml = entry.name.endsWith('.yaml') || entry.name.endsWith('.yml')
+            const jsonContent = isYaml ? parseYAMLFn!(content) : parseJSONCFn!(content)
             const relativePath = path.relative(directoryPath, fullPath)
             const isSchema = entry.name.includes('schema') ||
                            jsonContent.$schema ||
