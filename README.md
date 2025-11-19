@@ -130,12 +130,33 @@ gts/
 
 ## Key Features
 
-- Full support for JSONC (JSON with Comments)
-- Automated GTS entities discovery in `*.json` or `*.gts` files
-- JSON / JSON schema validation with respect of GTS ids for schemas
-- JSONC support for comments and trailing commas
+- **Multiple File Format Support:**
+  - **JSON**: Standard JSON format (`.json`, `.jsonc`, `.gts`)
+  - **JSONC**: JSON with Comments - supports single-line comments, multi-line comments, and trailing commas
+  - **YAML**: Full YAML support (`.yaml`, `.yml`) - automatically parsed and treated identically to JSON
+  - **TypeSpec**: Pre-compiled TypeSpec schemas (see below)
+- Automated GTS entities discovery across all supported file formats
+- JSON / JSON Schema validation with respect to GTS IDs for schemas
 - Visual GTS entities layout editor and persistence
 - Invalid file detection and error reporting
+
+### TypeSpec Support
+
+TypeSpec (`.tsp`) schemas must be pre-compiled to JSON Schema before use with GTS Viewer.
+
+**Setup:**
+```bash
+# Install TypeSpec compiler
+npm install -g @typespec/compiler @typespec/json-schema
+
+# Compile TypeSpec to JSON Schema
+tsp compile --emit @typespec/json-schema your-schemas/
+```
+
+**Usage:**
+Point GTS Viewer to the generated JSON Schema output directory (e.g., `tsp-output/@typespec/json-schema/`). The viewer will automatically discover and load the compiled schemas.
+
+See [gts-spec TypeSpec examples](https://github.com/globaltypesystem/gts-spec/tree/main/examples/typespec) for sample TypeSpec definitions.
 
 ## Building
 
