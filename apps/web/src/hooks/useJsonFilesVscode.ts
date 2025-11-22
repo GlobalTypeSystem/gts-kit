@@ -122,7 +122,7 @@ export function useJsonObjsVscode() {
 
     // Kick off scan for .json, .jsonc and .gts files
     try {
-      (window as any).__GTS_APP_API__?.scanWorkspaceJson?.({ include: '**/*.{json,jsonc,gts}' })
+      (window as any).__GTS_APP_API__?.scanWorkspaceJson?.({ include: '**/*.{json,jsonc,gts,yaml,yml}' })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to initiate scan')
       setLoading(false)
@@ -145,7 +145,7 @@ export function useJsonObjsVscode() {
     setError(null)
     setProgress(null)
     try {
-      (window as any).__GTS_APP_API__?.scanWorkspaceJson?.({ include: '**/*.{json,jsonc,gts}' })
+      (window as any).__GTS_APP_API__?.scanWorkspaceJson?.({ include: '**/*.{json,jsonc,gts,yaml,yml}' })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to initiate scan')
       setLoading(false)

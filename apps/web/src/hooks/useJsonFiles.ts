@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react'
-import { JsonRegistry, parseJSONC } from '@gts/shared'
+import { JsonRegistry, parseJSONC, parseYAML } from '@gts/shared'
 import { Scanner } from '../../../../packages/fs-adapters/types'
 // Use the smart scanner that automatically chooses the best implementation
 import { WebSmartScanner } from '../../../../packages/fs-adapters/fs-adapter-web/src/index'
@@ -59,23 +59,24 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     const scanner = scannerRef.current
     if (!scanner) return
 
-    const docs = await scanner.list({ glob: '**/*.{json,jsonc,gts}' })
+    const docs = await scanner.list({ glob: '**/*.{json,jsonc,gts,yaml,yml}' })
     const files: Array<{ path: string; name: string; content: any }> = []
 
     for (const d of docs) {
       try {
         const text = await scanner.read(d.path)
+        const isYaml = d.name.endsWith('.yaml') || d.name.endsWith('.yml')
         try {
-          const content = parseJSONC(text)
+          const content = isYaml ? parseYAML(text) : parseJSONC(text)
           files.push({ path: d.path, name: d.name, content })
         } catch (e) {
           if (text.includes('gts.')) {
-            // Still push malformed JSONC to show proper error messages
+            // Still push malformed files to show proper error messages
             files.push({ path: d.path, name: d.name, content: text })
           }
         }
       } catch (e) {
-        // Skip unreadable/invalid JSONC
+        // Skip unreadable/invalid files
       }
     }
 
@@ -129,7 +130,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
 
     // Start new watcher
     watcherRef.current = scanner.watch(
-      { glob: '**/*.{json,jsonc,gts}' },
+      { glob: '**/*.{json,jsonc,gts,yaml,yml}' },
       (change) => {
         console.log('File change detected:', change)
         // Reload data when files change

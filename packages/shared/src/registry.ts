@@ -421,5 +421,5 @@ export class JsonRegistry {
 }
 
 export function isGtsCandidateFileName(fileName: string): boolean {
-  return fileName.endsWith('.json') || fileName.endsWith('.jsonc') || fileName.endsWith('.gts')
+  return fileName.endsWith('.json') || fileName.endsWith('.jsonc') || fileName.endsWith('.gts') || fileName.endsWith('.yaml') || fileName.endsWith('.yml')
 }
