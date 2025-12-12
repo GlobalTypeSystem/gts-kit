@@ -3,6 +3,8 @@ export * from './entities.js'
 export { JsonRegistry } from './registry.js'
 export * from './jsonc.js'
 export * from './yaml.js'
+export * from './tsp.js'
 export { isGtsCandidateFileName } from './registry.js'
 export { GTS_COLORS } from './entities.js'
 export * from './gts-styling.js'
+
