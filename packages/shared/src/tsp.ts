@@ -1,63 +1,50 @@
-import { exec } from 'child_process'
-import { promisify } from 'util'
+import { NodeHost, compile } from '@typespec/compiler'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 
-const execAsync = promisify(exec)
-
 /**
  * Check if TypeSpec compiler is available
+ * Since we now include it as a dependency, it is always available.
+ * Keeping this for backward compatibility and potential runtime checks.
  */
+// eslint-disable-next-line @typescript-eslint/require-await
 async function isTspAvailable(): Promise<boolean> {
-    try {
-        await execAsync('tsp --version')
-        return true
-    } catch {
-        // Try with npx
-        try {
-            await execAsync('npx --yes @typespec/compiler --version', { timeout: 30000 })
-            return true
-        } catch {
-            return false
-        }
-    }
+    return true
 }
 
 /**
  * Compile a TypeSpec file to JSON Schema
  * 
  * @param filePath - Path to the .tsp file
- * @param fileContent - Content of the .tsp file (for writing to temp file if needed)
+ * @param fileContent - Content of the .tsp file (unused in NodeHost mode as it reads from FS)
  * @returns Parsed JSON Schema content or null if compilation fails
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function compileTsp(filePath: string, fileContent?: string): Promise<any | null> {
-    const available = await isTspAvailable()
-    if (!available) {
-        console.warn(`TypeSpec compiler not available, skipping: ${filePath}`)
-        return null
-    }
-
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsp-'))
     const outputDir = path.join(tmpDir, 'output')
-    fs.mkdirSync(outputDir, { recursive: true })
 
     try {
-        // Determine which command to use
-        let cmd: string
-        try {
-            await execAsync('tsp --version')
-            cmd = 'tsp'
-        } catch {
-            cmd = 'npx --yes @typespec/compiler'
+        const program = await compile(NodeHost, filePath, {
+            outputDir: outputDir,
+            emit: ["@typespec/json-schema"],
+            options: {
+                "@typespec/json-schema": {
+                    "file-type": "json"
+                }
+            }
+        });
+
+        // Check for errors
+        if (program.diagnostics.some(d => d.severity === 'error')) {
+            const errors = program.diagnostics
+                .filter(d => d.severity === 'error')
+                .map(d => d.message)
+                .join('\n');
+            console.warn(`TypeSpec compilation errors for ${filePath}:\n${errors}`);
+            return null;
         }
-
-        const compileCmd = `${cmd} compile "${filePath}" --emit @typespec/json-schema --output-dir "${outputDir}"`
-
-        await execAsync(compileCmd, {
-            cwd: path.dirname(filePath),
-            timeout: 60000
-        })
 
         // Find generated schema files
         const schemaFiles = findJsonFiles(outputDir)
@@ -104,7 +91,6 @@ function findJsonFiles(dir: string): string[] {
             results.push(fullPath)
         }
     }
-
     return results
 }
 
