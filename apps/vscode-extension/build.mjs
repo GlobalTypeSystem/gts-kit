@@ -34,7 +34,7 @@ async function main() {
     sourcesContent: false,
     platform: 'node',
     outfile: 'dist/extension.js',
-    external: ['vscode'],
+    external: ['vscode', '@typespec/compiler', '@typespec/json-schema'],
     logLevel: 'silent',
     // Mark these as external to avoid bundling issues with dynamic requires
     // They'll be loaded from node_modules at runtime

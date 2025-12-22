@@ -68,6 +68,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": "/src",
+      // Stub @typespec modules in browser - they require Node.js
+      "@typespec/compiler": "/src/stubs/typespec-stub.ts",
+      "@typespec/json-schema": "/src/stubs/typespec-stub.ts",
     },
   },
   publicDir: false,
@@ -77,5 +80,21 @@ export default defineConfig({
     fs: {
       allow: ['..', '..']
     }
+  },
+  build: {
+    rollupOptions: {
+      // Exclude @typespec modules from bundle - they use top-level await
+      // TypeSpec compilation in browser requires additional bundling setup
+      external: [
+        '@typespec/compiler',
+        '@typespec/json-schema'
+      ]
+    }
+  },
+  optimizeDeps: {
+    exclude: ['@typespec/compiler', '@typespec/json-schema', 'prettier']
+  },
+  ssr: {
+    external: ['@typespec/compiler', '@typespec/json-schema', 'prettier']
   }
 })

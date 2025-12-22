@@ -16,7 +16,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@typespec/compiler": "^1.7.1",
+    "@typespec/compiler": "^1.7.0",
     "@typespec/json-schema": "^1.7.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
