@@ -58,3 +58,6 @@ clean: ## Clean node_modules and build artifacts
 
 health: ## Check server health
 	@curl -s http://localhost:7806/health || echo "Server not responding"
+
+update-spec: ## Update gts-spec submodule to latest
+	git submodule update --remote .gts-spec
