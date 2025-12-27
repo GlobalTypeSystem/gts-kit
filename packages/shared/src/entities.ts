@@ -7,6 +7,39 @@ export const GTS_OBJ_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_
 export const GTS_TYPE_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~\s*$/
 export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
+/** The gts:// prefix used in JSON Schema $id and $ref for URI compatibility */
+export const GTS_URI_PREFIX = 'gts://'
+
+/**
+ * Normalize a GTS identifier by stripping the gts:// prefix if present.
+ * Per GTS spec, $id and $ref in JSON Schemas use gts:// prefix for URI compatibility,
+ * but the canonical identifier starts with "gts." without the URI prefix.
+ *
+ * @param id - The GTS identifier (may have gts:// prefix)
+ * @returns The canonical GTS identifier without gts:// prefix
+ *
+ * @example
+ * normalizeGtsId('gts://gts.x.core.events.type.v1~') // returns 'gts.x.core.events.type.v1~'
+ * normalizeGtsId('gts.x.core.events.type.v1~')       // returns 'gts.x.core.events.type.v1~'
+ */
+export function normalizeGtsId(id: string): string {
+  if (!id || typeof id !== 'string') return id
+  const trimmed = id.trim()
+  if (trimmed.startsWith(GTS_URI_PREFIX)) {
+    return trimmed.substring(GTS_URI_PREFIX.length)
+  }
+  return trimmed
+}
+
+/**
+ * Check if a string is a GTS identifier (with or without gts:// prefix)
+ */
+export function isGtsId(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  const normalized = normalizeGtsId(value)
+  return GTS_REGEX.test(normalized)
+}
+
 // ---- Color Definitions ----
 
 /**
@@ -35,14 +68,16 @@ export const GTS_COLORS = {
 } as const
 
 /**
- * Decode a GTS entity ID from URL encoding to ASCII.
+ * Decode a GTS entity ID from URL encoding to ASCII and normalize it.
  * Handles multiple levels of encoding (e.g., %257E -> %7E -> ~).
+ * Also strips the gts:// prefix if present (per GTS spec).
  *
- * @param id - The potentially URL-encoded entity ID
- * @returns The fully decoded entity ID in ASCII
+ * @param id - The potentially URL-encoded entity ID (may have gts:// prefix)
+ * @returns The fully decoded and normalized entity ID in ASCII
  *
  * @example
  * decodeGtsId('gts.x.core.events.type.v1%7E') // returns 'gts.x.core.events.type.v1~'
+ * decodeGtsId('gts://gts.x.core.events.type.v1~') // returns 'gts.x.core.events.type.v1~'
  * decodeGtsId('gts.x.core.events.topic.v1%7Ex.core.idp.contacts.v1') // returns 'gts.x.core.events.topic.v1~x.core.idp.contacts.v1'
  */
 export function decodeGtsId(id: string): string {
@@ -60,7 +95,8 @@ export function decodeGtsId(id: string): string {
     }
   }
 
-  return decodedId
+  // Normalize by stripping gts:// prefix if present
+  return normalizeGtsId(decodedId)
 }
 
 // Defaults are managed by AppConfig singleton; no defaults exported here
@@ -190,7 +226,9 @@ export class JsonEntity {
         function walk(node: any, currentPath = ''): void {
           if (node === null || node === undefined) return
           if (typeof node === 'string') {
-            if (GTS_REGEX.test(node)) found.push({ id: node, sourcePath: currentPath || 'root' })
+            // Normalize the value to strip gts:// prefix before checking
+            const normalized = normalizeGtsId(node)
+            if (GTS_REGEX.test(normalized)) found.push({ id: normalized, sourcePath: currentPath || 'root' })
             return
           }
           if (Array.isArray(node)) {
@@ -200,9 +238,12 @@ export class JsonEntity {
           if (typeof node === 'object') {
             Object.entries(node).forEach(([k, v]) => {
               const nextPath = currentPath ? `${currentPath}.${k}` : k
-              // Check if this is a field with a GTS ID value
-              if (typeof v === 'string' && GTS_REGEX.test(v)) {
-                found.push({ id: v, sourcePath: nextPath })
+              // Check if this is a field with a GTS ID value (normalize to strip gts:// prefix)
+              if (typeof v === 'string') {
+                const normalized = normalizeGtsId(v)
+                if (GTS_REGEX.test(normalized)) {
+                  found.push({ id: normalized, sourcePath: nextPath })
+                }
               }
               walk(v, nextPath)
             })
@@ -214,14 +255,20 @@ export class JsonEntity {
         return Array.from(uniq.values())
     }
     firstNonEmptyField(fields: string[]): { field: string, value: string } | undefined {
-        // Prefer fields that look like GTS IDs
+        // Prefer fields that look like GTS IDs (normalized to strip gts:// prefix)
         for (const f of fields) {
           const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim() && GTS_REGEX.test(v)) return { field: f, value: v }
+          if (typeof v === 'string' && v.trim()) {
+            const normalized = normalizeGtsId(v)
+            if (GTS_REGEX.test(normalized)) return { field: f, value: normalized }
+          }
         }
         for (const f of fields) {
           const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim()) return { field: f, value: v }
+          if (typeof v === 'string' && v.trim()) {
+            // Normalize even non-GTS values to strip any gts:// prefix
+            return { field: f, value: normalizeGtsId(v) }
+          }
         }
         return undefined
     }
@@ -306,7 +353,9 @@ export class JsonSchema extends JsonEntity {
         function walk(node: any, currentPath = ''): void {
           if (!node || typeof node !== 'object') return
           if (typeof (node as any).$ref === 'string') {
-            refs.push({ id: (node as any).$ref, sourcePath: currentPath ? `${currentPath}.$ref` : '$ref' })
+            // Normalize $ref value by stripping gts:// prefix (per GTS spec)
+            const refValue = normalizeGtsId((node as any).$ref)
+            refs.push({ id: refValue, sourcePath: currentPath ? `${currentPath}.$ref` : '$ref' })
           }
           if (Array.isArray(node)) {
             node.forEach((item, i) => walk(item, `${currentPath}[${i}]`))
@@ -325,28 +374,34 @@ export class JsonSchema extends JsonEntity {
 }
 
 // ---- Consolidated helpers ----
+
+/**
+ * Check if an object looks like a JSON Schema.
+ * Per GTS spec, a document is a schema if and only if it contains a $schema field.
+ */
 export function looksLikeJsonSchema(obj: any): boolean {
   if (!obj || typeof obj !== 'object') return false
-  return (
-    typeof (obj as any).$schema === 'string' ||
-    typeof (obj as any).$id === 'string' ||
-    (typeof (obj as any).type === 'string' && typeof (obj as any).properties === 'object')
-  )
+  return typeof (obj as any).$schema === 'string'
 }
 
 /**
  * Determine if an entity is a JSON Schema based on $schema URL.
- * Schemas always have $schema referring standard json schema URL.
+ * Per GTS spec:
+ * - A JSON document is a schema if and only if it contains a top-level $schema field.
+ * - If $schema is present → the document MUST be treated as a schema.
+ * - If $schema is absent → the document MUST be treated as an instance.
+ *
+ * Schemas always have $schema referring to a standard JSON Schema URL.
  */
 function isJsonSchemaEntity(entity: any): boolean {
   if (!entity || typeof entity !== 'object') return false
-  if (!entity.hasOwnProperty('$schema')) return false
+  // Per GTS spec: strict schema/instance distinction based on $schema field
+  if (!Object.prototype.hasOwnProperty.call(entity, '$schema')) return false
   if (typeof entity.$schema !== 'string') return false
   const url = entity.$schema
+  // Accept standard JSON Schema URLs
   if (url.startsWith("http://json-schema.org/")) return true
   if (url.startsWith("https://json-schema.org/")) return true
-  if (url.startsWith("gts://")) return true
-  if (url.startsWith("gts.")) return true
   return false
 }
 

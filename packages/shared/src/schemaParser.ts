@@ -143,7 +143,7 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       let isGtsType = false
       let isGtsObj = false
 
-      // Add $ref information to description (normalize to strip gts:// prefix per GTS spec v0.7)
+      // Add $ref information to description (normalize to strip gts:// prefix per GTS spec)
       if (prop.$ref) {
         const normalizedRef = normalizeGtsId(prop.$ref)
         const refDescription = `Ref: ${normalizedRef}`
@@ -185,7 +185,7 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       let isGtsType = false
       let isGtsObj = false
 
-      // Normalize $ref to strip gts:// prefix per GTS spec v0.7
+      // Normalize $ref to strip gts:// prefix per GTS spec
       const normalizedRef = subSchema.$ref ? normalizeGtsId(subSchema.$ref) : undefined
 
       // Add schema title or $ref information
@@ -218,7 +218,7 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       const subProperties = parseSchemaToProperties(subSchema)
       let description = subSchema.description
 
-      // Normalize $ref to strip gts:// prefix per GTS spec v0.7
+      // Normalize $ref to strip gts:// prefix per GTS spec
       const normalizedRef = subSchema.$ref ? normalizeGtsId(subSchema.$ref) : undefined
 
       // Add schema title or $ref information
@@ -245,7 +245,7 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       const subProperties = parseSchemaToProperties(subSchema)
       let description = subSchema.description
 
-      // Normalize $ref to strip gts:// prefix per GTS spec v0.7
+      // Normalize $ref to strip gts:// prefix per GTS spec
       const normalizedRef = subSchema.$ref ? normalizeGtsId(subSchema.$ref) : undefined
 
       // Add schema title or $ref information

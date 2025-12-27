@@ -1,4 +1,4 @@
-import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity } from './entities.js'
+import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
@@ -363,10 +363,13 @@ export class JsonRegistry {
    * Retrieve a schema using its ID. File path resolution is
    * deliberately omitted to maintain service integrity.
    * Utilized by the Ajv validator for resolving $ref references.
+   * Normalizes the ID to strip gts:// prefix (per GTS spec).
    */
   private resolveSchema(schemaId: string): JsonSchema | undefined {
-    // Attempt to find schema directly in the registry using the decoded ID
-    return this.jsonSchemas.get(schemaId)
+    // Normalize the schema ID by stripping gts:// prefix (per GTS spec)
+    const normalizedId = normalizeGtsId(schemaId)
+    // Attempt to find schema directly in the registry using the normalized ID
+    return this.jsonSchemas.get(normalizedId)
   }
 
   /**

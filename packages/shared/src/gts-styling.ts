@@ -1,4 +1,4 @@
-import { GTS_REGEX } from './entities.js'
+import { GTS_REGEX, normalizeGtsId } from './entities.js'
 
 /**
  * Parse a GTS ID string and extract its parts
@@ -6,23 +6,27 @@ import { GTS_REGEX } from './entities.js'
  * Returns:
  * - Part 1: "gts.x.core.events.type.v1~" (schema type)
  * - Part 2: "x.commerce.orders.order_placed.v1.0~" (instance, if exists)
+ *
+ * Note: The input is normalized to strip gts:// prefix (per GTS spec).
  */
 export function parseGtsIdParts(gtsId: string): string[] {
+  // Normalize to strip gts:// prefix per GTS spec
+  const normalizedId = normalizeGtsId(gtsId)
   const parts: string[] = []
 
   // Find the first tilde
-  const firstTildeIndex = gtsId.indexOf('~')
+  const firstTildeIndex = normalizedId.indexOf('~')
   if (firstTildeIndex === -1) {
     // No tilde found, return the whole ID
-    return [gtsId]
+    return [normalizedId]
   }
 
   // First part: from start to first tilde (inclusive)
-  const firstPart = gtsId.substring(0, firstTildeIndex + 1)
+  const firstPart = normalizedId.substring(0, firstTildeIndex + 1)
   parts.push(firstPart)
 
   // Check if there's a second part after the first tilde
-  const remainingPart = gtsId.substring(firstTildeIndex + 1)
+  const remainingPart = normalizedId.substring(firstTildeIndex + 1)
   if (remainingPart.length > 0) {
     // Second part exists
     parts.push(remainingPart)
@@ -62,14 +66,14 @@ export interface GtsStyleAnalysis {
 /**
  * Analyze a GTS ID and determine how each part should be styled
  *
- * @param gtsId - The GTS ID to analyze
+ * @param gtsId - The GTS ID to analyze (may have gts:// prefix which is stripped)
  * @param entityLookup - Function to look up whether an entity exists and its type
  * @returns Analysis result with styled segments
  *
  * @example
  * ```typescript
  * const analysis = analyzeGtsIdForStyling(
- *   'gts.x.core.events.topic.v1~x.core.idp.contacts.v2',
+ *   'gts://gts.x.core.events.topic.v1~x.core.idp.contacts.v2',
  *   (id) => {
  *     const entity = registry.get(id)
  *     return entity ? { exists: true, isSchema: entity.isSchema } : { exists: false }
@@ -81,23 +85,25 @@ export function analyzeGtsIdForStyling(
   gtsId: string,
   entityLookup: (entityId: string) => { exists: boolean; isSchema?: boolean }
 ): GtsStyleAnalysis {
-  const isValid = GTS_REGEX.test(gtsId)
+  // Normalize to strip gts:// prefix per GTS spec
+  const normalizedId = normalizeGtsId(gtsId)
+  const isValid = GTS_REGEX.test(normalizedId)
   const segments: GtsStyledSegment[] = []
 
   // If invalid format, return single error segment
   if (!isValid) {
     segments.push({
-      text: gtsId,
+      text: normalizedId,
       type: 'invalid',
-      entityId: gtsId,
+      entityId: normalizedId,
       startOffset: 0,
-      endOffset: gtsId.length
+      endOffset: normalizedId.length
     })
-    return { isValid: false, segments, originalId: gtsId }
+    return { isValid: false, segments, originalId: normalizedId }
   }
 
-  // Parse the GTS ID into parts
-  const parts = parseGtsIdParts(gtsId)
+  // Parse the GTS ID into parts (already normalized in parseGtsIdParts)
+  const parts = parseGtsIdParts(normalizedId)
 
   let currentOffset = 0
   for (const part of parts) {
@@ -132,29 +138,32 @@ export function analyzeGtsIdForStyling(
     currentOffset += part.length
   }
 
-  return { isValid: true, segments, originalId: gtsId }
+  return { isValid: true, segments, originalId: normalizedId }
 }
 
 /**
  * Extract GTS IDs from a JSON string
- * This finds all string values that start with "gts."
+ * This finds all string values that start with "gts." or "gts://gts."
+ * per GTS spec, $id and $ref use gts:// prefix for URI compatibility.
  *
  * @param jsonText - The JSON text to search
- * @returns Array of objects containing the GTS ID and its position
+ * @returns Array of objects containing the normalized GTS ID and its position
  */
 export function extractGtsIdsFromJson(jsonText: string): Array<{ id: string; start: number; end: number }> {
   const results: Array<{ id: string; start: number; end: number }> = []
 
-  // Match string values that contain GTS IDs
-  // This regex looks for quoted strings that start with "gts."
-  const stringPattern = /"(gts\.[^"]+)"/g
+  // Match string values that contain GTS IDs (with or without gts:// prefix)
+  // This regex looks for quoted strings that start with "gts." or "gts://gts."
+  const stringPattern = /"((?:gts:\/\/)?gts\.[^"]+)"/g
 
   let match: RegExpExecArray | null
   while ((match = stringPattern.exec(jsonText)) !== null) {
-    const gtsId = match[1]
+    const rawId = match[1]
+    // Normalize to strip gts:// prefix per GTS spec
+    const gtsId = normalizeGtsId(rawId)
     // The start position is after the opening quote
     const start = match.index + 1
-    const end = start + gtsId.length
+    const end = start + rawId.length
 
     results.push({ id: gtsId, start, end })
   }
