@@ -1,7 +1,7 @@
 {
   "gts": {
     "entity_id_fields": ["$id","gtsId", "gtsIid", "gtsOid", "gtsI", "gts_id", "gts_oid", "gts_iid", "id"],
-    "schema_id_fields": ["$schema", "gtsTid", "gtsT", "gts_t", "gts_tid", "type", "schema"]
+    "schema_id_fields": ["gtsType", "gtsTid", "gtsT", "gts_type", "gts_tid", "gts_t", "type", "schema"]
   },
   "schema": {
     "node": {
