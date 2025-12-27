@@ -282,26 +282,31 @@ export class JsonEntity {
       return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
     }
     calcJsonSchemaId(cfg: GtsConfig): string {
-        const fields: string[] = cfg.schema_id_fields
-        const candidate = this.firstNonEmptyField(fields)
-        if (candidate) {
-          this.selectedSchemaIdField = candidate.field
-          return candidate.value
-        }
-
-        // No explicit schema id found in configured fields.
-        // If the object id is a GTS id, derive the schema type as the left part up to the last '~' (inclusive).
-        const id = this.calcJsonEntityId(cfg)
-        if (id && GTS_REGEX.test(id)) {
+        // PRIORITY 1: Check entity_id_fields for a GTS ID (gtsId, id, etc.)
+        // If found and it's a chained ID, extract schema from the chain
+        const entityIdCandidate = this.firstNonEmptyField(cfg.entity_id_fields)
+        if (entityIdCandidate && GTS_REGEX.test(entityIdCandidate.value)) {
+          const id = entityIdCandidate.value
           // If already a type id (ends with '~'), use it as-is
-          if (id.endsWith('~')) return id
-          // Otherwise, trim to the last '~' to get the type id
+          if (id.endsWith('~')) {
+            this.selectedSchemaIdField = entityIdCandidate.field
+            return id
+          }
+          // For chained IDs (well-known instances), extract schema: everything up to and including last '~'
           const lastTilde = id.lastIndexOf('~')
           if (lastTilde > 0) {
             // Mark schema derived from the entity id field
-            this.selectedSchemaIdField = this.selectedEntityIdField
+            this.selectedSchemaIdField = entityIdCandidate.field
             return id.substring(0, lastTilde + 1)
           }
+        }
+
+        // PRIORITY 2: Fall back to explicit schema_id_fields (type, gtsTid, etc.)
+        // Only check these if no GTS ID was found in entity_id_fields
+        const schemaIdCandidate = this.firstNonEmptyField(cfg.schema_id_fields)
+        if (schemaIdCandidate) {
+          this.selectedSchemaIdField = schemaIdCandidate.field
+          return schemaIdCandidate.value
         }
 
         // Fallback to file path
