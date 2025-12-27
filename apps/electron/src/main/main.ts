@@ -97,9 +97,8 @@ ipcMain.handle('read-directory', async (_, directoryPath: string) => {
             const isYaml = entry.name.endsWith('.yaml') || entry.name.endsWith('.yml')
             const jsonContent = isYaml ? parseYAMLFn!(content) : parseJSONCFn!(content)
             const relativePath = path.relative(directoryPath, fullPath)
-            const isSchema = entry.name.includes('schema') ||
-                           jsonContent.$schema ||
-                           jsonContent.$id
+            // Per GTS spec: a document is a schema if and only if it has a $schema field
+            const isSchema = typeof jsonContent.$schema === 'string'
 
             files.push({
               path: relativePath,
