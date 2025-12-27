@@ -1,0 +1,3 @@
+[submodule ".gts-spec"]
+	path = .gts-spec
+	url = https://github.com/GlobalTypeSystem/gts-spec.git
