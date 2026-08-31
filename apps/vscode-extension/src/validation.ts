@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
-import { ValidationError, DEFAULT_GTS_CONFIG, parseJSONC } from '@gts/shared'
+import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
 import { isGtsCandidateFile } from './helpers'
@@ -326,14 +326,15 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 
     console.log(`[GTS Validation] Validating: ${filePath}`)
 
-    // Parse the document content to JSON
+    // Parse the document content, choosing the parser by extension so YAML files
+    // are not mis-parsed as JSONC.
     let content: any
     let parseErrorMessage: string | null = null
     try {
-      content = parseJSONC(text)
+      content = parseGtsFileContent(fileName, text)
     } catch (parseError: any) {
       parseErrorMessage = parseError?.message || String(parseError)
-      console.log(`[GTS Validation] Failed to parse JSON: ${parseErrorMessage}`)
+      console.log(`[GTS Validation] Failed to parse ${isYamlFileName(fileName) ? 'YAML' : 'JSON'}: ${parseErrorMessage}`)
       // If parsing fails, store as text and let registry handle it
       content = text
     }
@@ -362,7 +363,7 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
         instancePath: '',
         schemaPath: '#',
         keyword: 'parse',
-        message: `Invalid JSON: ${parseErrorMessage}`,
+        message: `Invalid ${isYamlFileName(fileName) ? 'YAML' : 'JSON'}: ${parseErrorMessage}`,
         params: { error: parseErrorMessage }
       }]
     } else if (invalid?.validation && invalid.validation.errors.length > 0) {

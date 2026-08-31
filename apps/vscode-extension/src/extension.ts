@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
-import { parseJSONC, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
+import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
@@ -108,11 +108,12 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
         if (!text.includes('gts.')) {
           continue
         }
+        const name = path.basename(uri.fsPath)
         try {
-          const content = parseJSONC(text)
-          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
+          const content = parseGtsFileContent(name, text)
+          files.push({ path: uri.fsPath, name, content })
         } catch (e) {
-          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content: text })
+          files.push({ path: uri.fsPath, name, content: text })
         }
       } catch (e) {
       } finally {
@@ -397,9 +398,10 @@ async function readGtsCandidateFiles(
       }
       // Quick pre-filter: a file with no "gts." substring cannot hold a GTS id.
       if (!text.includes('gts.')) continue
+      const name = path.basename(uri.fsPath)
       let content: any
-      try { content = parseJSONC(text) } catch { content = text }
-      files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
+      try { content = parseGtsFileContent(name, text) } catch { content = text }
+      files.push({ path: uri.fsPath, name, content })
     } catch (e) {
       // Unreadable file — skip.
     }
@@ -550,9 +552,10 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   try {
     const data = await vscode.workspace.fs.readFile(uri)
     const text = Buffer.from(data).toString('utf8')
+    const name = path.basename(fsPath)
     let content: any
-    try { content = parseJSONC(text) } catch { content = text }
-    indexFileInRegistry(fsPath, path.basename(fsPath), content)
+    try { content = parseGtsFileContent(name, text) } catch { content = text }
+    indexFileInRegistry(fsPath, name, content)
   } catch (e) {
     console.error('[GTS] Failed to reindex changed file from disk:', fsPath, e)
     return
@@ -599,9 +602,10 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   // annotations in sync with the live document as the user types. No Ajv here.
   try {
     const text = doc.getText()
+    const name = path.basename(doc.uri.fsPath)
     let content: any
-    try { content = parseJSONC(text) } catch { content = text }
-    indexFileInRegistry(doc.uri.fsPath, path.basename(doc.uri.fsPath), content)
+    try { content = parseGtsFileContent(name, text) } catch { content = text }
+    indexFileInRegistry(doc.uri.fsPath, name, content)
   } catch (e) {
     console.error('[GTS] Incremental index failed:', e)
   }

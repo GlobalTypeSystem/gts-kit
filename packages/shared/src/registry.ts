@@ -98,10 +98,15 @@ export class JsonRegistry {
       return
     }
 
+    // Use the file's parsed content: JsonFile parses raw string input (JSON/JSONC
+    // or YAML, by extension) in its constructor, so this is an object/array even
+    // when a raw string was passed in.
+    const parsedContent = jsonFile.content
+
     // Normalize content to array and process each entity
-    const entities = normalizeToArray(content)
+    const entities = normalizeToArray(parsedContent)
     entities.forEach((entityContent: any, idx: number) => {
-      const seq = Array.isArray(content) ? idx : undefined
+      const seq = Array.isArray(parsedContent) ? idx : undefined
       const entity = createEntity({
         file: jsonFile,
         listSequence: seq,

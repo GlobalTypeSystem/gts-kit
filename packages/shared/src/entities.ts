@@ -1,4 +1,4 @@
-import { parseJSONC } from './jsonc.js'
+import { parseGtsFileContent, isYamlFileName } from './parse.js'
 
 // ---- Helpers  ----
 
@@ -275,14 +275,16 @@ export class JsonFile {
         this.validation = { errors: [] }
         if (typeof content === 'string') {
             try {
-              const parsed = parseJSONC(content)
+              // Parse by extension so YAML files are not mis-parsed as JSONC.
+              const parsed = parseGtsFileContent(name, content)
               this.content = parsed
             } catch (e) {
+              const kind = isYamlFileName(name) ? 'YAML' : 'JSON'
               this.validation.errors.push({
                   instancePath: '',
                   schemaPath: '#',
                   keyword: 'type',
-                  message: 'Invalid JSONC: ' + e,
+                  message: `Invalid ${kind}: ` + e,
                   params: { type: 'object' }
               })
             }
