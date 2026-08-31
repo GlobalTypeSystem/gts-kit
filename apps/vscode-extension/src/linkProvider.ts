@@ -132,8 +132,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     this.schemaDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.schema.foreground,
       rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
-      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      // No outer spacing on the left segment; keep the string start aligned.
+      before: { contentText: '', margin: '0 0 0 0' },
+      after:  { contentText: '', margin: '0 0 0 0' },
       textDecoration: [
         'none',
         'border: 1px solid ' + GTS_COLORS.schema.background_transparent,
@@ -145,8 +146,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     this.instanceDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.instance.foreground,
       rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
-      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      // Keep the only spacing between segments (after `~`, before instance part).
+      before: { contentText: '', margin: '0 0 0 0.1em' },
+      after:  { contentText: '', margin: '0 0 0 0' },
       textDecoration: [
         'none',
         'border: 1px solid ' + GTS_COLORS.instance.background_transparent,
@@ -158,8 +160,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     this.errorDecorationType = vscode.window.createTextEditorDecorationType({
       color: GTS_COLORS.invalid.foreground,
       rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
-      before: { contentText: '', margin: '0 0.1em 0 0' }, // left space
-      after:  { contentText: '', margin: '0 0 0 0.1em' }, // right space
+      before: { contentText: '', margin: '0 0 0 0' },
+      after:  { contentText: '', margin: '0 0 0 0' },
       textDecoration: [
         'none',
         'border: 1px solid ' + GTS_COLORS.invalid.background_transparent,
