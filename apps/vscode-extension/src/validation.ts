@@ -72,6 +72,17 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   // Remove leading slash from instancePath (e.g., '/users/0/email' -> 'users/0/email')
   const path = instancePath.replace(/^\//, '')
 
+  // For gts:// prefix violations, highlight the offending string value precisely.
+  if (error.keyword === 'gts-uri-prefix' && error.params && 'value' in error.params) {
+    const value = String((error.params as any).value)
+    const idx = text.indexOf(`"${value}"`)
+    if (idx !== -1) {
+      const startPos = document.positionAt(idx + 1) // +1 to skip opening quote
+      const endPos = document.positionAt(idx + 1 + value.length)
+      return new vscode.Range(startPos, endPos)
+    }
+  }
+
   // For schema errors, find the object that references the missing schema
   if (error.keyword === 'schema') {
     console.log(`[GTS Validation] Schema error detected, path='${path}'`)

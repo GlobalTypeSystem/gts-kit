@@ -1,5 +1,6 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, GTS_REGEX, GTS_COLORS, parseGtsIdParts, findSimilarEntityIds } from '@gts/shared'
+import { JsonRegistry, GTS_REGEX, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix } from '@gts/shared'
+import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
 import * as jsonc from 'jsonc-parser'
 
@@ -7,10 +8,19 @@ import * as jsonc from 'jsonc-parser'
  * Represents a GTS ID reference found in the document
  */
 interface GtsIdReference {
+  /** Canonical GTS ID with any gts:// prefix stripped (used for lookups). */
   id: string
+  /** The original, un-normalized string value as written in the document. */
+  rawValue: string
+  /** Length of the gts:// prefix present in rawValue (0 when absent). */
+  uriPrefixLength: number
+  /** The JSON leaf field name this value is assigned to (e.g. "$id", "type"). */
+  fieldName: string
   range: vscode.Range
   sourcePath: string
   isValid: boolean // Whether the ID matches GTS_REGEX
+  /** gts:// prefix problem for this value's field, if any. */
+  urlPrefixIssue: GtsPrefixIssue | null
 }
 
 /**
@@ -228,6 +238,22 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const references = this.findGtsReferences(document)
 
     for (const ref of references) {
+      // Malformed gts:// prefix usage (required in JSON Schema URL fields, forbidden
+      // elsewhere). Highlight the whole value in red; the authoritative diagnostic is
+      // published by the shared validator (validation.ts) to avoid duplicate markers.
+      if (ref.urlPrefixIssue) {
+        const text = document.getText()
+        const refOffset = document.offsetAt(ref.range.start)
+        let gtsStartOffset = refOffset
+        if (text[refOffset] === '"') {
+          gtsStartOffset = refOffset + 1
+        }
+        const startPos = document.positionAt(gtsStartOffset)
+        const endPos = document.positionAt(gtsStartOffset + ref.rawValue.length)
+        errorRanges.push(new vscode.Range(startPos, endPos))
+        continue
+      }
+
       // Check if the GTS ID is valid according to GTS_REGEX
       if (!ref.isValid) {
         // Invalid GTS format - mark the entire string as error
@@ -238,14 +264,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           gtsStartOffset = refOffset + 1
         }
         const startPos = document.positionAt(gtsStartOffset)
-        const endPos = document.positionAt(gtsStartOffset + ref.id.length)
+        const endPos = document.positionAt(gtsStartOffset + ref.rawValue.length)
         const errorRange = new vscode.Range(startPos, endPos)
         errorRanges.push(errorRange)
 
         // Create diagnostic for invalid GTS format
         const diagnostic = new vscode.Diagnostic(
           errorRange,
-          `Invalid GTS ID format: "${ref.id}". Expected pattern: gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~...]]`,
+          `Invalid GTS ID format: "${ref.rawValue}". Expected pattern: gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~...]]`,
           vscode.DiagnosticSeverity.Error
         )
         diagnostic.source = 'gts'
@@ -261,11 +287,13 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const text = document.getText()
       const refOffset = document.offsetAt(ref.range.start)
 
-      // Find the actual start of the GTS ID (after the opening quote)
+      // Find the actual start of the GTS ID (after the opening quote and any
+      // gts:// URI prefix, so the highlighted segments align with the canonical id).
       let gtsStartOffset = refOffset
       if (text[refOffset] === '"') {
         gtsStartOffset = refOffset + 1
       }
+      gtsStartOffset += ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
       for (const part of parts) {
@@ -338,8 +366,10 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       // Visit all nodes in the tree
       jsonc.visit(text, {
         onLiteralValue: (value: any, offset: number, length: number, startLine: number, startCharacter: number) => {
-          // Check if this is a string value that starts with "gts."
-          if (typeof value === 'string' && value.startsWith('gts.')) {
+          // Consider strings written in canonical form ("gts.") as well as JSON
+          // Schema URI form ("gts://"). Both are surfaced so we can flag misuse of
+          // the gts:// prefix in either direction.
+          if (typeof value === 'string' && (value.startsWith('gts.') || value.startsWith(GTS_URI_PREFIX))) {
             const startPos = document.positionAt(offset)
             const endPos = document.positionAt(offset + length)
             const range = new vscode.Range(startPos, endPos)
@@ -349,13 +379,32 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
             const path = jsonc.getNodePath(node?.parent || node || root)
             const sourcePath = path.join('.')
 
-            const isValid = GTS_REGEX.test(value)
+            // Determine the leaf field name this value is assigned to. The value
+            // node's own path ends with its property key (or an array index).
+            const valuePath = jsonc.getNodePath(node || root)
+            let fieldName = ''
+            for (let i = valuePath.length - 1; i >= 0; i--) {
+              if (typeof valuePath[i] === 'string') {
+                fieldName = valuePath[i] as string
+                break
+              }
+            }
+
+            const rawValue = value
+            const id = normalizeGtsId(rawValue)
+            const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
+            const isValid = GTS_REGEX.test(id)
+            const urlPrefixIssue = checkGtsUriPrefix(fieldName, rawValue)
 
             references.push({
-              id: value,
+              id,
+              rawValue,
+              uriPrefixLength,
+              fieldName,
               range,
               sourcePath,
-              isValid
+              isValid,
+              urlPrefixIssue
             })
           }
         }
@@ -384,6 +433,11 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const references = this.findGtsReferences(document)
 
     for (const ref of references) {
+      // Don't link malformed or prefix-violating values.
+      if (ref.urlPrefixIssue || !ref.isValid) {
+        continue
+      }
+
       // Parse the GTS ID into parts
       const parts = parseGtsIdParts(ref.id)
 
@@ -391,11 +445,13 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const text = document.getText()
       const refOffset = document.offsetAt(ref.range.start)
 
-      // Find the actual start of the GTS ID (after the opening quote)
+      // Find the actual start of the GTS ID (after the opening quote and any
+      // gts:// URI prefix).
       let gtsStartOffset = refOffset
       if (text[refOffset] === '"') {
         gtsStartOffset = refOffset + 1
       }
+      gtsStartOffset += ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
       for (const part of parts) {
@@ -490,11 +546,38 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     markdown.isTrusted = true
     markdown.supportHtml = false
 
+    // Malformed gts:// prefix usage - explain the rule and offer a one-click fix.
+    if (matchedRef.urlPrefixIssue) {
+      const startPos = document.positionAt(gtsStartOffset)
+      const endPos = document.positionAt(gtsStartOffset + matchedRef.rawValue.length)
+      const hoverRange = new vscode.Range(startPos, endPos)
+
+      markdown.appendMarkdown(`⚠️ Malformed GTS identifier\n\n`)
+      markdown.appendMarkdown(`${escapeMarkdown(matchedRef.urlPrefixIssue.message)}\n\n`)
+
+      const rangeData = {
+        start: { line: hoverRange.start.line, character: hoverRange.start.character },
+        end: { line: hoverRange.end.line, character: hoverRange.end.character }
+      }
+      const commandUri = vscode.Uri.parse(
+        `command:gts.replaceGtsId?${encodeURIComponent(JSON.stringify([
+          document.uri.toString(),
+          rangeData,
+          matchedRef.urlPrefixIssue.suggestion,
+          false  // includeQuotes - range already excludes quotes
+        ]))}`
+      )
+      markdown.appendMarkdown(`**Fix:** (click to replace)\n\n`)
+      markdown.appendMarkdown(`- [${escapeMarkdown(matchedRef.urlPrefixIssue.suggestion)}](${commandUri.toString()})\n`)
+
+      return new vscode.Hover(markdown, hoverRange)
+    }
+
     // Check if the GTS ID is invalid
     if (!matchedRef.isValid) {
       // Invalid GTS format - show error with suggestions
       const startPos = document.positionAt(gtsStartOffset)
-      const endPos = document.positionAt(gtsStartOffset + gtsId.length)
+      const endPos = document.positionAt(gtsStartOffset + matchedRef.rawValue.length)
       const hoverRange = new vscode.Range(startPos, endPos)
 
       markdown.appendMarkdown(`⚠️ Invalid GTS ID Format!\n\n`)
@@ -551,12 +634,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       return new vscode.Hover(markdown, hoverRange)
     }
 
-    // Parse the GTS ID to determine which part we're hovering over
+    // Parse the GTS ID to determine which part we're hovering over. The canonical
+    // parts start after the quote and any gts:// URI prefix.
     const parts = parseGtsIdParts(gtsId)
+    const gtsBodyOffset = gtsStartOffset + matchedRef.uriPrefixLength
 
     // Determine which part the cursor is on
     const cursorOffset = document.offsetAt(position)
-    const relativeOffset = cursorOffset - gtsStartOffset
+    const relativeOffset = cursorOffset - gtsBodyOffset
 
     let entityIdToLookup = gtsId
     let hoverRange = matchedRef.range
@@ -566,14 +651,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       if (relativeOffset < firstPartLength) {
         // Cursor is on the first part
         entityIdToLookup = parts[0]
-        const startPos = document.positionAt(gtsStartOffset)
-        const endPos = document.positionAt(gtsStartOffset + firstPartLength)
+        const startPos = document.positionAt(gtsBodyOffset)
+        const endPos = document.positionAt(gtsBodyOffset + firstPartLength)
         hoverRange = new vscode.Range(startPos, endPos)
       } else {
         // Cursor is on the second part
         entityIdToLookup = parts[0] + parts[1]
-        const startPos = document.positionAt(gtsStartOffset + firstPartLength)
-        const endPos = document.positionAt(gtsStartOffset + gtsId.length)
+        const startPos = document.positionAt(gtsBodyOffset + firstPartLength)
+        const endPos = document.positionAt(gtsBodyOffset + gtsId.length)
         hoverRange = new vscode.Range(startPos, endPos)
       }
     }

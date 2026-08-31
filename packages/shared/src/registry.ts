@@ -1,4 +1,4 @@
-import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId } from './entities.js'
+import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
@@ -152,6 +152,26 @@ export class JsonRegistry {
   async validateEntity(entity: JsonEntity): Promise<void> {
     // Initialize validation result
     entity.validation = { errors: [] }
+
+    // Enforce gts:// URI-prefix rules: the prefix is required in JSON Schema URL
+    // fields ($id, $ref, x-gts-traits-schema) and forbidden everywhere else.
+    for (const violation of findGtsPrefixViolations(entity.content)) {
+      const instancePath = violation.sourcePath === 'root'
+        ? '/'
+        : '/' + violation.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+      entity.validation.errors.push({
+        instancePath,
+        schemaPath: '#',
+        keyword: 'gts-uri-prefix',
+        message: violation.issue.message,
+        params: {
+          fieldName: violation.fieldName,
+          value: violation.rawValue,
+          suggestion: violation.issue.suggestion,
+          kind: violation.issue.kind
+        }
+      })
+    }
 
     // Check if all GTS references exist in the registry
     if (entity.gtsRefs && entity.gtsRefs.length > 0) {

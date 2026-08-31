@@ -40,6 +40,117 @@ export function isGtsId(value: string): boolean {
   return GTS_REGEX.test(normalized)
 }
 
+/**
+ * JSON object field names (leaf keys) whose string values are consumed by JSON
+ * Schema as URLs and therefore MUST carry the gts:// URI prefix when they hold a
+ * GTS identifier. Everywhere else a GTS identifier MUST be written in canonical
+ * form (gts.<...>) WITHOUT the gts:// prefix.
+ *
+ * @see https://json-schema.org — $id / $ref are resolved as URI references.
+ */
+export const GTS_URI_PREFIX_FIELDS: readonly string[] = ['$id', '$ref', 'x-gts-traits-schema']
+
+/**
+ * Whether GTS identifiers appearing as the value of the given field must carry the
+ * gts:// URI prefix (i.e. the field is a JSON Schema URL context).
+ */
+export function fieldRequiresGtsUriPrefix(fieldName: string | undefined | null): boolean {
+  if (!fieldName) return false
+  return GTS_URI_PREFIX_FIELDS.includes(fieldName)
+}
+
+/** Kind of gts:// prefix problem detected for a GTS identifier in a specific field. */
+export type GtsPrefixIssueKind = 'missing-uri-prefix' | 'unexpected-uri-prefix'
+
+/** A detected gts:// prefix problem, with a human-readable explanation. */
+export interface GtsPrefixIssue {
+  kind: GtsPrefixIssueKind
+  /** Human-readable explanation suitable for a diagnostic/hover popup. */
+  message: string
+  /** The corrected value the user should use instead of the raw value. */
+  suggestion: string
+}
+
+/**
+ * Validate gts:// prefix usage of a GTS identifier value against the field it lives
+ * in. Returns a {@link GtsPrefixIssue} when the prefix usage is wrong, otherwise null.
+ *
+ * Rules (per GTS spec):
+ * - In JSON Schema URL fields ({@link GTS_URI_PREFIX_FIELDS}) a GTS identifier MUST
+ *   start with "gts://gts." — a bare "gts." value is malformed.
+ * - In every other field a GTS identifier MUST start with "gts." — a "gts://" value
+ *   is malformed.
+ *
+ * Only actual GTS identifiers are considered; non-GTS strings return null so that
+ * malformed-format handling stays a separate concern.
+ *
+ * @param fieldName - The JSON leaf key the value is assigned to (e.g. "$id", "type").
+ * @param rawValue - The original, un-normalized string value.
+ */
+export function checkGtsUriPrefix(fieldName: string | undefined | null, rawValue: string): GtsPrefixIssue | null {
+  if (typeof rawValue !== 'string') return null
+  if (!isGtsId(rawValue)) return null
+  const hasPrefix = rawValue.trim().startsWith(GTS_URI_PREFIX)
+  const requiresPrefix = fieldRequiresGtsUriPrefix(fieldName)
+  const canonical = normalizeGtsId(rawValue)
+
+  if (requiresPrefix && !hasPrefix) {
+    return {
+      kind: 'missing-uri-prefix',
+      suggestion: GTS_URI_PREFIX + canonical,
+      message: `Malformed GTS identifier in "${fieldName}": JSON Schema treats this value as a URL, so it must start with "${GTS_URI_PREFIX}gts.". Use "${GTS_URI_PREFIX}${canonical}".`
+    }
+  }
+  if (!requiresPrefix && hasPrefix) {
+    const where = fieldName ? ` in "${fieldName}"` : ''
+    return {
+      kind: 'unexpected-uri-prefix',
+      suggestion: canonical,
+      message: `Malformed GTS identifier${where}: the "${GTS_URI_PREFIX}" URI prefix is only allowed in JSON Schema URL fields (${GTS_URI_PREFIX_FIELDS.join(', ')}). Use "${canonical}".`
+    }
+  }
+  return null
+}
+
+/** A gts:// prefix violation located at a specific path within a JSON document. */
+export interface GtsPrefixViolation {
+  fieldName: string
+  rawValue: string
+  /** Dot/bracket path to the offending value (e.g. "allOf[0].$ref"), or "root". */
+  sourcePath: string
+  issue: GtsPrefixIssue
+}
+
+/**
+ * Walk arbitrary JSON content and report every gts:// prefix violation, keyed by the
+ * leaf field name each string value is assigned to. Array elements inherit the field
+ * name of their containing property (e.g. entries of an "enum" array are checked as
+ * "enum" values).
+ */
+export function findGtsPrefixViolations(content: any): GtsPrefixViolation[] {
+  const out: GtsPrefixViolation[] = []
+  function walk(node: any, currentPath: string, fieldName: string): void {
+    if (node === null || node === undefined) return
+    if (typeof node === 'string') {
+      const issue = checkGtsUriPrefix(fieldName, node)
+      if (issue) out.push({ fieldName, rawValue: node, sourcePath: currentPath || 'root', issue })
+      return
+    }
+    if (Array.isArray(node)) {
+      node.forEach((item, i) => walk(item, `${currentPath}[${i}]`, fieldName))
+      return
+    }
+    if (typeof node === 'object') {
+      for (const [k, v] of Object.entries(node)) {
+        const nextPath = currentPath ? `${currentPath}.${k}` : k
+        walk(v, nextPath, k)
+      }
+    }
+  }
+  walk(content, '', '')
+  return out
+}
+
 // ---- Color Definitions ----
 
 /**
