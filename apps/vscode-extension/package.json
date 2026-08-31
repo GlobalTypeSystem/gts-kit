@@ -44,7 +44,7 @@
         {
           "id": "gts-viewer",
           "title": "GTS Viewer",
-          "icon": "resources/icon.png"
+          "icon": "resources/icon.svg"
         }
       ]
     },
