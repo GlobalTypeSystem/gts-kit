@@ -328,10 +328,12 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 
     // Parse the document content to JSON
     let content: any
+    let parseErrorMessage: string | null = null
     try {
       content = parseJSONC(text)
     } catch (parseError: any) {
-      console.log(`[GTS Validation] Failed to parse JSON: ${parseError.message}`)
+      parseErrorMessage = parseError?.message || String(parseError)
+      console.log(`[GTS Validation] Failed to parse JSON: ${parseErrorMessage}`)
       // If parsing fails, store as text and let registry handle it
       content = text
     }
@@ -347,11 +349,23 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     // Upsert the document's live (possibly unsaved) content into the registry.
     indexFile(filePath, fileName, content)
 
+    // Re-read the registry state after indexing the current document so we see
+    // any new invalid-file entry or updated entity list for this open buffer.
+    registry = getRegistry() || registry
+
     let errors: ValidationError[] = []
 
     const invalid = registry.invalidFiles.get(filePath)
 
-    if (invalid?.validation && invalid.validation.errors.length > 0) {
+    if (parseErrorMessage) {
+      errors = [{
+        instancePath: '',
+        schemaPath: '#',
+        keyword: 'parse',
+        message: `Invalid JSON: ${parseErrorMessage}`,
+        params: { error: parseErrorMessage }
+      }]
+    } else if (invalid?.validation && invalid.validation.errors.length > 0) {
       errors = invalid.validation.errors
     } else {
       // Only validate the entities defined in THIS document. Other files remain
