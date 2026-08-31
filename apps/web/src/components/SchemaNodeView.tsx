@@ -139,6 +139,42 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     this.forceUpdate()
   }
 
+  /**
+   * All validation errors for this entity. This is the single, universal place
+   * where error messages are listed (missing/extra properties, schema-not-found,
+   * parse errors, etc.); properties are only flagged visually inline so messages
+   * are not duplicated.
+   */
+  private getSummaryErrors(): any[] {
+    const d = this.props.data || {}
+    const validation = this.model?.entity?.validation || (d as any)?.entity?.validation
+    return validation?.errors || []
+  }
+
+  /**
+   * Render the universal top-level validation summary.
+   */
+  private renderValidationSummary(size: 'sm' | 'xs') {
+    const summaryErrors = this.getSummaryErrors()
+    if (summaryErrors.length === 0) return null
+    const textSize = size === 'sm' ? 'text-sm' : 'text-xs'
+    const pad = size === 'sm' ? 'p-3' : 'p-2'
+    const titleMb = size === 'sm' ? 'mb-2' : 'mb-1'
+    return (
+      <div className={cn('mb-3 bg-red-50 border border-red-200 rounded select-text cursor-text', pad)}>
+        <div className={cn('font-medium text-red-800', textSize, titleMb)}>Validation Errors:</div>
+        <div className="space-y-1">
+          {summaryErrors.map((error: any, index: number) => (
+            <div key={index} className={cn('text-red-700 select-text cursor-text', textSize)}>
+              <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
+              {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   private findPropertyInJson(code: string, instancePath: string, rootObj?: any): { lineStart: number; lineEnd: number; charStart: number; charEnd: number } | null {
     // Parse instancePath like "/retention2" or "/nested/property"
     if (!instancePath || instancePath === '/') return null
@@ -474,19 +510,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                 </div>
               </div>
             )}
-            {(this.model?.entity?.validation || d.entity?.validation) && (this.model?.entity?.validation || d.entity?.validation).errors.length > 0 && (
-              <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded select-text cursor-text">
-                <div className="text-xs font-medium text-red-800 mb-1">Validation Errors:</div>
-                <div className="space-y-1">
-                  {(this.model?.entity?.validation || d.entity?.validation).errors.map((error: any, index: number) => (
-                    <div key={index} className="text-xs text-red-700 select-text cursor-text">
-                      <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
-                      {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            {this.renderValidationSummary('xs')}
             {rawView ? (
               <div className="max-h-96 overflow-auto rounded border select-text cursor-text">
                 {this.renderCodeWithErrors(JSON.stringify((this.model?.entity?.content ?? d.entity?.content), null, 2))}
@@ -595,19 +619,7 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
                     </div>
                   </div>
                 )}
-                {this.model?.entity?.validation && this.model.entity.validation.errors.length > 0 && (
-                  <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text">
-                    <div className="text-sm font-medium text-red-800 mb-2">Validation Errors:</div>
-                    <div className="space-y-1">
-                      {this.model.entity.validation.errors.map((error: any, index: number) => (
-                        <div key={index} className="text-sm text-red-700 select-text cursor-text">
-                          <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
-                          {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {this.renderValidationSummary('sm')}
                 {(rawView ? true : false) ? (
                   <div className="h-[calc(100%-3rem)] overflow-auto rounded border">
                     {this.renderCodeWithErrors(JSON.stringify(this.model?.entity?.content, null, 2))}

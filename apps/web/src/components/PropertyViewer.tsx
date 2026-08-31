@@ -4,6 +4,7 @@ import { GTS_TYPE_REGEX, GTS_OBJ_REGEX, GTS_COLORS, analyzeGtsIdForStyling, Json
 import { TIMING } from '@/lib/timing'
 import { PropertyInfo } from '@/lib/schemaParser'
 import { cn } from '@/lib/utils'
+import { errorMatchesProperty } from '@/lib/validationMatch'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
 
 interface ValidationError {
@@ -161,49 +162,9 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
   // Check if this property has validation errors
   const propertyPath = `/${pathKey}`
 
-  const normalizeInstancePath = (p: string): string => {
-    if (!p) return p
-    // Collapse /properties/ segments used by Ajv
-    let out = p.replace(/\/properties\//g, '/')
-    // Convert bracket indices to pointer-style segments: allOf[1] -> allOf/1
-    out = out.replace(/\[(\d+)\]/g, '/$1')
-    // Iteratively strip trailing leaf nodes that refer to annotations or sub-keys
-    // like /x-*, /type, /const, /$ref, /items
-    const tail = /\/(x-[^/]+|type|const|\$ref|items)$/
-    // Guard loop count to avoid infinite replaces
-    let i = 0
-    while (tail.test(out) && i++ < 10) {
-      out = out.replace(tail, '')
-    }
-    return out
-  }
-
-  const propertyPathTree = normalizeInstancePath(propertyPath)
-
-  const propertyErrors = validationErrors?.filter(err => {
-    // Normalize error paths
-    const errPath = err.instancePath || ''
-    const errNorm = normalizeInstancePath(errPath.trim())
-    const errParentNorm = normalizeInstancePath(errPath.trim().replace(/\/x-[^/]+$/, ''))
-
-    // Direct matches (raw and normalized)
-    if (errPath === propertyPath) return true
-    if (errNorm === propertyPathTree) return true
-
-    // Parent of /x-* annotation should map to the property itself
-    if (errParentNorm === propertyPathTree) return true
-
-    // Handle additionalProperties errors where instancePath is parent but message contains property name
-    // e.g., "must NOT have additional property 'retention2'"
-    if (err.keyword === 'additionalProperties' && err.message) {
-      const match = err.message.match(/must NOT have additional property ['"]([^'"]+)['"]/)
-      if (match && match[1] === property.name) {
-        return true
-      }
-    }
-
-    return false
-  }) || []
+  const propertyErrors = validationErrors?.filter(err =>
+    errorMatchesProperty(err, propertyPath, property.name)
+  ) || []
   const hasError = propertyErrors.length > 0
 
   const getTypeColor = (type: string) => {
@@ -349,16 +310,10 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                   ))}
                 </div>
               )}
-              {hasError && (
-                <div className="text-xs text-red-700 mt-1 px-1.5 py-0.5 bg-red-100 rounded border border-red-200">
-                  {propertyErrors.map((error, idx) => (
-                    <div key={idx} className="select-text cursor-text">
-                      {error.message}
-                      {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
+              {/* Error messages are shown once in the node's universal
+                  "Validation Errors" summary. Here we only flag the property
+                  visually (red row + icon + hover tooltip) to avoid duplicating
+                  the same message inline. */}
             </div>
           </div>
 
