@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, DEFAULT_GTS_CONFIG, GTS_REGEX, GTS_COLORS, parseGtsIdParts, findSimilarEntityIds } from '@gts/shared'
-import { getLastScanFiles } from './scanStore'
+import { JsonRegistry, GTS_REGEX, GTS_COLORS, parseGtsIdParts, findSimilarEntityIds } from '@gts/shared'
+import { getRegistry } from './registryStore'
 import * as jsonc from 'jsonc-parser'
 
 /**
@@ -106,9 +106,16 @@ function findEntityLineInFile(filePath: string, entityId: string): number {
  * Makes GTS IDs clickable and provides hover information
  */
 export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.HoverProvider {
-  private registry: JsonRegistry | null = null
-  private lastRegistryUpdate: number = 0
   private diagnosticCollection: vscode.DiagnosticCollection
+
+  /**
+   * The registry is the shared, persistent, index-only registry maintained in
+   * registryStore. We never build our own here — decorations/links/hovers just
+   * read the current shared state, which is kept fresh by the extension.
+   */
+  private get registry(): JsonRegistry | null {
+    return getRegistry()
+  }
 
   // Decoration types for color coding
   private schemaDecorationType: vscode.TextEditorDecorationType
@@ -161,7 +168,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       ].join('; ')
     })
 
-    this.updateRegistry()
+    // Registry is provided by the shared store; paint whatever is already available.
+    this.updateDecorationsForAllEditors()
   }
 
   /**
@@ -175,43 +183,13 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
-   * Update the registry with the latest scanned files.
+   * Repaint decorations from the current shared registry.
    *
-   * Decorations, links and hovers only need the entity index (id / schema-vs-instance
-   * / file), so we pass `skipValidation` to avoid the expensive Ajv `compileAsync`
-   * pass over the whole workspace. Ajv validation runs separately in validation.ts.
-   * This keeps this method cheap enough to run on the latency-sensitive open path.
-   */
-  private async updateRegistry(): Promise<void> {
-    try {
-      const files = getLastScanFiles()
-      if (!files || files.length === 0) {
-        return
-      }
-
-      const hadRegistry = this.registry !== null
-      this.registry = new JsonRegistry()
-      await this.registry.ingestFiles(files, DEFAULT_GTS_CONFIG, { skipValidation: true })
-      this.lastRegistryUpdate = Date.now()
-      console.log(`[GTS LinkProvider] Registry updated: ${this.registry.jsonSchemas.size} schemas, ${this.registry.jsonObjs.size} objects`)
-
-      // When the registry first becomes available (cold open), or is refreshed,
-      // repaint decorations so annotations appear without waiting for the next
-      // editor/document event.
-      if (!hadRegistry) {
-        this.updateDecorationsForAllEditors()
-      }
-    } catch (error) {
-      console.error('[GTS LinkProvider] Error updating registry:', error)
-    }
-  }
-
-  /**
-   * Refresh the registry if needed
+   * The shared registry is kept up to date by the extension (full scans and
+   * incremental per-file updates), so refreshing here is just a repaint — no
+   * parsing or validation happens on this path.
    */
   public async refresh(): Promise<void> {
-    await this.updateRegistry()
-    // Update decorations for all visible editors
     this.updateDecorationsForAllEditors()
   }
 
@@ -394,11 +372,6 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     document: vscode.TextDocument,
     token: vscode.CancellationToken
   ): Promise<vscode.DocumentLink[]> {
-    // Refresh registry if it's been more than 5 seconds since last update
-    if (!this.registry || Date.now() - this.lastRegistryUpdate > 5000) {
-      await this.updateRegistry()
-    }
-
     if (!this.registry) {
       return []
     }
@@ -480,11 +453,6 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     position: vscode.Position,
     token: vscode.CancellationToken
   ): Promise<vscode.Hover | null> {
-    // Refresh registry if needed
-    if (!this.registry || Date.now() - this.lastRegistryUpdate > 5000) {
-      await this.updateRegistry()
-    }
-
     if (!this.registry) {
       return null
     }

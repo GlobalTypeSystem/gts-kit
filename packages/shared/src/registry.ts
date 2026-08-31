@@ -128,6 +128,25 @@ export class JsonRegistry {
   }
 
   /**
+   * Index a single file's entities into the registry (no validation).
+   *
+   * This is the incremental counterpart to ingestFiles: it upserts one file's
+   * entities without re-processing the whole workspace and without running Ajv.
+   * Use it to keep a long-lived registry in sync with editor/file changes.
+   */
+  indexFile(path: string, name: string, content: any, cfg: GtsConfig): void {
+    // Skip files in the .gts-viewer directory (cross-platform, browser-safe)
+    if (/(^|[\\\/])\.gts-viewer[\\\/]/.test(path)) {
+      return
+    }
+    try {
+      this.processFileContent(path, name, content, getGtsConfig(cfg))
+    } catch (error) {
+      console.error(`Failed to index file ${path}:`, error)
+    }
+  }
+
+  /**
    * Validate a single entity against its schema.
    */
   async validateEntity(entity: JsonEntity): Promise<void> {

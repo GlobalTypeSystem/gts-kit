@@ -1,7 +1,8 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
-import { JsonRegistry, ValidationError, DEFAULT_GTS_CONFIG, parseJSONC } from '@gts/shared'
+import { ValidationError, DEFAULT_GTS_CONFIG, parseJSONC } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
+import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
 import { isGtsCandidateFile } from './helpers'
 
 let diagnosticCollection: vscode.DiagnosticCollection
@@ -312,14 +313,16 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
       content = text
     }
 
-    const files = getLastScanFiles()
+    // Use the shared, persistent registry as the resolution context so we don't
+    // re-parse the whole workspace on every validation. Build it lazily if the
+    // initial scan hasn't populated it yet.
+    let registry = getRegistry()
+    if (!registry) {
+      registry = await rebuildRegistry(getLastScanFiles(), DEFAULT_GTS_CONFIG)
+    }
 
-    const withoutCurrent = files.filter(f => f.path !== filePath)
-    const merged = [...withoutCurrent, { path: filePath, name: fileName, content }]
-
-    const registry = new JsonRegistry()
-    console.log(`[GTS Validation] Ingesting ${merged.length} files into GTS registry...`)
-    await registry.ingestFiles(merged, DEFAULT_GTS_CONFIG)
+    // Upsert the document's live (possibly unsaved) content into the registry.
+    indexFile(filePath, fileName, content)
 
     let errors: ValidationError[] = []
 
@@ -328,10 +331,14 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     if (invalid?.validation && invalid.validation.errors.length > 0) {
       errors = invalid.validation.errors
     } else {
-      const fileObjs = Array.from(registry.jsonObjs.values()).filter(o => o.file?.path === filePath)
-      const fileSchemas = Array.from(registry.jsonSchemas.values()).filter(s => s.file?.path === filePath)
+      // Only validate the entities defined in THIS document. Other files remain
+      // indexed (for $ref / GTS-reference resolution) but are not re-validated.
+      const fileSchemas = registry.jsonFileSchemas.get(filePath) || []
+      const fileObjs = registry.jsonFileObjs.get(filePath) || []
 
-      for (const e of [...fileObjs, ...fileSchemas]) {
+      console.log(`[GTS Validation] Validating ${fileSchemas.length + fileObjs.length} entities in ${fileName}...`)
+      for (const e of [...fileSchemas, ...fileObjs]) {
+        await registry.validateEntity(e)
         if (e.validation && e.validation.errors.length > 0) {
           errors.push(...e.validation.errors)
         }

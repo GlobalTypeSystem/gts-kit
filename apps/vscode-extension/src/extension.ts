@@ -2,11 +2,15 @@ import * as vscode from 'vscode'
 import * as path from 'path'
 import { parseJSONC, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
+import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
 import { RepoLayoutStorage } from './storage'
 import { initValidation, validateOpenDocument } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
+
+// Glob used for all GTS workspace scans and the on-disk file watcher.
+const GTS_SCAN_GLOB = '**/*.{json,jsonc,gts,yaml,yml}'
 
 let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
@@ -22,7 +26,7 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts,yaml,yml}', isInitialScan: boolean = false, refreshFilePath?: string | null) {
+async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null) {
   const hasViewer = viewerPanel !== null
 
   try {
@@ -68,12 +72,12 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts,yaml,yml}
       }
     }
 
-    // Prepare JsonRegistry and set default file before validation
-    const registry = new JsonRegistry()
+    // Update the shared, persistent, index-only registry (used by decorations,
+    // links, hovers and as validation resolution context). This is cheap.
+    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
     if (selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
-    await registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
 
     // Send scan result with default file path so the webview can compute initial selection
     if (hasViewer) {
@@ -81,7 +85,7 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts,yaml,yml}
     }
     try { setLastScanFiles(files) } catch {}
 
-    // Refresh the link provider with the latest registry
+    // Refresh the link provider (repaint from the shared registry)
     if (gtsLinkProvider) {
       try {
         await gtsLinkProvider.refresh()
@@ -90,11 +94,15 @@ async function scanAndPost(includeGlob: string = '**/*.{json,jsonc,gts,yaml,yml}
       }
     }
 
+    // The viewer needs full Ajv validation results for every entity. This is the
+    // only consumer that pays that cost, and only while the panel is open.
     if (hasViewer) {
       try {
-        const objs = Array.from(registry.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-        const schemas = Array.from(registry.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-        const invalidFilesHost = Array.from(registry.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
+        const vreg = new JsonRegistry()
+        await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
+        const objs = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
+        const schemas = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
+        const invalidFilesHost = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
         viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: { objs, schemas, invalidFiles: invalidFilesHost } })
       } catch (ve: any) {
         viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
@@ -164,13 +172,40 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   )
 
-  // Update decorations when document changes
+  // Document changes are handled by handleFileChange (registered below), which
+  // incrementally updates the shared registry and repaints decorations.
+
+  // Keep the shared registry in sync with on-disk changes that don't go through
+  // the editor: files edited outside the IDE (git pull/checkout, terminal,
+  // external tools) and create/rename/delete performed anywhere. The watcher
+  // also fires for in-IDE saves/creates/deletes; those cases either defer to the
+  // editor handlers (open documents) or are handled idempotently here.
+  const gtsWatcher = vscode.workspace.createFileSystemWatcher(GTS_SCAN_GLOB)
+  context.subscriptions.push(gtsWatcher)
   context.subscriptions.push(
-    vscode.workspace.onDidChangeTextDocument(event => {
-      const editor = vscode.window.activeTextEditor
-      if (editor && editor.document === event.document && gtsLinkProvider) {
-        gtsLinkProvider.updateDecorations(editor)
+    gtsWatcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
+    gtsWatcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
+    gtsWatcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+  )
+
+  // Handle in-IDE renames explicitly: the watcher's create event is skipped for
+  // files open in the editor, and no text-change event fires on rename, so the
+  // new path would otherwise stay unindexed. (External renames arrive as
+  // delete+create through the watcher and are handled above.)
+  context.subscriptions.push(
+    vscode.workspace.onDidRenameFiles(async event => {
+      for (const { oldUri, newUri } of event.files) {
+        removeFileFromRegistry(oldUri.fsPath)
+        if (isIgnoredGtsPath(newUri.fsPath)) continue
+        if (!/\.(json|jsonc|gts|ya?ml)$/i.test(newUri.fsPath)) continue
+        const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === newUri.fsPath)
+        if (openDoc) {
+          handleFileChange(openDoc, 0)
+        } else {
+          await onDiskFileChanged(newUri)
+        }
       }
+      scheduleExternalChangeSettle()
     })
   )
 
@@ -253,7 +288,7 @@ export async function activate(context: vscode.ExtensionContext) {
  */
 async function performInitialScan() {
   try {
-    const include = '**/*.{json,jsonc,gts,yaml,yml}'
+    const include = GTS_SCAN_GLOB
     const exclude = '**/{node_modules,.gts-viewer,dist,.git}/**'
     const uris = await vscode.workspace.findFiles(include, exclude, 10000)
 
@@ -281,9 +316,9 @@ async function performInitialScan() {
     console.log(`[GTS] Successfully loaded ${files.length} files for validation registry`)
     setLastScanFiles(files)
 
-    // Also ingest into a registry to verify schemas are loading
-    const registry = new JsonRegistry()
-    await registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
+    // Build the shared, persistent, index-only registry used by decorations,
+    // links, hovers and (as resolution context) validation.
+    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Registry initialized: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects`)
 
     // Refresh the link provider with the initial scan data
@@ -295,6 +330,15 @@ async function performInitialScan() {
         console.error('[GTS] Error refreshing link provider:', e)
       }
     }
+
+    // Re-validate open documents now that the full registry is available. Any
+    // transient "schema/reference not found" diagnostics produced before the
+    // scan completed are corrected here.
+    vscode.workspace.textDocuments.forEach(doc => {
+      if (isGtsCandidateFile(doc)) {
+        void validateOpenDocument(doc)
+      }
+    })
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -320,13 +364,92 @@ export async function deactivate() {
 // Debounced rescan on change to auto-refresh layout view while typing
 let changeTimer: NodeJS.Timeout | null = null
 
+/** Paths we never index (build output, VCS internals, our own cache). */
+function isIgnoredGtsPath(fsPath: string): boolean {
+  return /(^|[\\/])(node_modules|\.gts-viewer|dist|\.git)[\\/]/.test(fsPath)
+}
+
+/** True if the file is currently open as a text document (editor owns its content). */
+function isOpenInEditor(fsPath: string): boolean {
+  return vscode.workspace.textDocuments.some(d => d.uri.fsPath === fsPath)
+}
+
+/**
+ * A GTS file was created or changed on disk. Reindex it from disk into the shared
+ * registry, unless it's open in the editor — in that case the editor handlers own
+ * the (possibly unsaved) live content and must not be clobbered by the disk copy.
+ */
+async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
+  const fsPath = uri.fsPath
+  if (isIgnoredGtsPath(fsPath)) return
+  if (isOpenInEditor(fsPath)) return
+  try {
+    const data = await vscode.workspace.fs.readFile(uri)
+    const text = Buffer.from(data).toString('utf8')
+    let content: any
+    try { content = parseJSONC(text) } catch { content = text }
+    indexFileInRegistry(fsPath, path.basename(fsPath), content)
+  } catch (e) {
+    console.error('[GTS] Failed to reindex changed file from disk:', fsPath, e)
+    return
+  }
+  scheduleExternalChangeSettle()
+}
+
+/** A GTS file was deleted/renamed-away on disk. Drop its entities from the registry. */
+function onDiskFileDeleted(uri: vscode.Uri): void {
+  const fsPath = uri.fsPath
+  if (isIgnoredGtsPath(fsPath)) return
+  removeFileFromRegistry(fsPath)
+  scheduleExternalChangeSettle()
+}
+
+// Debounce a burst of on-disk changes (e.g. a git checkout touching many files)
+// into a single UI/validation refresh.
+let externalChangeTimer: NodeJS.Timeout | null = null
+function scheduleExternalChangeSettle(): void {
+  if (externalChangeTimer) clearTimeout(externalChangeTimer)
+  externalChangeTimer = setTimeout(() => {
+    if (viewerPanel) {
+      // The viewer needs the full authoritative scan (also repaints + revalidates).
+      void scanAndPost(GTS_SCAN_GLOB, false)
+      return
+    }
+    // No viewer: cheaply repaint decorations and re-validate open documents, since
+    // cross-file GTS references may now resolve/break differently.
+    void gtsLinkProvider?.refresh()
+    vscode.workspace.textDocuments.forEach(doc => {
+      if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
+    })
+  }, 300)
+}
+
 function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
-  console.log(`[GTS] File changed 1: ${doc.uri.fsPath}`)
   if (!isGtsCandidateFile(doc)) return
+
+  // Immediate + cheap: keep the shared registry index and the editor's color
+  // annotations in sync with the live document as the user types. No Ajv here.
+  try {
+    const text = doc.getText()
+    let content: any
+    try { content = parseJSONC(text) } catch { content = text }
+    indexFileInRegistry(doc.uri.fsPath, path.basename(doc.uri.fsPath), content)
+  } catch (e) {
+    console.error('[GTS] Incremental index failed:', e)
+  }
+  const editor = vscode.window.activeTextEditor
+  if (editor && editor.document === doc && gtsLinkProvider) {
+    gtsLinkProvider.updateDecorations(editor)
+  }
+
+  // Debounced + heavier: validate just this document, and (only when the viewer
+  // panel is open) run the full workspace rescan that feeds the webview.
   if (changeTimer) clearTimeout(changeTimer)
-  console.log(`[GTS] File changed 2: ${doc.uri.fsPath}`)
   changeTimer = setTimeout(() => {
-    scanAndPost('**/*.{json,jsonc,gts,yaml,yml}', false, doc.uri.fsPath)
+    void validateOpenDocument(doc)
+    if (viewerPanel) {
+      void scanAndPost(GTS_SCAN_GLOB, false, doc.uri.fsPath)
+    }
   }, delayMsec)
 }
 
@@ -414,7 +537,7 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
 
         case 'scanWorkspaceJson': {
           try {
-            const include: string = message.options?.include || '**/*.{json,jsonc,gts,yaml,yml}'
+            const include: string = message.options?.include || GTS_SCAN_GLOB
             const isInitialScan = !hasPerformedInitialScan
             if (isInitialScan) {
               hasPerformedInitialScan = true
