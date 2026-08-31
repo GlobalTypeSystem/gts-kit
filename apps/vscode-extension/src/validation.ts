@@ -6,7 +6,19 @@ import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
 import { isGtsCandidateFile } from './helpers'
 
 let diagnosticCollection: vscode.DiagnosticCollection
+let workspaceDiagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
+
+function isPathUnderAnyRoot(filePath: string, roots: string[] | undefined): boolean {
+  if (!roots || roots.length === 0) return true
+  for (const root of roots) {
+    const rel = path.relative(root, filePath)
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+      return true
+    }
+  }
+  return false
+}
 
 /**
  * Convert validation errors to VSCode diagnostics
@@ -345,6 +357,10 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
       }
     }
 
+    // This document is now open and gets precise diagnostics; drop any coarse
+    // background diagnostic so markers aren't duplicated.
+    workspaceDiagnosticCollection?.delete(document.uri)
+
     if (errors.length > 0) {
       const diagnostics = validationErrorsToDiagnostics(errors, document)
       diagnosticCollection.set(document.uri, diagnostics)
@@ -359,12 +375,68 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
   }
 }
 
+/**
+ * Validate all indexed entities and publish coarse diagnostics for files that are
+ * not currently open in an editor. This makes unopened invalid files visible in
+ * Explorer/Problems without replacing precise in-editor diagnostics.
+ */
+export async function validateWorkspaceInBackground(scopeRoots?: string[]): Promise<void> {
+  const registry = getRegistry()
+  if (!registry || !workspaceDiagnosticCollection) return
+
+  const openPaths = new Set<string>()
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
+      openPaths.add(doc.uri.fsPath)
+    }
+  }
+
+  const diagnosticsByPath = new Map<string, vscode.Diagnostic[]>()
+  const addError = (filePath: string, error: ValidationError) => {
+    if (openPaths.has(filePath)) return
+    if (!isPathUnderAnyRoot(filePath, scopeRoots)) return
+    const diagnostics = diagnosticsByPath.get(filePath) || []
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(0, 0, 0, 1),
+      error.message,
+      vscode.DiagnosticSeverity.Error
+    )
+    diagnostic.source = 'GTS'
+    diagnostic.code = error.keyword
+    diagnostics.push(diagnostic)
+    diagnosticsByPath.set(filePath, diagnostics)
+  }
+
+  // Files that failed parsing/indexing.
+  for (const invalidFile of registry.invalidFiles.values()) {
+    const errors = invalidFile.validation?.errors || []
+    for (const error of errors) addError(invalidFile.path, error)
+  }
+
+  // Validate all indexed entities against current registry context.
+  const entities = [...registry.jsonSchemas.values(), ...registry.jsonObjs.values()]
+  for (const entity of entities) {
+    await registry.validateEntity(entity)
+    if (!entity.file?.path) continue
+    const errors = entity.validation?.errors || []
+    for (const error of errors) addError(entity.file.path, error)
+  }
+
+  const entries: Array<[vscode.Uri, vscode.Diagnostic[]]> = []
+  for (const [filePath, diagnostics] of diagnosticsByPath.entries()) {
+    entries.push([vscode.Uri.file(filePath), diagnostics])
+  }
+  workspaceDiagnosticCollection.set(entries)
+}
+
 export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 
     // Create diagnostic collection for validation errors
     diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
     context.subscriptions.push(diagnosticCollection)
+    workspaceDiagnosticCollection = vscode.languages.createDiagnosticCollection('gts-workspace')
+    context.subscriptions.push(workspaceDiagnosticCollection)
 
     // Validate all open documents on activation
     const openDocs = vscode.workspace.textDocuments

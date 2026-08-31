@@ -5,7 +5,7 @@ import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, validateOpenDocument } from './validation'
+import { initValidation, validateOpenDocument, validateWorkspaceInBackground } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
@@ -171,6 +171,10 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
         viewerPanel!.webview.postMessage({ type: 'gts-refresh-layout', detail: { filePath: refreshFilePath } })
       } catch {}
     }
+
+    // Publish workspace-wide file diagnostics for unopened files, then refresh
+    // open-document diagnostics with precise ranges.
+    await validateWorkspaceInBackground(getBackgroundValidationRoots())
 
     // Re-validate all open documents now that we have the full registry
     console.log('[GTS] Re-validating all open documents...')
@@ -410,6 +414,35 @@ function revalidateOpenDocs(): void {
   })
 }
 
+/**
+ * Background validation scope: currently focused GTS folder(s), not whole repo.
+ * VS Code does not expose built-in Explorer expanded folders, so we scope by
+ * active/open GTS docs as the closest approximation.
+ */
+function getBackgroundValidationRoots(): string[] {
+  const roots: string[] = []
+  const seen = new Set<string>()
+  const add = (dir: string) => {
+    if (!seen.has(dir)) {
+      seen.add(dir)
+      roots.push(dir)
+    }
+  }
+
+  const active = vscode.window.activeTextEditor?.document
+  if (active?.uri.scheme === 'file' && isGtsCandidateFile(active)) {
+    add(path.dirname(active.uri.fsPath))
+  }
+
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
+      add(path.dirname(doc.uri.fsPath))
+    }
+  }
+
+  return roots
+}
+
 async function performInitialScan() {
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
@@ -446,8 +479,9 @@ async function performInitialScan() {
     const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
 
-    // Paint decorations + validate open docs now — coloring is available.
+    // Paint decorations + validate now that phase-1 registry is available.
     await gtsLinkProvider?.refresh()
+    await validateWorkspaceInBackground(getBackgroundValidationRoots())
     revalidateOpenDocs()
 
     // --- Phase 2: background pass -------------------------------------------
@@ -463,6 +497,7 @@ async function performInitialScan() {
         for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
         setLastScanFiles([...files1, ...files2])
         await gtsLinkProvider?.refresh()
+        await validateWorkspaceInBackground(getBackgroundValidationRoots())
         revalidateOpenDocs()
       }
       console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
@@ -545,12 +580,15 @@ function scheduleExternalChangeSettle(): void {
       void scanAndPost(GTS_SCAN_GLOB, false)
       return
     }
-    // No viewer: cheaply repaint decorations and re-validate open documents, since
-    // cross-file GTS references may now resolve/break differently.
-    void gtsLinkProvider?.refresh()
-    vscode.workspace.textDocuments.forEach(doc => {
-      if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
-    })
+    // No viewer: repaint + refresh workspace diagnostics and then re-validate
+    // open docs with precise ranges.
+    void (async () => {
+      await gtsLinkProvider?.refresh()
+      await validateWorkspaceInBackground(getBackgroundValidationRoots())
+      vscode.workspace.textDocuments.forEach(doc => {
+        if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
+      })
+    })()
   }, 300)
 }
 
