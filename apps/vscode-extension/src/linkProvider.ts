@@ -175,7 +175,12 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
-   * Update the registry with the latest scanned files
+   * Update the registry with the latest scanned files.
+   *
+   * Decorations, links and hovers only need the entity index (id / schema-vs-instance
+   * / file), so we pass `skipValidation` to avoid the expensive Ajv `compileAsync`
+   * pass over the whole workspace. Ajv validation runs separately in validation.ts.
+   * This keeps this method cheap enough to run on the latency-sensitive open path.
    */
   private async updateRegistry(): Promise<void> {
     try {
@@ -184,10 +189,18 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         return
       }
 
+      const hadRegistry = this.registry !== null
       this.registry = new JsonRegistry()
-      await this.registry.ingestFiles(files, DEFAULT_GTS_CONFIG)
+      await this.registry.ingestFiles(files, DEFAULT_GTS_CONFIG, { skipValidation: true })
       this.lastRegistryUpdate = Date.now()
       console.log(`[GTS LinkProvider] Registry updated: ${this.registry.jsonSchemas.size} schemas, ${this.registry.jsonObjs.size} objects`)
+
+      // When the registry first becomes available (cold open), or is refreshed,
+      // repaint decorations so annotations appear without waiting for the next
+      // editor/document event.
+      if (!hadRegistry) {
+        this.updateDecorationsForAllEditors()
+      }
     } catch (error) {
       console.error('[GTS LinkProvider] Error updating registry:', error)
     }

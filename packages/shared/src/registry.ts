@@ -416,8 +416,15 @@ export class JsonRegistry {
    *
    * @param files - Array of {path, name, content} objects
    * @param cfg - GTS configuration for entity ID extraction
+   * @param options - Optional flags. Set `skipValidation` to only index entities
+   *   (id/type/file) without running Ajv schema validation. This is much cheaper
+   *   and is used on latency-sensitive paths such as editor decorations.
    */
-  async ingestFiles(files: Array<{ path: string; name: string; content: any }>, cfg: GtsConfig): Promise<void> {
+  async ingestFiles(
+    files: Array<{ path: string; name: string; content: any }>,
+    cfg: GtsConfig,
+    options?: { skipValidation?: boolean }
+  ): Promise<void> {
     cfg = getGtsConfig(cfg)
     for (const file of files) {
       try {
@@ -430,7 +437,9 @@ export class JsonRegistry {
         console.error(`Failed to process file ${file.path}:`, error)
       }
     }
-    await this.validateEntities()
+    if (!options?.skipValidation) {
+      await this.validateEntities()
+    }
   }
 }
 
