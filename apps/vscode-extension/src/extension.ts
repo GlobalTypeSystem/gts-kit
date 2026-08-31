@@ -3,6 +3,7 @@ import * as path from 'path'
 import { parseJSONC, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
+import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
 import { initValidation, validateOpenDocument } from './validation'
 import { isGtsCandidateFile } from './helpers'
@@ -11,6 +12,49 @@ import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layou
 
 // Glob used for all GTS workspace scans and the on-disk file watcher.
 const GTS_SCAN_GLOB = '**/*.{json,jsonc,gts,yaml,yml}'
+
+// Directories that never contain user GTS entities and are huge/binary — excluded
+// from every scan (both phases).
+const ALWAYS_EXCLUDE_GLOB = '**/{.git,.gts-viewer}/**'
+
+// Fast-pass exclude: also drops build-output / dependency directories so their
+// (often enormous) trees aren't even enumerated on the first, latency-sensitive
+// pass. Applied at the findFiles level.
+const FAST_EXCLUDE_GLOB = '**/{.git,.gts-viewer,node_modules,target,build,out,dist,.next,.nuxt,.svelte-kit,coverage,vendor,bin,obj,__pycache__}/**'
+
+// Build-output / dependency directories skipped on the fast first pass and only
+// looked at on the second (background) pass.
+const PHASE2_DIR_RE = /[\\/](node_modules|target|build|out|dist|\.next|\.nuxt|\.svelte-kit|coverage|vendor|bin|obj|__pycache__)[\\/]/i
+
+// Framework/runtime files that are valid JSON but essentially never hold GTS
+// entities. Deferred to the second pass so they don't slow the first one.
+const PHASE2_FILENAMES = new Set([
+  'package.json', 'package-lock.json', 'npm-shrinkwrap.json',
+  'tsconfig.json', 'jsconfig.json', 'openapi.json', 'swagger.json',
+  'composer.json', 'composer.lock', 'manifest.json', 'angular.json',
+  'nx.json', 'lerna.json', 'turbo.json', '.eslintrc.json', '.prettierrc.json',
+])
+
+/** True if a path should be deferred to the second scan pass. */
+function isDeferredToPhase2(fsPath: string): boolean {
+  if (PHASE2_DIR_RE.test(fsPath)) return true
+  const base = (fsPath.split(/[\\/]/).pop() || '').toLowerCase()
+  if (PHASE2_FILENAMES.has(base)) return true
+  // tsconfig.*.json, tsconfig.main.json, etc.
+  if (/^tsconfig\..+\.json$/.test(base)) return true
+  return false
+}
+
+/** Merge a base exclude glob with extra globs (e.g. from .gitignore) into one. */
+function combineExcludeGlobs(base: string, extra: string[]): string {
+  if (extra.length === 0) return base
+  return `{${base},${extra.join(',')}}`
+}
+
+/** True if the given file URI is gitignored (per the cached matcher). */
+function isUriIgnored(uri: vscode.Uri, matcher = getCachedMatcher()): boolean {
+  return isIgnoredRel(matcher, vscode.workspace.asRelativePath(uri, false))
+}
 
 let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
@@ -38,8 +82,12 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     console.log('[GTS Extension] scanAndPost:', activeDoc, selectedFilePath)
     const include = includeGlob
-    const exclude = '**/{node_modules,.gts-viewer,dist,.git}/**'
-    const uris = await vscode.workspace.findFiles(include, exclude, 10000)
+    // Skip build-output/dependency dirs + gitignored paths; the substring filter
+    // below drops the remaining non-GTS files so we only parse files that mention
+    // GTS.
+    const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
+    const exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
+    const uris = await vscode.workspace.findFiles(include, exclude, 40000)
 
     const total = uris.length
     const startTime = Date.now()
@@ -50,8 +98,16 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     for (const uri of uris) {
       try {
+        // Belt-and-suspenders: skip anything gitignored the glob missed.
+        if (isUriIgnored(uri, ignoreMatcher)) {
+          continue
+        }
         const data = await vscode.workspace.fs.readFile(uri)
         const text = Buffer.from(data).toString('utf8')
+        // Quick pre-filter: a file with no "gts." substring cannot hold a GTS id.
+        if (!text.includes('gts.')) {
+          continue
+        }
         try {
           const content = parseJSONC(text)
           files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
@@ -209,6 +265,20 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   )
 
+  // When any .gitignore changes, reload the ignore rules and rescan so newly
+  // ignored/unignored files are applied everywhere.
+  const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore')
+  context.subscriptions.push(gitignoreWatcher)
+  const onGitignoreChanged = () => {
+    resetWorkspaceIgnore()
+    void performInitialScan()
+  }
+  context.subscriptions.push(
+    gitignoreWatcher.onDidCreate(onGitignoreChanged),
+    gitignoreWatcher.onDidChange(onGitignoreChanged),
+    gitignoreWatcher.onDidDelete(onGitignoreChanged)
+  )
+
   // Initial decoration for all visible editors
   if (gtsLinkProvider) {
     for (const editor of vscode.window.visibleTextEditors) {
@@ -282,63 +352,121 @@ export async function activate(context: vscode.ExtensionContext) {
   vscode.window.showInformationMessage('GTS Viewer is ready! Use "GTS: Open Viewer" to start.')
 }
 
+/** Paths of GTS-candidate files currently open in the editor (active first). */
+function collectOpenGtsPaths(): string[] {
+  const ordered: string[] = []
+  const seen = new Set<string>()
+  const add = (fsPath: string) => {
+    if (!seen.has(fsPath)) { seen.add(fsPath); ordered.push(fsPath) }
+  }
+  const active = vscode.window.activeTextEditor?.document
+  if (active && active.uri.scheme === 'file' && isGtsCandidateFile(active)) add(active.uri.fsPath)
+  for (const ed of vscode.window.visibleTextEditors) {
+    if (ed.document.uri.scheme === 'file' && isGtsCandidateFile(ed.document)) add(ed.document.uri.fsPath)
+  }
+  for (const d of vscode.workspace.textDocuments) {
+    if (d.uri.scheme === 'file' && isGtsCandidateFile(d)) add(d.uri.fsPath)
+  }
+  return ordered
+}
+
 /**
- * Perform initial workspace scan to populate the registry for validation
- * This runs in the background and doesn't block extension activation
+ * Read the given files, keeping only those that can contain a GTS id.
+ *
+ * The `gts.` substring pre-filter avoids parsing the (potentially huge) majority
+ * of JSON files that have nothing to do with GTS. For files open in the editor we
+ * use the live buffer so unsaved edits are reflected.
  */
+async function readGtsCandidateFiles(
+  uris: vscode.Uri[]
+): Promise<Array<{ path: string; name: string; content: any }>> {
+  const files: Array<{ path: string; name: string; content: any }> = []
+  for (const uri of uris) {
+    try {
+      const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === uri.fsPath)
+      let text: string
+      if (openDoc) {
+        text = openDoc.getText()
+      } else {
+        const data = await vscode.workspace.fs.readFile(uri)
+        text = Buffer.from(data).toString('utf8')
+      }
+      // Quick pre-filter: a file with no "gts." substring cannot hold a GTS id.
+      if (!text.includes('gts.')) continue
+      let content: any
+      try { content = parseJSONC(text) } catch { content = text }
+      files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
+    } catch (e) {
+      // Unreadable file — skip.
+    }
+  }
+  return files
+}
+
+/** Re-validate all open GTS documents against the current registry. */
+function revalidateOpenDocs(): void {
+  vscode.workspace.textDocuments.forEach(doc => {
+    if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
+  })
+}
+
 async function performInitialScan() {
   try {
-    const include = GTS_SCAN_GLOB
-    const exclude = '**/{node_modules,.gts-viewer,dist,.git}/**'
-    const uris = await vscode.workspace.findFiles(include, exclude, 10000)
+    // Load .gitignore rules first so both phases permanently exclude ignored
+    // files/folders (at enumeration time via globs, plus an authoritative
+    // matcher for edge cases such as negations and nested ignores).
+    const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
+    const openPaths = collectOpenGtsPaths()
 
-    console.log(`[GTS] Found ${uris.length} JSON/JSONC/GTS files in workspace`)
-
-    const files: Array<{ path: string; name: string; content: any }> = []
-
-    for (const uri of uris) {
-      try {
-        const data = await vscode.workspace.fs.readFile(uri)
-        const text = Buffer.from(data).toString('utf8')
-        try {
-          const content = parseJSONC(text)
-          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content })
-        } catch (e) {
-          // If JSONC parsing fails, store as text for later validation
-          files.push({ path: uri.fsPath, name: path.basename(uri.fsPath), content: text })
-        }
-      } catch (e) {
-        // Skip files that can't be read
-        console.warn(`[GTS] Could not read file: ${uri.fsPath}`, e)
-      }
+    // --- Phase 1: fast pass -------------------------------------------------
+    // Enumerate with FAST_EXCLUDE_GLOB (+ gitignore) so build-output/dependency
+    // trees (target, node_modules, ...) and ignored paths aren't even walked.
+    // Also skip known framework files by name. Currently-open files are always
+    // included and go first so the file you are looking at colors ASAP (an open
+    // file is an explicit user action, so it is coloured even if gitignored).
+    const phase1Exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
+    const fastUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase1Exclude, 40000)
+    const phase1Candidates: vscode.Uri[] = []
+    const phase1Paths = new Set<string>()
+    for (const p of openPaths) {
+      phase1Candidates.push(vscode.Uri.file(p))
+      phase1Paths.add(p)
+    }
+    for (const uri of fastUris) {
+      if (phase1Paths.has(uri.fsPath)) continue
+      if (isDeferredToPhase2(uri.fsPath)) continue
+      if (isUriIgnored(uri, ignoreMatcher)) continue
+      phase1Candidates.push(uri)
+      phase1Paths.add(uri.fsPath)
     }
 
-    console.log(`[GTS] Successfully loaded ${files.length} files for validation registry`)
-    setLastScanFiles(files)
+    console.log(`[GTS] Phase 1: ${phase1Candidates.length} candidate files (of ${fastUris.length} enumerated)`)
+    const files1 = await readGtsCandidateFiles(phase1Candidates)
+    setLastScanFiles(files1)
+    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
+    console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
 
-    // Build the shared, persistent, index-only registry used by decorations,
-    // links, hovers and (as resolution context) validation.
-    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
-    console.log(`[GTS] Registry initialized: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects`)
+    // Paint decorations + validate open docs now — coloring is available.
+    await gtsLinkProvider?.refresh()
+    revalidateOpenDocs()
 
-    // Refresh the link provider with the initial scan data
-    if (gtsLinkProvider) {
-      try {
-        await gtsLinkProvider.refresh()
-        console.log('[GTS] Link provider refreshed with initial scan data')
-      } catch (e) {
-        console.error('[GTS] Error refreshing link provider:', e)
+    // --- Phase 2: background pass -------------------------------------------
+    // Enumerate the full set (only .git / our cache + gitignore excluded) and
+    // process whatever phase 1 didn't: non-ignored deferred dirs and framework
+    // files. Runs after the UI is already coloured, so its cost is not visible.
+    const phase2Exclude = combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs)
+    const allUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase2Exclude, 100000)
+    const phase2Uris = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    if (phase2Uris.length > 0) {
+      const files2 = await readGtsCandidateFiles(phase2Uris)
+      if (files2.length > 0) {
+        for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
+        setLastScanFiles([...files1, ...files2])
+        await gtsLinkProvider?.refresh()
+        revalidateOpenDocs()
       }
+      console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
     }
-
-    // Re-validate open documents now that the full registry is available. Any
-    // transient "schema/reference not found" diagnostics produced before the
-    // scan completed are corrected here.
-    vscode.workspace.textDocuments.forEach(doc => {
-      if (isGtsCandidateFile(doc)) {
-        void validateOpenDocument(doc)
-      }
-    })
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -382,6 +510,7 @@ function isOpenInEditor(fsPath: string): boolean {
 async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   const fsPath = uri.fsPath
   if (isIgnoredGtsPath(fsPath)) return
+  if (isUriIgnored(uri)) return
   if (isOpenInEditor(fsPath)) return
   try {
     const data = await vscode.workspace.fs.readFile(uri)
@@ -400,6 +529,7 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
 function onDiskFileDeleted(uri: vscode.Uri): void {
   const fsPath = uri.fsPath
   if (isIgnoredGtsPath(fsPath)) return
+  if (isUriIgnored(uri)) return
   removeFileFromRegistry(fsPath)
   scheduleExternalChangeSettle()
 }
