@@ -24,8 +24,11 @@ interface EntityListProps {
   onFilteredEntitiesChange?: (entities: Array<Entity | JsonFile>) => void
 }
 
+type StatusFilter = 'all' | 'errors' | 'valid'
+
 export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: selectedEntity, selectedInvalidFile, onEntitySelect: onEntitySelect, onInvalidFileSelect, onRefresh, onOpen, onFilteredEntitiesChange }: EntityListProps) {
   const [searchTerm, setSearchTerm] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [openJsonList, setOpenJsonList] = useState(true)
   const [openSchemaList, setOpenSchemaList] = useState(true)
   const [openInvalidList, setOpenInvalidList] = useState(true)
@@ -38,6 +41,12 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
   const searchTermLc = useMemo(() => searchTerm.toLowerCase(), [searchTerm])
   const match = (name: string, id: string) =>
     name.toLowerCase().includes(searchTermLc) || id.toLowerCase().includes(searchTermLc)
+
+  // Whether an entity currently has validation errors.
+  const entityHasErrors = (entity: Entity) => !!(entity.validation && entity.validation.errors.length > 0)
+  // Apply the status filter to an entity (invalid files are always "errors").
+  const matchesStatus = (entity: Entity) =>
+    statusFilter === 'all' || (statusFilter === 'errors' ? entityHasErrors(entity) : !entityHasErrors(entity))
 
   const getEntityIcon = (entity: Entity) => {
     const validation = entity.validation
@@ -53,14 +62,15 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
   }
 
   const filteredJsonObjs = useMemo(() => (
-    jsonObjs.filter(entity => match(entity.file?.name || entity.id, entity.id))
-  ), [jsonObjs, searchTermLc])
+    jsonObjs.filter(entity => match(entity.file?.name || entity.id, entity.id) && matchesStatus(entity))
+  ), [jsonObjs, searchTermLc, statusFilter])
   const filteredSchemas = useMemo(() => (
-    schemas.filter(s => match(s.file?.name || s.id, s.id))
-  ), [schemas, searchTermLc])
+    schemas.filter(s => match(s.file?.name || s.id, s.id) && matchesStatus(s))
+  ), [schemas, searchTermLc, statusFilter])
   const filteredInvalidFiles = useMemo(() => (
-    invalidFiles.filter(f => match(f.name, f.path))
-  ), [invalidFiles, searchTermLc])
+    // Invalid files are always error entries, so they never appear under "Valid entities".
+    statusFilter === 'valid' ? [] : invalidFiles.filter(f => match(f.name, f.path))
+  ), [invalidFiles, searchTermLc, statusFilter])
 
   // Build the visible linear list in render order for keyboard navigation
   const visibleEntities: Array<Entity | JsonFile> = useMemo(() => {
@@ -160,6 +170,17 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
             <FolderOpen className="h-4 w-4 mr-1" />
             Open
           </Button>
+          <select
+            className="ml-auto h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            title="Filter entities by validation status"
+            aria-label="Filter entities by validation status"
+          >
+            <option value="all">All Entities</option>
+            <option value="errors">Errors</option>
+            <option value="valid">Valid entities</option>
+          </select>
         </div>
         <div className="relative mt-2">
           <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
