@@ -1,6 +1,6 @@
 {
   "name": "gts-monorepo",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -19,7 +19,7 @@
     "build:electron": "npm --workspace apps/electron run build",
     "build:vscode": "npm --workspace apps/vscode-extension run build",
     "package:electron": "npm --workspace apps/electron run package",
-    "package:vscode": "mkdir -p vsix && npm --workspace apps/vscode-extension run package && cp apps/vscode-extension/.vsce-staging/gts-viewer-vscode* ./vsix && echo 'Successfuly built the vsix extension:' && ls vsix/*.vsix",
+    "package:vscode": "mkdir -p vsix && npm --workspace apps/vscode-extension run package && cp apps/vscode-extension/vsix/gts-*.vsix ./vsix && echo 'Successfully built the vsix extension:' && ls vsix/*.vsix",
     "clean": "rm -rf node_modules package-lock.json apps/*/node_modules apps/*/package-lock.json packages/*/node_modules packages/*/package-lock.json"
   },
   "dependencies": {

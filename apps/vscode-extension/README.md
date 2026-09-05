@@ -1,40 +1,49 @@
-# GTS Viewer — VS Code Extension
+# Global Type System (GTS) — VS Code Extension
 
-<img src="./resources/gts_logo.jpeg" alt="GTS Logo" width="50%" />
+Browse, validate, visualize, and manage [GTS](https://github.com/globaltypesystem/gts-spec) (Global Type System) schemas and instances directly in VS Code -based IDEs.
 
-Visual layout preview for GTS ([Global Type System](https://github.com/globaltypesystem/gts-spec)) JSON schemas and instances. Inspect relationships between schemas and instances with an interactive diagram and save/share custom layouts via your repository.
+## Key Features
 
-Key features
+- **Visual Diagram** — Interactive graph of GTS schemas, instances, and their relationships
+- **Schema & Instance Validation** — Real-time validation of JSON/JSONC/YAML/GTS files against GTS schemas with inline diagnostics (errors, squiggly underlines) in the Problems panel
+- **GTS ID Validation** — Verify GTS identifier syntax, detect misprints, and suggest corrections
+- **Jump to Entity** — Click a GTS ID to navigate to the entity's source file; peek references across the project
+- **Inline Decorations** — Color-coded chips for schema and instance segments in GTS identifiers
+- **Code Actions** — Quick fixes for common GTS ID issues
+- **Auto-Discovery** — Scans the workspace for all `.json`, `.jsonc`, `.yaml`, `.yml`, and `.gts` files
+- **Context Menu & Command Palette** — Right-click a file or run **GTS: Open Viewer**
+- **Layout Persistence** — Save and share diagram layouts via `.gts-viewer/` in your workspace
 
-- **Visual JSON Preview** — Interactive diagram of JSON schemas, instances and their relationship
-- **Explorer / Context Menu** — Right-click a `.json`, `.jsonc` or `.gts` file and choose **GTS: Preview Layout**
-- **Command Palette** — Run **GTS: Preview Layout** from the Command Palette
-- **Layout Persistence** — Save layouts to `.gts-viewer/` in the workspace
-- **Shareable Layouts** — Commit `.gts-viewer` to share layouts across your team
+## Getting Started
 
-Getting started
+### Open the Viewer
 
-There are two ways to preview a JSON or GTS file:
-
-1. **Context Menu (Recommended)**
-   - Right-click on any `.json`, `.jsonc` or `.gts` file in the Explorer
-   - Select **"GTS: Preview Layout"**
-   - The file will open in the editor (left) and the visual preview will appear (right)
-
-2. **Command Palette**
-   - Open a `.json`, `.jsonc` or `.gts` file in the editor
-   - Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Windows/Linux)
-   - Type "GTS: Preview Layout" and press Enter
+1. **Context Menu** — Right-click any `.json`, `.jsonc`, or `.gts` file in the Explorer and select **"GTS: Open Viewer"**
+2. **Command Palette** — Press `Cmd+Shift+P` / `Ctrl+Shift+P`, type **GTS: Open Viewer**, and press Enter
 
 ### Supported File Types
 
-The extension works with thre file types:
+- **`.json`** — Standard JSON (schemas and instances)
+- **`.jsonc`** — JSON with Comments (single-line, multi-line, trailing commas)
+- **`.yaml` / `.yml`** — YAML files parsed and treated identically to JSON
+- **`.gts`** — GTS-specific files
 
-- **`.json` files** - Standard JSON files that may contain GTS schemas or instances
-- **`.jsonc` files** - JSONC files that may contain GTS schemas or instances
-- **`.gts` files** - GTS-specific files
+## Validation
 
-**Note:** Only files with valid JSON content can be visualized.
+The extension validates GTS files automatically as you open, edit, and save them.
+
+### What is Validated
+
+- **JSON / JSONC / YAML syntax** — Parse errors are reported inline
+- **GTS schema validation** — Instance documents are validated against their corresponding GTS schemas
+- **GTS ID format** — Identifiers are checked against the GTS naming convention (`gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>`)
+- **Cross-references** — Referenced GTS IDs are verified to exist in the project; similar IDs are suggested for misprints
+
+### Where to See Errors
+
+- **Problems panel** (`View > Problems`) — All validation errors across the workspace
+- **Inline underlines** — Red squiggly underlines on the exact error location in the editor
+- **Hover tooltips** — Hover over an underlined range to see the error message
 
 ## Layout Management
 
@@ -47,13 +56,8 @@ When you open a file, the extension automatically:
 
 ### Saving Layouts
 
-After arranging nodes and edges in the visual diagram:
+After arranging nodes in the diagram, click **"Save Layout"**. The layout is saved to `.gts-viewer/` in your workspace root.
 
-1. Click the **"Save Layout"** button in the top-right corner
-2. The layout is saved to `.gts-viewer/[filename]_layout.json` in your workspace root
-3. A confirmation message appears showing where the layout was saved
-
-**Layout Files Location:**
 ```
 your-workspace/
 ├── .gts-viewer/           # Layout storage directory
@@ -66,18 +70,13 @@ your-workspace/
 
 ### Version Control
 
-The `.gts-viewer` folder can be committed to your repository so that:
-- Layouts are shared with your team
-- Layout changes are tracked in version control
-- Everyone sees the same visual organization
-
-To share layouts with your team, add `.gts-viewer/` to your repository:
+To share layouts with your team, commit the `.gts-viewer/` folder:
 ```bash
 git add .gts-viewer/
 git commit -m "Add GTS layout configurations"
 ```
 
-To keep layouts local only, add to `.gitignore`:
+To keep layouts local only:
 ```bash
 echo ".gts-viewer/" >> .gitignore
 ```
@@ -85,53 +84,38 @@ echo ".gts-viewer/" >> .gitignore
 ## Usage Tips
 
 ### Keyboard Navigation
-- **Shift + Arrow Up/Down** - Switch between files in the file list
-- Navigate the canvas using mouse drag or trackpad gestures
+- **Shift + Arrow Up/Down** — Switch between files in the file list
 
 ### Diagram Interactions
-- **Drag nodes** - Reposition schema and instance nodes
-- **Zoom** - Use mouse wheel or pinch gesture to zoom in/out
-- **Pan** - Click and drag the canvas background to pan
-- **Expand/Collapse** - Click nodes to expand or collapse details
+- **Drag nodes** — Reposition schema and instance nodes
+- **Zoom** — Mouse wheel or pinch gesture
+- **Pan** — Click and drag the canvas background
+- **Expand/Collapse** — Click nodes to expand or collapse details
 
 ## Troubleshooting
 
-### "No file selected" error
-Make sure you right-click on a `.json`, `.jsonc` or `.gts` file, not a folder or other file type.
+### Extension Not Loading
+1. Check the Output panel (select **GTS** from dropdown) for error messages
+2. Ensure `npm run build:vscode` completed successfully
+3. Verify a workspace folder is open (required for layout storage)
 
-### "Please open a workspace folder" error
-The extension requires an open workspace to save layouts. Open a folder in VSCode first.
+### File Not Parsing
+- Ensure the file contains valid JSON, JSONC, or YAML
+- Check for syntax errors — look for red underlines or the Problems panel
 
-### Layout not saving
+### Layout Not Saving
 - Check that you have write permissions in your workspace
-- Verify that the workspace folder is not read-only
-- Check the VSCode Output panel (select "GTS" from dropdown) for error messages
-
-### File not parsing
-- Ensure the file contains valid JSON
-- Check for syntax errors in your JSON file
-- Look for error messages in the preview panel
+- Verify the workspace folder is not read-only
 
 ## Requirements
 
-- VSCode version 1.85.0 or higher
+- VS Code 1.85.0 or higher (also works in Cursor, Windsurf, Devin Desktop, Antigravity)
 - A workspace folder must be open
-- Files must contain valid JSON content
-
-## Extension Settings
-
-This extension does not currently add any VSCode settings. Configuration is automatic based on your workspace.
-
-## Known Limitations
-
-- Only JSON and GTS files are supported
-- Large JSON files (>10MB) may take longer to render
-- Complex schemas with many relationships may affect performance
 
 ## Feedback & Issues
 
-Found a bug or have a feature request? Please open an issue on our [GitHub repository](https://github.com/globaltypesystem/gts-viewer).
+Found a bug or have a feature request? Please open an issue on the [GitHub repository](https://github.com/GlobalTypeSystem/gts-kit/issues).
 
 ## License
 
-See LICENSE file in the repository root.
+Apache License 2.0 — see [LICENSE](https://github.com/GlobalTypeSystem/gts-kit/blob/main/LICENSE) in the repository root.

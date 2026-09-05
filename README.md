@@ -101,6 +101,74 @@ npm run package:vscode
 
 The VS Code plugin will store the GTS diagrams layout metadata in the `{REPOSITORY_ROOT}/.gts-viewer/` folder
 
+#### Publishing the VS Code Extension
+
+The extension is published to the **VS Code Marketplace** and the **Open VSX Registry** (used by Cursor, Devin Desktop, Windsurf, Antigravity, and VSCodium). A GitHub Actions workflow handles everything automatically when you push a version tag.
+
+##### One-time setup
+
+1. **VS Code Marketplace** -- create a publisher at the [Marketplace publisher hub](https://marketplace.visualstudio.com/manage) and generate an Azure DevOps Personal Access Token (PAT) with the **Marketplace (Publish)** scope.
+2. **Open VSX** -- sign in at [open-vsx.org](https://open-vsx.org) with GitHub, create a namespace matching the `publisher` field in `package.json` (`GlobalTypeSystem`), and generate an access token.
+3. **GitHub secrets** -- add `VSCE_PAT` and `OVSX_PAT` to the repository secrets at **Settings > Secrets and variables > Actions**.
+
+##### Publishing a new version
+
+1. Bump the version in both `package.json` (root) and `apps/vscode-extension/package.json`:
+   ```bash
+   # e.g. bump to 0.3.0
+   npm version 0.3.0 --no-git-tag-version
+   npm --workspace apps/vscode-extension version 0.3.0 --no-git-tag-version
+   ```
+2. Commit the version bump:
+   ```bash
+   git add -A && git commit -m "chore: bump version to 0.3.0"
+   ```
+3. Tag and push:
+   ```bash
+   git tag v0.3.0
+   git push && git push --tags
+   ```
+
+The CI workflow (`.github/workflows/release-vscode.yml`) will:
+- Verify the tag matches `package.json`
+- Build the `.vsix` package
+- Publish to the VS Code Marketplace
+- Publish to Open VSX
+- Create a GitHub Release with the `.vsix` attached
+
+##### Manual publishing
+
+```bash
+# Build the VSIX
+make build-vscode
+
+# Publish to VS Code Marketplace
+make publish-vscode
+
+# Publish to Open VSX (requires OVSX_PAT env var)
+OVSX_PAT=<your-token> make publish-openvsx
+
+# Or publish to both
+OVSX_PAT=<your-token> make publish-extensions
+```
+
+##### Installing from VSIX
+
+Users can also install the extension manually from a `.vsix` file (e.g. from GitHub Releases):
+
+```bash
+# VS Code
+code --install-extension gts-<version>.vsix
+
+# Cursor
+cursor --install-extension gts-<version>.vsix
+
+# Windsurf
+windsurf --install-extension gts-<version>.vsix
+```
+
+Or via the Extensions sidebar: **"..." menu > Install from VSIX...**
+
 #### 4. Cleanup
 
 ```bash

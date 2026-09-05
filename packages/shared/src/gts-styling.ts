@@ -1,4 +1,4 @@
-import { GTS_REGEX, normalizeGtsId } from './entities.js'
+import { isGtsId, normalizeGtsId } from './entities.js'
 
 /**
  * Parse a GTS ID string and extract its parts
@@ -87,7 +87,7 @@ export function analyzeGtsIdForStyling(
 ): GtsStyleAnalysis {
   // Normalize to strip gts:// prefix per GTS spec
   const normalizedId = normalizeGtsId(gtsId)
-  const isValid = GTS_REGEX.test(normalizedId)
+  const isValid = isGtsId(normalizedId)
   const segments: GtsStyledSegment[] = []
 
   // If invalid format, return single error segment

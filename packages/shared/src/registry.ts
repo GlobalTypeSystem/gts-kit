@@ -2,7 +2,21 @@ import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId,
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
+import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
+// XGtsRefValidator is not re-exported from the package index, so import it from
+// its published subpath module.
+import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
 import * as path from 'path'
+
+/**
+ * Convert an XGtsRefValidator field path (dot/bracket notation, e.g.
+ * `value.tags[0]`) into a JSON-Pointer-style instancePath (`/value/tags/0`)
+ * matching the shape produced elsewhere in this file.
+ */
+function fieldPathToInstancePath(fieldPath: string): string {
+  if (!fieldPath || fieldPath === '/') return '/'
+  return '/' + fieldPath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+}
 
 /**
  * Helper to normalize content to array for processing
@@ -29,6 +43,15 @@ export class JsonRegistry {
   // Default file to open/select when displaying layout
   private defaultFilePath: string | null
 
+  // Lazily-built gts-ts store mirroring the registry's schemas, used to
+  // delegate GTS-specific schema validation (derivation §9.12, traits OP#13,
+  // modifier declaration/placement §9.11) that plain Ajv cannot express. It is
+  // invalidated whenever schemas change and rebuilt on next demand.
+  private gtsStore: GtsStore | null = null
+  // Modifier-declaration errors captured while registering schemas into the
+  // gts-ts store (register() throws these per §9.11.1), keyed by schema id.
+  private gtsStoreDeclErrors: Map<string, string> = new Map()
+
   constructor() {
     this.jsonObjs = new Map<string, JsonObj>()
     this.jsonSchemas = new Map<string, JsonSchema>()
@@ -50,12 +73,43 @@ export class JsonRegistry {
     this.jsonFileObjs.clear()
     this.jsonFileSchemas.clear()
     this.defaultFilePath = null
+    this.invalidateGtsStore()
+  }
+
+  /** Drop the cached gts-ts store so it is rebuilt from current schemas on next use. */
+  private invalidateGtsStore(): void {
+    this.gtsStore = null
+    this.gtsStoreDeclErrors.clear()
+  }
+
+  /**
+   * Build (once, then cache) a gts-ts GtsStore mirroring every schema currently
+   * in the registry, so ancestor-chain-dependent checks (derivation, traits,
+   * final/abstract guards) can be delegated to the reference implementation.
+   * Modifier-declaration errors that gts-ts throws at registration time are
+   * captured per schema id rather than aborting the whole build.
+   */
+  private getGtsStore(): GtsStore {
+    if (this.gtsStore) return this.gtsStore
+    const store = new GtsStore()
+    this.gtsStoreDeclErrors.clear()
+    for (const schema of this.jsonSchemas.values()) {
+      try {
+        store.register(createJsonEntity(schema.content))
+      } catch (err) {
+        this.gtsStoreDeclErrors.set(schema.id, err instanceof Error ? err.message : String(err))
+      }
+    }
+    this.gtsStore = store
+    return store
   }
 
   /**
    * Invalidate a file and remove its JsonFile and associated records from the registry.
    */
   invalidateFile(path: string): void {
+    // Any schema set change invalidates the derived gts-ts store.
+    this.invalidateGtsStore()
     if (this.jsonFiles.has(path)) {
       this.jsonFiles.delete(path)
     }
@@ -247,6 +301,51 @@ export class JsonRegistry {
           })
         }
       }
+
+      // GTS Type Schema rules that plain JSON Schema meta-validation cannot
+      // express, delegated to the gts-ts reference implementation:
+      //   - §9.11.1 invalid modifier declaration (final+abstract, non-boolean)
+      //   - §9.11 misplaced document-level keywords + final-base-in-chain guard
+      //   - §9.12 (OP#12) derivation constraint compatibility with the parent
+      //   - §9.7  (OP#13) trait schema/value validation across the chain
+      const store = this.getGtsStore()
+      const declError = this.gtsStoreDeclErrors.get(entity.id)
+      if (declError) {
+        // register() rejected this schema outright (§9.11.1); surface it and
+        // skip chain validation (the schema isn't in the store).
+        entity.validation.errors.push({
+          instancePath: '',
+          schemaPath: '#',
+          keyword: 'x-gts-schema',
+          message: declError,
+          params: {}
+        })
+      } else {
+        const result = store.validateSchemaAgainstParent(entity.id)
+        if (!result.ok && result.error) {
+          entity.validation.errors.push({
+            instancePath: '',
+            schemaPath: '#',
+            keyword: 'x-gts-schema',
+            message: result.error,
+            params: {}
+          })
+        }
+      }
+
+      // §9.6: validate the `x-gts-ref` *pattern declarations* inside the schema
+      // (e.g. a literal that is neither a valid GTS ID/pattern nor a resolvable
+      // JSON Pointer). This checks the schema authoring, not an instance value.
+      const refDeclErrors = new XGtsRefValidator().validateSchema(entity.content)
+      for (const err of refDeclErrors) {
+        entity.validation.errors.push({
+          instancePath: fieldPathToInstancePath(err.fieldPath),
+          schemaPath: '#',
+          keyword: 'x-gts-ref',
+          message: err.reason,
+          params: { value: err.value, refPattern: err.refPattern }
+        })
+      }
     } else if (entity instanceof JsonObj) {
       // Validate the object against its schema
       if (!entity.schemaId) {
@@ -269,6 +368,21 @@ export class JsonRegistry {
         return
       }
 
+      // §9.11.3 (OP#6): an instance's rightmost type must be instantiable. A
+      // type marked `x-gts-abstract: true` is a template and MUST NOT be
+      // instantiated directly. Ajv has no notion of this keyword, so enforce it
+      // explicitly here (mirrors gts-ts store.validateInstance).
+      if (GtsModifiers.isAbstract(schema.content)) {
+        const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
+        entity.validation.errors.push({
+          instancePath: '/' + String(idField),
+          schemaPath: '#',
+          keyword: 'x-gts-abstract',
+          message: `Type '${entity.schemaId}' is abstract and cannot be directly instantiated`,
+          params: { schemaId: entity.schemaId }
+        })
+      }
+
       try {
         const ajv = this.createAjvInstance()
 
@@ -281,6 +395,24 @@ export class JsonRegistry {
         if (!valid && validate.errors) {
           const formatted = this.formatValidationErrors(validate.errors)
           entity.validation.errors.push(...formatted)
+        }
+
+        // §9.6: `x-gts-ref` is an assertion keyword on instance string values
+        // (the value must be a GTS ID matching the declared prefix/pattern).
+        // Ajv treats it as an unknown keyword and silently ignores it, so it is
+        // enforced explicitly here (mirrors gts-ts store.validateInstance).
+        // No store is passed: referenced-entity existence is already covered by
+        // the gtsRefs registry check above, so this validator only enforces the
+        // GTS-ID format and the prefix/pattern constraint.
+        const xGtsRefErrors = new XGtsRefValidator().validateInstance(entity.content, schema.content)
+        for (const err of xGtsRefErrors) {
+          entity.validation.errors.push({
+            instancePath: fieldPathToInstancePath(err.fieldPath),
+            schemaPath: '#',
+            keyword: 'x-gts-ref',
+            message: err.reason,
+            params: { value: err.value, refPattern: err.refPattern }
+          })
         }
       } catch (error: any) {
         entity.validation.errors.push({

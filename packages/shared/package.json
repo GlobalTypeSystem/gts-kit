@@ -1,6 +1,6 @@
 {
   "name": "@gts/shared",
-  "version": "0.2.1",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
+    "@globaltypesystem/gts-ts": "^0.4.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "js-yaml": "^4.1.0",

@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
 import type { Language } from 'prism-react-renderer'
-import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues, GTS_REGEX, findSimilarEntityIds } from '@gts/shared'
+import { GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment, type ValidationIssues, isGtsId, findSimilarEntityIds } from '@gts/shared'
 import { Popup, PopupTrigger, PopupContent } from '@/components/ui/popup'
 
 interface JsonCodeProps {
@@ -54,7 +54,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
     // If invalid format, show as error with detailed tooltip
     if (!analysis.isValid) {
       // Check if it's a valid GTS format according to regex
-      const isValidFormat = GTS_REGEX.test(raw)
+      const isValidFormat = isGtsId(raw)
 
       // Build detailed error message
       let errorMessage = `⚠️ Invalid GTS ID Format!\n\nID: ${raw}\n\n`
@@ -76,7 +76,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
         const allEntityIds = [
           ...Array.from(registry.jsonSchemas.keys()),
           ...Array.from(registry.jsonObjs.keys())
-        ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+        ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
         const suggestions = findSimilarEntityIds(raw, allEntityIds, 3)
 
@@ -145,7 +145,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
               const allEntityIds = [
                 ...Array.from(registry.jsonSchemas.keys()),
                 ...Array.from(registry.jsonObjs.keys())
-              ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+              ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
               const suggestions = findSimilarEntityIds(segment.text, allEntityIds, 3)
 

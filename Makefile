@@ -52,6 +52,17 @@ build: ## Build all packages
 build-vscode: build ## Build vscode plugin
 	npm run package:vscode
 
+publish-vscode: build-vscode
+	npx @vscode/vsce publish \
+		--packagePath $$(find apps/vscode-extension/vsix -name '*.vsix' -print -quit)
+
+publish-openvsx: build-vscode
+	npx ovsx publish \
+		$$(find apps/vscode-extension/vsix -name '*.vsix' -print -quit) \
+		-p "$$OVSX_PAT"
+
+publish-extensions: publish-vscode publish-openvsx
+
 # Utility commands
 clean: ## Clean node_modules and build artifacts
 	npm run clean

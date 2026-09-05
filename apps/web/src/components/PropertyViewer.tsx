@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
-import { GTS_TYPE_REGEX, GTS_OBJ_REGEX, GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment } from '@gts/shared'
+import { isGtsType as checkGtsType, isGtsObj as checkGtsObj, GTS_COLORS, analyzeGtsIdForStyling, JsonRegistry, type GtsStyledSegment } from '@gts/shared'
 import { TIMING } from '@/lib/timing'
 import { PropertyInfo } from '@/lib/schemaParser'
 import { cn } from '@/lib/utils'
@@ -200,8 +200,8 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
     return String(value)
   }
 
-  const isGtsType = property.isGtsType || GTS_TYPE_REGEX.test(property.value)
-  const isGtsObj = property.isGtsObj || GTS_OBJ_REGEX.test(property.value)
+  const isGtsType = property.isGtsType || checkGtsType(property.value)
+  const isGtsObj = property.isGtsObj || checkGtsObj(property.value)
   const showGts = isGtsType || isGtsObj
 
   return (

@@ -1,12 +1,7 @@
 // ---- Helpers  ----
-import { AppConfig } from '@/lib/config'
-
-export const GTS_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~?\s*$/
-export const GTS_OBJ_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*\s*$/
-export const GTS_TYPE_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~\s*$/
-export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
-// Defaults are managed by AppConfig singleton; no defaults exported here
+// GTS ID validation/extraction is delegated to gts-ts via @gts/shared,
+// so this app no longer repeats the GTS grammar or extraction rules.
+import { isGtsId, extractID, IS_UUID_REGEX } from '@gts/shared'
 
 // ---- Entities ----
 
@@ -73,7 +68,7 @@ export class WebJsonEntity {
         function walk(node: any, currentPath = ''): void {
           if (node === null || node === undefined) return
           if (typeof node === 'string') {
-            if (GTS_REGEX.test(node)) found.push({ id: node, sourcePath: currentPath || 'root' })
+            if (isGtsId(node)) found.push({ id: node, sourcePath: currentPath || 'root' })
             return
           }
           if (Array.isArray(node)) {
@@ -92,43 +87,19 @@ export class WebJsonEntity {
         for (const e of found) uniq.set(`${e.id}|${e.sourcePath}`, e)
         return Array.from(uniq.values())
     }
-    firstNonEmptyField(fields: string[]): string | undefined {
-        // Prefer fields that look like GTS IDs
-        for (const f of fields) {
-          const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim() && GTS_REGEX.test(v)) return v
-        }
-        for (const f of fields) {
-          const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim()) return v
-        }
-        return undefined
-    }
+    /** Entity/instance id, extracted via gts-ts extractID. Falls back to file path. */
     calcJsonObjId(): string {
-      const fields: string[] = AppConfig.get().gts.entity_id_fields
-      const candidate = this.firstNonEmptyField(fields)
-      if (candidate) return candidate
+      const id = extractID(this.content).id
+      if (id) return id
       return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
     }
+    /** Schema/type id, extracted via gts-ts extractID. Falls back to file path. */
     calcJsonSchemaId(): string {
-        const fields: string[] = AppConfig.get().gts.schema_id_fields
-        const candidate = this.firstNonEmptyField(fields)
-        if (candidate) return candidate
-
-        // No explicit schema id found in configured fields.
-        // If the object id is a GTS id, derive the schema type as the left part up to the last '~' (inclusive).
-        const id = this.calcJsonObjId()
-        if (id && GTS_REGEX.test(id)) {
-          // If already a type id (ends with '~'), use it as-is
-          if (id.endsWith('~')) return id
-          // Otherwise, trim to the last '~' to get the type id
-          const lastTilde = id.lastIndexOf('~')
-          if (lastTilde > 0) {
-            return id.substring(0, lastTilde + 1)
-          }
-        }
-
-        // Fallback to file path
+        const result = extractID(this.content)
+        // For a schema document, its own id is the type id; for an instance the
+        // type id is the schema it derives from.
+        const schemaId = result.is_type_schema ? result.id : result.type_id
+        if (schemaId) return schemaId
         return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
     }
 }
@@ -195,14 +166,14 @@ export function extractGtsConstIdsWithPaths(schema: any): Array<{ id: string; so
   function walk(node: any, currentPath = ''): void {
     if (node === null || node === undefined) return
     if (typeof node === 'string') {
-      if (GTS_REGEX.test(node)) found.push({ id: node, sourcePath: currentPath || 'value' })
+      if (isGtsId(node)) found.push({ id: node, sourcePath: currentPath || 'value' })
       return
     }
     if (typeof node !== 'object') return
     let hasConstGts = false
     if (Object.prototype.hasOwnProperty.call(node, 'const')) {
       const v = (node as any).const
-      if (typeof v === 'string' && GTS_REGEX.test(v)) {
+      if (typeof v === 'string' && isGtsId(v)) {
         found.push({ id: v, sourcePath: currentPath ? `${currentPath}.const` : 'const' })
         hasConstGts = true
       }

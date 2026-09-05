@@ -1,10 +1,22 @@
 import { parseGtsFileContent, isYamlFileName } from './parse.js'
+import {
+  validateGtsID as gtsValidateID,
+  matchIDPattern as gtsMatchIDPattern,
+  extractID as gtsExtractID,
+  Gts
+} from '@globaltypesystem/gts-ts'
+import type {
+  ValidationResult as GtsValidationResult,
+  MatchResult as GtsMatchResult,
+  ExtractResult as GtsExtractResult
+} from '@globaltypesystem/gts-ts'
 
-// ---- Helpers  ----
+// Re-export core gts-ts functions for direct use by consumers
+export { gtsValidateID as validateGtsID, gtsMatchIDPattern as matchIDPattern, gtsExtractID as extractID }
+export type { GtsValidationResult, GtsMatchResult, GtsExtractResult }
 
-export const GTS_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~?\s*$/
-export const GTS_OBJ_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*\s*$/
-export const GTS_TYPE_REGEX = /^\s*gts\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:~[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.v(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)*~\s*$/
+// ---- GTS ID validation (delegates to gts-ts) ----
+
 export const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** The gts:// prefix used in JSON Schema $id and $ref for URI compatibility */
@@ -32,12 +44,91 @@ export function normalizeGtsId(id: string): string {
 }
 
 /**
- * Check if a string is a GTS identifier (with or without gts:// prefix)
+ * Check if a string is a valid GTS identifier (with or without gts:// prefix).
+ * Delegates to the official gts-ts library.
+ * Does NOT accept wildcard patterns — use {@link isGtsIdOrPattern} for that.
  */
 export function isGtsId(value: string): boolean {
   if (!value || typeof value !== 'string') return false
   const normalized = normalizeGtsId(value)
-  return GTS_REGEX.test(normalized)
+  const result = gtsValidateID(normalized)
+  return result.ok && !result.is_wildcard
+}
+
+/**
+ * Check if a string is a valid GTS type identifier (ends with ~).
+ * Delegates to the official gts-ts library.
+ */
+export function isGtsType(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  const normalized = normalizeGtsId(value)
+  return isGtsId(normalized) && Gts.isType(normalized)
+}
+
+/**
+ * Check if a string is a valid GTS object/instance identifier (does not end with ~).
+ * Delegates to the official gts-ts library.
+ */
+export function isGtsObj(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  const normalized = normalizeGtsId(value)
+  return isGtsId(normalized) && !Gts.isType(normalized)
+}
+
+/**
+ * Check if a string is a valid GTS identifier OR a GTS wildcard pattern
+ * (e.g. "gts.*", "gts.vendor.pkg.*"). Uses the official gts-ts library
+ * for validation, which supports the full GTS spec including wildcards.
+ *
+ * @param value - The string to check (may have gts:// prefix)
+ * @returns true if the value is a valid GTS ID or wildcard pattern
+ *
+ * @example
+ * isGtsIdOrPattern('gts.x.core.events.type.v1~')  // true (full ID)
+ * isGtsIdOrPattern('gts.*')                         // true (wildcard)
+ * isGtsIdOrPattern('gts.vendor.pkg.*')              // true (wildcard)
+ * isGtsIdOrPattern('not-a-gts-id')                  // false
+ */
+export function isGtsIdOrPattern(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  const normalized = normalizeGtsId(value)
+  const result = gtsValidateID(normalized)
+  return result.ok
+}
+
+/**
+ * Check if a string is a GTS wildcard pattern (contains `*`).
+ * Returns false for full GTS IDs without wildcards.
+ *
+ * @param value - The string to check (may have gts:// prefix)
+ * @returns true only if the value is a valid GTS wildcard pattern
+ *
+ * @example
+ * isGtsPattern('gts.*')                         // true
+ * isGtsPattern('gts.vendor.pkg.*')              // true
+ * isGtsPattern('gts.x.core.events.type.v1~')   // false (full ID, not a pattern)
+ */
+export function isGtsPattern(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  const normalized = normalizeGtsId(value)
+  const result = gtsValidateID(normalized)
+  return result.ok && (result.is_wildcard === true)
+}
+
+/**
+ * Check if a GTS x-gts-ref value is valid. Accepts:
+ * - Full GTS type IDs (e.g. "gts.vendor.pkg.ns.type.v1~")
+ * - Wildcard patterns (e.g. "gts.*", "gts.vendor.pkg.*")
+ * - JSON Pointer references starting with "/" (e.g. "/$id")
+ *
+ * Uses the official gts-ts library for GTS ID/pattern validation.
+ */
+export function isValidXGtsRef(value: string): boolean {
+  if (!value || typeof value !== 'string') return false
+  // JSON Pointer references are valid x-gts-ref values
+  if (value.startsWith('/')) return true
+  // Otherwise validate as GTS ID or pattern
+  return isGtsIdOrPattern(value)
 }
 
 /**
@@ -334,14 +425,17 @@ export class JsonEntity {
         if (this.schemaId?.startsWith('gts.')) return true
         return false
     }
+    /**
+     * Walk the entity content and collect all GTS ID references with their paths.
+     * Uses gts-ts isValidGtsID for ID validation.
+     */
     extractGtsIdsFromJsonWithPaths(): Array<{ id: string; sourcePath: string }> {
         const found: Array<{ id: string; sourcePath: string }> = []
         function walk(node: any, currentPath = ''): void {
           if (node === null || node === undefined) return
           if (typeof node === 'string') {
-            // Normalize the value to strip gts:// prefix before checking
             const normalized = normalizeGtsId(node)
-            if (GTS_REGEX.test(normalized)) found.push({ id: normalized, sourcePath: currentPath || 'root' })
+            if (isGtsId(normalized)) found.push({ id: normalized, sourcePath: currentPath || 'root' })
             return
           }
           if (Array.isArray(node)) {
@@ -351,10 +445,9 @@ export class JsonEntity {
           if (typeof node === 'object') {
             Object.entries(node).forEach(([k, v]) => {
               const nextPath = currentPath ? `${currentPath}.${k}` : k
-              // Check if this is a field with a GTS ID value (normalize to strip gts:// prefix)
               if (typeof v === 'string') {
                 const normalized = normalizeGtsId(v)
-                if (GTS_REGEX.test(normalized)) {
+                if (isGtsId(normalized)) {
                   found.push({ id: normalized, sourcePath: nextPath })
                 }
               }
@@ -367,63 +460,21 @@ export class JsonEntity {
         for (const e of found) uniq.set(`${e.id}|${e.sourcePath}`, e)
         return Array.from(uniq.values())
     }
-    firstNonEmptyField(fields: string[]): { field: string, value: string } | undefined {
-        // Prefer fields that look like GTS IDs (normalized to strip gts:// prefix)
-        for (const f of fields) {
-          const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim()) {
-            const normalized = normalizeGtsId(v)
-            if (GTS_REGEX.test(normalized)) return { field: f, value: normalized }
-          }
+    /**
+     * Extract entity ID and schema/type ID using gts-ts extractID.
+     * Populates id, schemaId, isSchema, selectedEntityIdField, selectedSchemaIdField.
+     */
+    applyGtsExtraction(_cfg: GtsConfig): void {
+        const result = gtsExtractID(this.content)
+        if (result.id) {
+          this.id = result.id
+          this.selectedEntityIdField = result.selected_entity_field
         }
-        for (const f of fields) {
-          const v = this.content?.[f]
-          if (typeof v === 'string' && v.trim()) {
-            // Normalize even non-GTS values to strip any gts:// prefix
-            return { field: f, value: normalizeGtsId(v) }
-          }
+        if (result.type_id) {
+          this.schemaId = result.type_id
+          this.selectedSchemaIdField = result.selected_type_id_field
         }
-        return undefined
-    }
-    calcJsonEntityId(cfg: GtsConfig): string {
-      const fields: string[] = cfg.entity_id_fields
-      const candidate = this.firstNonEmptyField(fields)
-      if (candidate) {
-        this.selectedEntityIdField = candidate.field
-        return candidate.value
-      }
-      return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
-    }
-    calcJsonSchemaId(cfg: GtsConfig): string {
-        // PRIORITY 1: Check entity_id_fields for a GTS ID (gtsId, id, etc.)
-        // If found and it's a chained ID, extract schema from the chain
-        const entityIdCandidate = this.firstNonEmptyField(cfg.entity_id_fields)
-        if (entityIdCandidate && GTS_REGEX.test(entityIdCandidate.value)) {
-          const id = entityIdCandidate.value
-          // If already a type id (ends with '~'), use it as-is
-          if (id.endsWith('~')) {
-            this.selectedSchemaIdField = entityIdCandidate.field
-            return id
-          }
-          // For chained IDs (well-known instances), extract schema: everything up to and including last '~'
-          const lastTilde = id.lastIndexOf('~')
-          if (lastTilde > 0) {
-            // Mark schema derived from the entity id field
-            this.selectedSchemaIdField = entityIdCandidate.field
-            return id.substring(0, lastTilde + 1)
-          }
-        }
-
-        // PRIORITY 2: Fall back to explicit schema_id_fields (type, gtsTid, etc.)
-        // Only check these if no GTS ID was found in entity_id_fields
-        const schemaIdCandidate = this.firstNonEmptyField(cfg.schema_id_fields)
-        if (schemaIdCandidate) {
-          this.selectedSchemaIdField = schemaIdCandidate.field
-          return schemaIdCandidate.value
-        }
-
-        // Fallback to file path
-        return this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
+        this.isSchema = result.is_type_schema
     }
     validate() {
       // Validate the entity against its schema
@@ -438,8 +489,12 @@ export class JsonObj extends JsonEntity {
         cfg: GtsConfig
     }) {
         super(params)
-        this.id = this.calcJsonEntityId(params.cfg)
-        this.schemaId = this.calcJsonSchemaId(params.cfg)
+        // Use gts-ts extractID for ID extraction
+        this.applyGtsExtraction(params.cfg)
+        // Fallback: if extractID didn't find an id, use file path
+        if (!this.id || this.id === 'undefined') {
+          this.id = this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
+        }
         if (this.id) {
           if (IS_UUID_REGEX.test(this.id)) {
             this.label = this.schemaId + '' + this.id
@@ -459,9 +514,13 @@ export class JsonSchema extends JsonEntity {
         cfg: GtsConfig
     }) {
         super(params)
+        // Use gts-ts extractID for ID extraction
+        this.applyGtsExtraction(params.cfg)
         this.isSchema = true
-        this.id = this.calcJsonEntityId(params.cfg)
-        this.schemaId = this.calcJsonSchemaId(params.cfg)
+        // Fallback: if extractID didn't find an id, use file path
+        if (!this.id || this.id === 'undefined') {
+          this.id = this.listSequence !== undefined ? `${this.file?.path}#${this.listSequence}` : this.file?.path || ''
+        }
         this.schemaRefs = this.extractRefStringsWithPaths()
         this.label = this.id || this.file?.name || ''
     }
@@ -471,7 +530,6 @@ export class JsonSchema extends JsonEntity {
         function walk(node: any, currentPath = ''): void {
           if (!node || typeof node !== 'object') return
           if (typeof (node as any).$ref === 'string') {
-            // Normalize $ref value by stripping gts:// prefix (per GTS spec)
             const refValue = normalizeGtsId((node as any).$ref)
             refs.push({ id: refValue, sourcePath: currentPath ? `${currentPath}.$ref` : '$ref' })
           }
@@ -495,34 +553,17 @@ export class JsonSchema extends JsonEntity {
 
 /**
  * Check if an object looks like a JSON Schema.
- * Per GTS spec, a document is a schema if and only if it contains a $schema field.
+ * Delegates to gts-ts extractID for schema detection per GTS spec.
  */
 export function looksLikeJsonSchema(obj: any): boolean {
   if (!obj || typeof obj !== 'object') return false
-  return typeof (obj as any).$schema === 'string'
+  return gtsExtractID(obj).is_type_schema
 }
 
 /**
- * Determine if an entity is a JSON Schema based on $schema URL.
- * Per GTS spec:
- * - A JSON document is a schema if and only if it contains a top-level $schema field.
- * - If $schema is present → the document MUST be treated as a schema.
- * - If $schema is absent → the document MUST be treated as an instance.
- *
- * Schemas always have $schema referring to a standard JSON Schema URL.
+ * Create a JsonObj or JsonSchema entity from content.
+ * Uses gts-ts extractID to determine if the content is a schema or instance.
  */
-function isJsonSchemaEntity(entity: any): boolean {
-  if (!entity || typeof entity !== 'object') return false
-  // Per GTS spec: strict schema/instance distinction based on $schema field
-  if (!Object.prototype.hasOwnProperty.call(entity, '$schema')) return false
-  if (typeof entity.$schema !== 'string') return false
-  const url = entity.$schema
-  // Accept standard JSON Schema URLs
-  if (url.startsWith("http://json-schema.org/")) return true
-  if (url.startsWith("https://json-schema.org/")) return true
-  return false
-}
-
 export function createEntity(params: {
   file?: JsonFile
   listSequence?: number
@@ -530,8 +571,9 @@ export function createEntity(params: {
   cfg: GtsConfig
   extractGtsRefs?: (entity: any) => Array<{ id: string; sourcePath: string }>
 }): JsonObj | JsonSchema | null {
-  if (isJsonSchemaEntity(params.content)) {
-    return  new JsonSchema({ file: params.file, listSequence: params.listSequence, content: params.content, cfg: params.cfg })
+  const extractResult = gtsExtractID(params.content)
+  if (extractResult.is_type_schema) {
+    return new JsonSchema({ file: params.file, listSequence: params.listSequence, content: params.content, cfg: params.cfg })
   }
 
   return new JsonObj({ file: params.file, listSequence: params.listSequence, content: params.content, cfg: params.cfg })

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, GTS_REGEX, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix } from '@gts/shared'
+import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern } from '@gts/shared'
 import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
 import * as jsonc from 'jsonc-parser'
@@ -18,7 +18,9 @@ interface GtsIdReference {
   fieldName: string
   range: vscode.Range
   sourcePath: string
-  isValid: boolean // Whether the ID matches GTS_REGEX
+  isValid: boolean // Whether the ID is a valid GTS identifier or pattern
+  /** Whether the value is a valid GTS wildcard pattern (e.g. "gts.*"). */
+  isPattern: boolean
   /** gts:// prefix problem for this value's field, if any. */
   urlPrefixIssue: GtsPrefixIssue | null
 }
@@ -269,7 +271,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         continue
       }
 
-      // Check if the GTS ID is valid according to GTS_REGEX
+      // Check if the GTS ID is valid using gts-ts validation
       if (!ref.isValid) {
         // Invalid GTS format - mark the entire string as error
         const text = document.getText()
@@ -292,6 +294,22 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         diagnostic.source = 'gts'
         diagnostics.push(diagnostic)
 
+        continue
+      }
+
+      // Wildcard patterns (e.g. "gts.*" in x-gts-ref) are valid GTS references
+      // but don't resolve to specific entities — show as schema decoration
+      if (ref.isPattern) {
+        const text = document.getText()
+        const refOffset = document.offsetAt(ref.range.start)
+        let gtsStartOffset = refOffset
+        if (text[refOffset] === '"') {
+          gtsStartOffset = refOffset + 1
+        }
+        gtsStartOffset += ref.uriPrefixLength
+        const startPos = document.positionAt(gtsStartOffset)
+        const endPos = document.positionAt(gtsStartOffset + ref.id.length)
+        schemaRanges.push(new vscode.Range(startPos, endPos))
         continue
       }
 
@@ -417,7 +435,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
             const rawValue = value
             const id = normalizeGtsId(rawValue)
             const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
-            const isValid = GTS_REGEX.test(id)
+            const isValid = isGtsId(id)
+            // Also accept wildcard patterns (e.g. "gts.*") using gts-ts validation
+            const isWildcardPattern = !isValid && isGtsPattern(id)
             const urlPrefixIssue = checkGtsUriPrefix(fieldName, rawValue)
 
             references.push({
@@ -427,7 +447,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
               fieldName,
               range,
               sourcePath,
-              isValid,
+              isValid: isValid || isWildcardPattern,
+              isPattern: isWildcardPattern,
               urlPrefixIssue
             })
           }
@@ -457,8 +478,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const references = this.findGtsReferences(document)
 
     for (const ref of references) {
-      // Don't link malformed or prefix-violating values.
-      if (ref.urlPrefixIssue || !ref.isValid) {
+      // Don't link malformed, prefix-violating, or wildcard pattern values.
+      if (ref.urlPrefixIssue || !ref.isValid || ref.isPattern) {
         continue
       }
 
@@ -597,6 +618,19 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       return new vscode.Hover(markdown, hoverRange)
     }
 
+    // Wildcard patterns (e.g. "gts.*") — show pattern info hover
+    if (matchedRef.isPattern) {
+      const startPos = document.positionAt(gtsStartOffset)
+      const endPos = document.positionAt(gtsStartOffset + matchedRef.rawValue.length)
+      const hoverRange = new vscode.Range(startPos, endPos)
+
+      markdown.appendMarkdown(`GTS Wildcard Pattern\n\n`)
+      markdown.appendMarkdown(`Pattern: ${escapeMarkdown(gtsId)}\n\n`)
+      markdown.appendMarkdown(`This is a valid GTS wildcard pattern used in x\\-gts\\-ref to match any GTS identifier that starts with the specified prefix.`)
+
+      return new vscode.Hover(markdown, hoverRange)
+    }
+
     // Check if the GTS ID is invalid
     if (!matchedRef.isValid) {
       // Invalid GTS format - show error with suggestions
@@ -623,7 +657,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const allEntityIds = [
         ...Array.from(this.registry.jsonSchemas.keys()),
         ...Array.from(this.registry.jsonObjs.keys())
-      ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+      ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
       // Find similar entities
       const suggestions = findSimilarEntityIds(gtsId, allEntityIds, 3)
@@ -699,7 +733,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const allEntityIds = [
         ...Array.from(this.registry.jsonSchemas.keys()),
         ...Array.from(this.registry.jsonObjs.keys())
-      ].filter(id => GTS_REGEX.test(id)) // Only suggest valid GTS IDs
+      ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
       // Find similar entities
       const suggestions = findSimilarEntityIds(entityIdToLookup, allEntityIds, 3)

@@ -72,8 +72,9 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   // Remove leading slash from instancePath (e.g., '/users/0/email' -> 'users/0/email')
   const path = instancePath.replace(/^\//, '')
 
-  // For gts:// prefix violations, highlight the offending string value precisely.
-  if (error.keyword === 'gts-uri-prefix' && error.params && 'value' in error.params) {
+  // For gts:// prefix violations and x-gts-ref mismatches, highlight the
+  // offending string value precisely.
+  if ((error.keyword === 'gts-uri-prefix' || error.keyword === 'x-gts-ref') && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
     const idx = text.indexOf(`"${value}"`)
     if (idx !== -1) {

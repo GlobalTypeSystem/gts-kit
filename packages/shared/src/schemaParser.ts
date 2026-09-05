@@ -1,4 +1,4 @@
-import { GTS_REGEX, GTS_TYPE_REGEX, GTS_OBJ_REGEX, normalizeGtsId } from '@gts/shared'
+import { isGtsId, isGtsType as checkGtsType, isGtsObj as checkGtsObj, normalizeGtsId } from '@gts/shared'
 
 export interface PropertyInfo {
   name: string
@@ -148,8 +148,8 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
         const normalizedRef = normalizeGtsId(prop.$ref)
         const refDescription = `Ref: ${normalizedRef}`
         description = description ? `${description}\n${refDescription}` : refDescription
-        if (GTS_TYPE_REGEX.test(normalizedRef)) isGtsType = true
-        if (GTS_REGEX.test(normalizedRef)) isGtsObj = true
+        if (checkGtsType(normalizedRef)) isGtsType = true
+        if (isGtsId(normalizedRef)) isGtsObj = true
       }
 
       // Add pattern information
@@ -192,14 +192,14 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       if (subSchema.title) {
         const titleDescription = `Schema: ${subSchema.title}`
         description = description ? `${description}\n${titleDescription}` : titleDescription
-        if (normalizedRef && GTS_TYPE_REGEX.test(normalizedRef)) isGtsType = true
+        if (normalizedRef && checkGtsType(normalizedRef)) isGtsType = true
       }
 
       if (normalizedRef) {
         const refDescription = `Ref: ${normalizedRef}`
         description = description ? `${description}\n${refDescription}` : refDescription
-        if (GTS_TYPE_REGEX.test(normalizedRef)) isGtsType = true
-        if (GTS_OBJ_REGEX.test(normalizedRef)) isGtsObj = true
+        if (checkGtsType(normalizedRef)) isGtsType = true
+        if (checkGtsObj(normalizedRef)) isGtsObj = true
       }
 
       properties.push({

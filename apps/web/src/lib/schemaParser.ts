@@ -1,4 +1,4 @@
-import { GTS_REGEX, GTS_TYPE_REGEX, GTS_OBJ_REGEX } from '@gts/shared'
+import { isGtsId, isGtsType as checkGtsType, isGtsObj as checkGtsObj } from '@gts/shared'
 
 export interface PropertyInfo {
   name: string
@@ -147,8 +147,8 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       if (prop.$ref) {
         const refDescription = `Ref: ${prop.$ref}`
         description = description ? `${description}\n${refDescription}` : refDescription
-        if (GTS_TYPE_REGEX.test(prop.$ref)) isGtsType = true
-        if (GTS_REGEX.test(prop.$ref)) isGtsObj = true
+        if (checkGtsType(prop.$ref)) isGtsType = true
+        if (isGtsId(prop.$ref)) isGtsObj = true
       }
 
       // Add pattern information
@@ -188,14 +188,14 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
       if (subSchema.title) {
         const titleDescription = `Schema: ${subSchema.title}`
         description = description ? `${description}\n${titleDescription}` : titleDescription
-        if (GTS_TYPE_REGEX.test(subSchema.$ref)) isGtsType = true
+        if (checkGtsType(subSchema.$ref)) isGtsType = true
       }
 
       if (subSchema.$ref) {
         const refDescription = `Ref: ${subSchema.$ref}`
         description = description ? `${description}\n${refDescription}` : refDescription
-        if (GTS_TYPE_REGEX.test(subSchema.$ref)) isGtsType = true
-        if (GTS_OBJ_REGEX.test(subSchema.$ref)) isGtsObj = true
+        if (checkGtsType(subSchema.$ref)) isGtsType = true
+        if (checkGtsObj(subSchema.$ref)) isGtsObj = true
       }
 
       properties.push({
