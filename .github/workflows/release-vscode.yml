@@ -1,0 +1,90 @@
+# Publishes the GTS VS Code extension to:
+#   - Visual Studio Marketplace  (VS Code)
+#   - Open VSX Registry           (Cursor, Devin Desktop, Windsurf, Antigravity, VSCodium)
+#   - GitHub Releases              (manual .vsix sideloading)
+#
+# Trigger: push a tag matching  v*  (e.g. v0.3.0)
+#
+# Required secrets:
+#   VSCE_PAT  – Azure DevOps PAT with "Marketplace (Publish)" scope
+#   OVSX_PAT  – Open VSX access token from https://open-vsx.org
+
+name: Release VS Code Extension
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(
+            node -p "require('./apps/vscode-extension/package.json').version"
+          )"
+
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match package.json version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Build VSIX
+        run: make build-vscode
+
+      - name: Find VSIX
+        id: vsix
+        shell: bash
+        run: |
+          VSIX="$(find apps/vscode-extension/vsix -name '*.vsix' -print -quit)"
+          if [ -z "$VSIX" ]; then
+            echo "::error::No .vsix file found in apps/vscode-extension/vsix"
+            exit 1
+          fi
+          echo "path=$VSIX" >> "$GITHUB_OUTPUT"
+          echo "Found VSIX: $VSIX"
+
+      # ── VS Code Marketplace ──────────────────────────────────────────
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          npx @vscode/vsce publish \
+            --packagePath "${{ steps.vsix.outputs.path }}" \
+            -p "$VSCE_PAT"
+
+      # ── Open VSX (Cursor, Devin Desktop, Windsurf, Antigravity, VSCodium) ─
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          npx ovsx publish \
+            "${{ steps.vsix.outputs.path }}" \
+            -p "$OVSX_PAT"
+
+      # ── GitHub Release ───────────────────────────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.vsix.outputs.path }}" \
+            --generate-notes
