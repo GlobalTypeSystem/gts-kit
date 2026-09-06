@@ -60,6 +60,8 @@ let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
 let gtsLinkProvider: GtsLinkProvider | null = null
+// File the user explicitly requested (context menu / command palette) — consumed by the first scanAndPost
+let pendingOpenFile: string | null = null
 
 function getNonce(): string {
   let text = ''
@@ -75,12 +77,18 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
   try {
     let selectedFilePath: string | null = null
-    const activeDoc = vscode.window.activeTextEditor?.document
-    selectedFilePath = (activeDoc && isGtsCandidateFile(activeDoc))
-      ? activeDoc.uri.fsPath
-      : null
+    // Prefer the file the user explicitly requested via context menu / command palette
+    if (pendingOpenFile) {
+      selectedFilePath = pendingOpenFile
+      pendingOpenFile = null
+    } else {
+      const activeDoc = vscode.window.activeTextEditor?.document
+      selectedFilePath = (activeDoc && isGtsCandidateFile(activeDoc))
+        ? activeDoc.uri.fsPath
+        : null
+    }
 
-    console.log('[GTS Extension] scanAndPost:', activeDoc, selectedFilePath)
+    console.log('[GTS Extension] scanAndPost: selectedFilePath=', selectedFilePath)
     const include = includeGlob
     // Skip build-output/dependency dirs + gitignored paths; the substring filter
     // below drops the remaining non-GTS files so we only parse files that mention
@@ -645,6 +653,9 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
   const selectedPath = resource?.fsPath
     || (activeDoc && isGtsCandidateFile(activeDoc) ? activeDoc.uri.fsPath : undefined)
 
+  // Store so the first scanAndPost picks it up as defaultFilePath
+  pendingOpenFile = selectedPath || null
+
   // Initialize layout storage with workspace root
   const workspaceFolders = vscode.workspace.workspaceFolders
   if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -844,5 +855,6 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
     viewerPanel = null
     layoutStorage = null
     hasPerformedInitialScan = false // Reset for next viewer session
+    pendingOpenFile = null
   }, null, context.subscriptions)
 }
