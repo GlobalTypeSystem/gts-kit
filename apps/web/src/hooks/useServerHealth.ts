@@ -13,6 +13,7 @@ const HEALTH_CHECK_TIMEOUT = 5000 // 5 seconds
 export function useServerHealth() {
   const [status, setStatus] = useState<ServerHealthStatus>('checking')
   const [isPolling, setIsPolling] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const serverUrl = getApiBase()
@@ -108,6 +109,12 @@ export function useServerHealth() {
     startPolling()
   }, [startPolling])
 
+  // Dismiss server requirement - stop polling and let the app proceed without server
+  const dismiss = useCallback(() => {
+    setDismissed(true)
+    stopPolling()
+  }, [stopPolling])
+
   // Initial health check on mount
   useEffect(() => {
     const usesServer = usesServerBackend()
@@ -132,10 +139,12 @@ export function useServerHealth() {
   return {
     status,
     isPolling,
+    dismissed,
     checkHealth,
     startPolling,
     stopPolling,
     markUnhealthy,
+    dismiss,
     serverUrl,
     usesServerBackend: usesServerBackend()
   }

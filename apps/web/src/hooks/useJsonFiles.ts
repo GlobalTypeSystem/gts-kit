@@ -13,6 +13,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
   const [hasAccess, setHasAccess] = useState(false)
   const [initialSelectedId, setInitialSelectedId] = useState<string | null>(null)
   const [version, setVersion] = useState(0)
+  const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null)
   const scannerRef = useRef<Scanner | null>(null)
   const registryRef = useRef<JsonRegistry>(new JsonRegistry())
   const watcherRef = useRef<(() => void) | null>(null)
@@ -25,6 +26,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     try {
       setError(null)
       setLoading(true)
+      setProgress(null)
 
       // Stop any existing watcher
       if (watcherRef.current) {
@@ -59,10 +61,18 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     const scanner = scannerRef.current
     if (!scanner) return
 
+    // Signal that directory listing is in progress (total=0 means listing phase)
+    setProgress({ processed: 0, total: 0 })
+    // Yield to let React flush the loading state before heavy directory walk
+    await new Promise(r => setTimeout(r, 0))
+
     const docs = await scanner.list({ glob: '**/*.{json,jsonc,gts,yaml,yml}' })
     const files: Array<{ path: string; name: string; content: any }> = []
+    const total = docs.length
+    setProgress({ processed: 0, total })
 
-    for (const d of docs) {
+    for (let i = 0; i < docs.length; i++) {
+      const d = docs[i]
       try {
         const text = await scanner.read(d.path)
         const isYaml = d.name.endsWith('.yaml') || d.name.endsWith('.yml')
@@ -77,6 +87,10 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
         }
       } catch (e) {
         // Skip unreadable/invalid files
+      }
+      // Update progress periodically to avoid excessive re-renders
+      if ((i + 1) % 50 === 0 || i === docs.length - 1) {
+        setProgress({ processed: i + 1, total })
       }
     }
 
@@ -110,6 +124,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     try {
       setLoading(true)
       setError(null)
+      setProgress(null)
       await loadFromScanner()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to reload files')
@@ -159,6 +174,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     chooseDirectory,
     needsDirectory: !hasAccess,
     initialSelectedId,
+    progress,
   })
 }
 

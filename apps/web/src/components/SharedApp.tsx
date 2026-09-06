@@ -4,7 +4,7 @@ import { SchemaDiagram, type SchemaDiagramHandle } from './SchemaDiagram'
 import { JsonObj, JsonSchema, JsonFile } from '@gts/shared'
 import { SchemaInvalidFileModel } from './SchemaInvalidFileModel'
 import { SchemaInvalidFileView } from './SchemaInvalidFileView'
-import { Loader2, AlertCircle, RefreshCw } from 'lucide-react'
+import { Loader2, AlertCircle, RefreshCw, ServerOff } from 'lucide-react'
 import { Button } from './ui/button'
 import { Card, CardContent } from './ui/card'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
@@ -47,7 +47,7 @@ export function SharedApp({
   const DEFAULT_SIDEBAR_WIDTH = config.sidebar.default_width
 
   // Server health monitoring
-  const { status: serverStatus, markUnhealthy, serverUrl, usesServerBackend } = useServerHealth()
+  const { status: serverStatus, markUnhealthy, serverUrl, usesServerBackend, dismissed: serverDismissed, dismiss: dismissServer } = useServerHealth()
 
   // Load sidebar width from localStorage (with fallback for environments where localStorage is not available)
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -293,6 +293,37 @@ export function SharedApp({
     return () => window.removeEventListener('gts-refresh-layout' as any, onRefreshLayout)
   }, [handleRefreshLayout, model.registry, diagramEntity])
 
+  // Show server connection screen when server is required but unreachable
+  if (usesServerBackend && !serverDismissed && serverStatus !== 'healthy') {
+    return (
+      <div className="h-screen flex items-center justify-center p-6">
+        <Card className="max-w-xl w-full shadow-sm">
+          <CardContent className="pt-8 pb-8">
+            <div className="text-center space-y-4">
+              <ServerOff className="h-12 w-12 mx-auto text-amber-500" />
+              <h1 className="text-2xl font-bold">Connecting to server...</h1>
+              <p className="text-muted-foreground">
+                The web version uses a server at <strong>{serverUrl}</strong> to store diagram layout metadata.
+              </p>
+              <div className="flex items-center justify-center space-x-2 text-sm text-amber-600 dark:text-amber-500">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{serverStatus === 'checking' ? 'Checking server connection...' : 'Server unreachable. Retrying...'}</span>
+              </div>
+              <div className="pt-2">
+                <Button variant="outline" onClick={dismissServer}>
+                  Continue without server
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Without the server, diagrams will render normally but layout positions will not be saved between sessions.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center">
@@ -303,6 +334,11 @@ export function SharedApp({
               Scanning workspace for JSON and GTS files...
             </span>
           </div>
+          {progress && progress.total === 0 && (
+            <div className="text-sm text-muted-foreground">
+              Listing files in directory, please wait...
+            </div>
+          )}
           {progress && progress.total > 0 && (
             <div className="w-80">
               <div className="flex justify-between text-sm text-muted-foreground mb-1">
