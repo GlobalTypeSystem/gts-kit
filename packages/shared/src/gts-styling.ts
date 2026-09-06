@@ -152,9 +152,12 @@ export function analyzeGtsIdForStyling(
 export function extractGtsIdsFromJson(jsonText: string): Array<{ id: string; start: number; end: number }> {
   const results: Array<{ id: string; start: number; end: number }> = []
 
-  // Match string values that contain GTS IDs (with or without gts:// prefix)
-  // This regex looks for quoted strings that start with "gts." or "gts://gts."
-  const stringPattern = /"((?:gts:\/\/)?gts\.[^"]+)"/g
+  // Match string values that contain GTS IDs (with or without gts:// prefix).
+  // This regex looks for quoted strings that start with "gts." or "gts://".
+  // The gts:// branch intentionally matches any body (not just gts.) so that
+  // malformed identifiers like "gts://gtx.foo.bar.v1~" are surfaced for
+  // validation rather than silently ignored.
+  const stringPattern = /"(gts:\/\/[^"]+|gts\.[^"]+)"/g
 
   let match: RegExpExecArray | null
   while ((match = stringPattern.exec(jsonText)) !== null) {

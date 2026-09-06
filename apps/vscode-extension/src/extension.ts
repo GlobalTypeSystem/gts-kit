@@ -112,8 +112,10 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
         }
         const data = await vscode.workspace.fs.readFile(uri)
         const text = Buffer.from(data).toString('utf8')
-        // Quick pre-filter: a file with no "gts." substring cannot hold a GTS id.
-        if (!text.includes('gts.')) {
+        // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
+        // Check for both "gts." (canonical form) and "gts://" (URI form) so that
+        // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
+        if (!text.includes('gts.') && !text.includes('gts://')) {
           continue
         }
         const name = path.basename(uri.fsPath)
@@ -404,8 +406,10 @@ async function readGtsCandidateFiles(
         const data = await vscode.workspace.fs.readFile(uri)
         text = Buffer.from(data).toString('utf8')
       }
-      // Quick pre-filter: a file with no "gts." substring cannot hold a GTS id.
-      if (!text.includes('gts.')) continue
+      // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
+      // Check for both "gts." (canonical form) and "gts://" (URI form) so that
+      // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
+      if (!text.includes('gts.') && !text.includes('gts://')) continue
       const name = path.basename(uri.fsPath)
       let content: any
       try { content = parseGtsFileContent(name, text) } catch { content = text }

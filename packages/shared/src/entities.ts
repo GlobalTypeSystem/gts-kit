@@ -151,7 +151,7 @@ export function fieldRequiresGtsUriPrefix(fieldName: string | undefined | null):
 }
 
 /** Kind of gts:// prefix problem detected for a GTS identifier in a specific field. */
-export type GtsPrefixIssueKind = 'missing-uri-prefix' | 'unexpected-uri-prefix'
+export type GtsPrefixIssueKind = 'missing-uri-prefix' | 'unexpected-uri-prefix' | 'invalid-gts-uri'
 
 /** A detected gts:// prefix problem, with a human-readable explanation. */
 export interface GtsPrefixIssue {
@@ -180,8 +180,24 @@ export interface GtsPrefixIssue {
  */
 export function checkGtsUriPrefix(fieldName: string | undefined | null, rawValue: string): GtsPrefixIssue | null {
   if (typeof rawValue !== 'string') return null
+
+  const trimmed = rawValue.trim()
+
+  // Detect gts:// URI prefix followed by an invalid GTS identifier body.
+  // E.g. "gts://gtx.cf.chat_engine.entities.client_id.v1~" — the part after
+  // "gts://" does not start with "gts." and is therefore not a valid GTS ID.
+  if (trimmed.startsWith(GTS_URI_PREFIX) && !isGtsId(rawValue)) {
+    const body = trimmed.substring(GTS_URI_PREFIX.length)
+    const where = fieldName ? ` in "${fieldName}"` : ''
+    return {
+      kind: 'invalid-gts-uri',
+      suggestion: GTS_URI_PREFIX + 'gts.' + body.substring(body.indexOf('.') + 1),
+      message: `Malformed GTS identifier${where}: value starts with "${GTS_URI_PREFIX}" but "${body}" is not a valid GTS identifier (must start with "gts.").`
+    }
+  }
+
   if (!isGtsId(rawValue)) return null
-  const hasPrefix = rawValue.trim().startsWith(GTS_URI_PREFIX)
+  const hasPrefix = trimmed.startsWith(GTS_URI_PREFIX)
   const requiresPrefix = fieldRequiresGtsUriPrefix(fieldName)
   const canonical = normalizeGtsId(rawValue)
 
@@ -429,6 +445,11 @@ export class JsonEntity {
         if (this.id?.startsWith('gts.')) return true
         if (this.gtsRefs?.length) return true
         if (this.schemaId?.startsWith('gts.')) return true
+        // Detect GTS intent from raw content: if $id or $$id starts with "gts://"
+        // the author intended a GTS identifier, even if the body is malformed
+        // (e.g. "gts://gtx.foo.bar.v1~" — typo in the prefix after gts://).
+        const rawId = this.content?.['$id'] || this.content?.['$$id']
+        if (typeof rawId === 'string' && rawId.trim().startsWith(GTS_URI_PREFIX)) return true
         return false
     }
     /**

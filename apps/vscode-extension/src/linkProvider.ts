@@ -664,7 +664,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
       markdown.appendMarkdown(`⚠️ Invalid GTS ID Format!\n\n`)
       markdown.appendMarkdown(`ID: ${escapeMarkdown(gtsId)}\n\n`)
-      markdown.appendMarkdown(`This string starts with "gts." but doesn't match the valid GTS ID pattern.\n\n`)
+      markdown.appendMarkdown(`This string looks like a GTS identifier but doesn't match the valid GTS ID pattern.\n\n`)
       markdown.appendMarkdown(`Expected GTS pattern is:\n\n${escapeMarkdown('gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~[<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>...]...]]]')}\n\n`)
 
       /*
