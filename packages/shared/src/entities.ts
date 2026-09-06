@@ -266,6 +266,12 @@ export const GTS_COLORS = {
     foreground: '#fecaca',  // Tailwind text-red-200
     background: '#b91c1c',  // Tailwind bg-red-700
     background_transparent: '#b91c1cf0',  // Tailwind bg-red-700
+  },
+  unresolved: {
+    // Valid GTS format but entity not found in project (e.g. examples): gray
+    foreground: '#d4d4d8',  // Tailwind zinc-300
+    background: '#52525b',  // Tailwind zinc-600
+    background_transparent: '#52525bf0',
   }
 } as const
 

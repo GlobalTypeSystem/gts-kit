@@ -133,6 +133,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   private schemaDecorationType: vscode.TextEditorDecorationType
   private instanceDecorationType: vscode.TextEditorDecorationType
   private errorDecorationType: vscode.TextEditorDecorationType
+  private unresolvedDecorationType: vscode.TextEditorDecorationType
   // Position-based gap inserted before every non-first GTS segment so the
   // spacing between `~`-separated segments is identical regardless of the
   // colour/style (schema/instance/error) of the following segment.
@@ -187,6 +188,20 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       ].join('; ')
     })
 
+    // Valid GTS format but entity not found in project (e.g. in "examples")
+    this.unresolvedDecorationType = vscode.window.createTextEditorDecorationType({
+      color: GTS_COLORS.unresolved.foreground,
+      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+      before: { contentText: '', margin: '0 0 0 0' },
+      after:  { contentText: '', margin: '0 0 0 0' },
+      textDecoration: [
+        'none',
+        'border: 1px solid ' + GTS_COLORS.unresolved.background_transparent,
+        'background-color: ' + GTS_COLORS.unresolved.background_transparent,
+        'border-radius: 4px',
+      ].join('; ')
+    })
+
     // Colourless spacer applied to every non-first segment. It inserts a fixed
     // left margin before the segment's chip so the gap after each `~` is the
     // same width whether the following segment is a schema, instance, or error.
@@ -206,6 +221,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     this.schemaDecorationType.dispose()
     this.instanceDecorationType.dispose()
     this.errorDecorationType.dispose()
+    this.unresolvedDecorationType.dispose()
     this.segmentGapDecorationType.dispose()
     this.diagnosticCollection.clear()
   }
@@ -248,6 +264,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const schemaRanges: vscode.Range[] = []
     const instanceRanges: vscode.Range[] = []
     const errorRanges: vscode.Range[] = []
+    const unresolvedRanges: vscode.Range[] = []
     const gapRanges: vscode.Range[] = []
     const diagnostics: vscode.Diagnostic[] = []
 
@@ -362,17 +379,23 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
             instanceRanges.push(partRange)
           }
         } else {
-          // Entity not found - mark as error
-          errorRanges.push(partRange)
+          // Entity not found — if the reference is inside an "examples" field,
+          // show a neutral gray chip instead of a red error.
+          const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
+          if (inExamples) {
+            unresolvedRanges.push(partRange)
+          } else {
+            errorRanges.push(partRange)
 
-          // Create diagnostic for missing entity
-          const diagnostic = new vscode.Diagnostic(
-            partRange,
-            `GTS entity not found: "${entityIdToLookup}"`,
-            vscode.DiagnosticSeverity.Error
-          )
-          diagnostic.source = 'gts'
-          diagnostics.push(diagnostic)
+            // Create diagnostic for missing entity
+            const diagnostic = new vscode.Diagnostic(
+              partRange,
+              `GTS entity not found: "${entityIdToLookup}"`,
+              vscode.DiagnosticSeverity.Error
+            )
+            diagnostic.source = 'gts'
+            diagnostics.push(diagnostic)
+          }
         }
 
         currentOffset += part.length
@@ -383,6 +406,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     editor.setDecorations(this.schemaDecorationType, schemaRanges)
     editor.setDecorations(this.instanceDecorationType, instanceRanges)
     editor.setDecorations(this.errorDecorationType, errorRanges)
+    editor.setDecorations(this.unresolvedDecorationType, unresolvedRanges)
     editor.setDecorations(this.segmentGapDecorationType, gapRanges)
 
     // Update diagnostics for this document
