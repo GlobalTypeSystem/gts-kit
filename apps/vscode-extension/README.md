@@ -1,4 +1,4 @@
-# Global Type System (GTS) — VS Code Extension
+# Global Type System (GTS) Kit - VS Code Extension
 
 Browse, validate, visualize, and manage [GTS](https://github.com/globaltypesystem/gts-spec) (Global Type System) schemas and instances directly in VS Code -based IDEs.
 
