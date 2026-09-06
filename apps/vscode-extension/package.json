@@ -1,6 +1,6 @@
 {
   "name": "gts-kit",
-  "displayName": "Global Type System (GTS)",
+  "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
   "version": "0.2.5",
   "private": true,
