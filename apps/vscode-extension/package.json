@@ -2,7 +2,7 @@
   "name": "gts-kit",
   "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "publisher": "GlobalTypeSystem",
   "license": "Apache-2.0",
