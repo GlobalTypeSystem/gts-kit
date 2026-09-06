@@ -102,11 +102,11 @@ export class SchemaInvalidFileView extends Component<SchemaInvalidFileViewProps>
         </div>
         <div className="flex-1 p-4 overflow-auto text-sm">
           {validation && validation.errors.length > 0 && (
-            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text">
+            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded select-text cursor-text overflow-hidden">
               <div className="text-sm font-medium text-red-800 mb-2">Invalid JSON File:</div>
               <div className="space-y-1">
                 {validation.errors.map((error: any, index: number) => (
-                  <div key={index} className="text-sm text-red-700 select-text cursor-text">
+                  <div key={index} className="text-sm text-red-700 select-text cursor-text break-words">
                     {error.message}
                   </div>
                 ))}

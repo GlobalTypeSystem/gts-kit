@@ -161,11 +161,11 @@ export class SchemaNodeView extends Component<NodeProps<any>, {}> {
     const pad = size === 'sm' ? 'p-3' : 'p-2'
     const titleMb = size === 'sm' ? 'mb-2' : 'mb-1'
     return (
-      <div className={cn('mb-3 bg-red-50 border border-red-200 rounded select-text cursor-text', pad)}>
+      <div className={cn('mb-3 bg-red-50 border border-red-200 rounded select-text cursor-text overflow-hidden', pad)}>
         <div className={cn('font-medium text-red-800', textSize, titleMb)}>Validation Errors:</div>
         <div className="space-y-1">
           {summaryErrors.map((error: any, index: number) => (
-            <div key={index} className={cn('text-red-700 select-text cursor-text', textSize)}>
+            <div key={index} className={cn('text-red-700 select-text cursor-text break-words', textSize)}>
               <span className="font-medium">{error.instancePath || '/'}</span>: {error.message}
               {error.keyword && <span className="text-red-500 ml-1">({error.keyword})</span>}
             </div>

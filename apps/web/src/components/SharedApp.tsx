@@ -405,7 +405,7 @@ export function SharedApp({
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <div className="border-b bg-card px-6 py-4">
+        <div className="border-b bg-card px-4 py-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <button
@@ -416,7 +416,7 @@ export function SharedApp({
                 {sidebarOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
               </button>
               <div>
-                <h1 className="text-2xl font-bold">GTS Types and Instances Viewer</h1>
+                <h1 className="text-base font-bold">GTS Types and Instances Viewer</h1>
                 <p className="text-sm text-muted-foreground">
                   {diagramEntity ? (diagramEntity.label) : 'Visualize JSON files and their schema relationships based on GTS IDs'}
                 </p>

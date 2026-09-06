@@ -140,9 +140,9 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
       ref={panelRef as any}
       aria-label="Entity list panel (use Shift + Arrow keys to navigate)"
     >
-      <MenuHeader className="pb-3">
+      <MenuHeader className="pb-2">
         <MenuTitle>JSON entities</MenuTitle>
-        <div className="flex items-center gap-2 mt-2">
+        <div className="flex items-center gap-2 mt-1">
           {capabilities.supportsRefresh ? (
             <Button variant="outline" size="sm" onClick={onRefresh} title="Rescan current directory">
               <RefreshCw className="h-4 w-4 mr-1" />
@@ -182,7 +182,7 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
             <option value="valid">Valid entities</option>
           </select>
         </div>
-        <div className="relative mt-2">
+        <div className="relative mt-1">
           <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search ... e.g. gts."
@@ -193,7 +193,7 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
         </div>
       </MenuHeader>
       <MenuContent>
-        <ScrollArea className="h-[calc(100vh-170px)]">
+        <ScrollArea className="h-[calc(100vh-160px)]">
           <div className="p-2 space-y-1">
             {/* JSON Objects */}
             <div

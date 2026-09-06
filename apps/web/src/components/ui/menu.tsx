@@ -24,7 +24,7 @@ const MenuHeader = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "p-4 border-b sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60",
+      "px-3 py-2 border-b sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60",
       className
     )}
     {...props}
@@ -39,7 +39,7 @@ const MenuTitle = React.forwardRef<
   <h3
     ref={ref}
     className={cn(
-      "text-sm font-semibold tracking-wide uppercase text-muted-foreground",
+      "text-xs font-semibold tracking-wide uppercase text-muted-foreground",
       className
     )}
     {...props}
@@ -95,7 +95,7 @@ const MenuItem = React.forwardRef<HTMLDivElement, MenuItemProps>(
         ref={ref}
         aria-disabled={disabled}
         className={cn(
-          "flex items-center space-x-3 p-2 rounded-md transition-colors border border-transparent",
+          "flex items-center space-x-2 px-2 py-1 rounded-md transition-colors border border-transparent",
           disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer",
           "w-[98%] max-w-[98%] overflow-hidden",
           // Apply entity-specific colors if entityType is provided, otherwise use default gray
