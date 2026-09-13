@@ -347,6 +347,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       gtsStartOffset += ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
+      let hasMissingAncestor = false
       for (let segIndex = 0; segIndex < parts.length; segIndex++) {
         const part = parts[segIndex]
         const partStartPos = document.positionAt(currentOffset)
@@ -361,17 +362,12 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         }
 
         // Determine the full entity ID to look up
-        let entityIdToLookup: string
-        if (parts.length === 1) {
-          entityIdToLookup = part
-        } else if (part === parts[0]) {
-          entityIdToLookup = part
-        } else {
-          entityIdToLookup = parts[0] + part
-        }
+        const entityIdToLookup = parts.slice(0, segIndex + 1).join('')
 
         // Look up the entity in the registry
-        const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+        const entity = hasMissingAncestor
+          ? undefined
+          : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
         if (entity) {
           if (entity.isSchema) {
@@ -383,7 +379,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           // Entity not found — if the reference is inside an "examples" field,
           // show a neutral gray chip instead of a red error.
           const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
-          if (inExamples) {
+          if (inExamples && !hasMissingAncestor) {
             unresolvedRanges.push(partRange)
           } else {
             // Red chip only — the authoritative "GTS reference not found"
@@ -391,6 +387,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
             // (registry.validateEntity, surfaced via validation.ts) so we
             // don't publish a second, duplicate diagnostic for the same miss.
             errorRanges.push(partRange)
+            hasMissingAncestor = true
           }
         }
 
@@ -625,26 +622,20 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       gtsStartOffset += ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
-      for (const part of parts) {
+      let hasMissingAncestor = false
+      for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+        const part = parts[partIndex]
         const partStartPos = document.positionAt(currentOffset)
         const partEndPos = document.positionAt(currentOffset + part.length)
         const partRange = new vscode.Range(partStartPos, partEndPos)
 
         // Determine the full entity ID to look up
-        let entityIdToLookup: string
-        if (parts.length === 1) {
-          // Only one part, use it as-is
-          entityIdToLookup = part
-        } else if (part === parts[0]) {
-          // First part (schema type)
-          entityIdToLookup = part
-        } else {
-          // Second part (instance), combine with first part
-          entityIdToLookup = parts[0] + part
-        }
+        const entityIdToLookup = parts.slice(0, partIndex + 1).join('')
 
         // Look up the entity in the registry
-        const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+        const entity = hasMissingAncestor
+          ? undefined
+          : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
         if (entity && entity.file) {
           // Create a document link
@@ -665,6 +656,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           // Don't set tooltip - we provide rich hover via HoverProvider instead
 
           links.push(link)
+        } else if (!entity) {
+          hasMissingAncestor = true
         }
 
         currentOffset += part.length
@@ -829,26 +822,48 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     let entityIdToLookup = gtsId
     let hoverRange = matchedRef.range
+    let hoveredSegmentIndex: number | undefined
 
-    if (parts.length > 1) {
-      const firstPartLength = parts[0].length
-      if (relativeOffset < firstPartLength) {
-        // Cursor is on the first part
-        entityIdToLookup = parts[0]
-        const startPos = document.positionAt(gtsBodyOffset)
-        const endPos = document.positionAt(gtsBodyOffset + firstPartLength)
+    let segmentStartOffset = 0
+    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+      const part = parts[partIndex]
+      const segmentEndOffset = segmentStartOffset + part.length
+      if (relativeOffset >= segmentStartOffset && relativeOffset < segmentEndOffset) {
+        hoveredSegmentIndex = partIndex
+        entityIdToLookup = parts.slice(0, partIndex + 1).join('')
+        const startPos = document.positionAt(gtsBodyOffset + segmentStartOffset)
+        const endPos = document.positionAt(gtsBodyOffset + segmentEndOffset)
         hoverRange = new vscode.Range(startPos, endPos)
-      } else {
-        // Cursor is on the second part
-        entityIdToLookup = parts[0] + parts[1]
-        const startPos = document.positionAt(gtsBodyOffset + firstPartLength)
-        const endPos = document.positionAt(gtsBodyOffset + gtsId.length)
-        hoverRange = new vscode.Range(startPos, endPos)
+        break
+      }
+      segmentStartOffset = segmentEndOffset
+    }
+
+    let hasMissingAncestor = false
+    let missingAncestorId: string | undefined
+    if (hoveredSegmentIndex !== undefined) {
+      for (let partIndex = 0; partIndex <= hoveredSegmentIndex; partIndex++) {
+        const ancestorId = parts.slice(0, partIndex + 1).join('')
+        const ancestor = this.registry.jsonSchemas.get(ancestorId) || this.registry.jsonObjs.get(ancestorId)
+        if (!ancestor) {
+          hasMissingAncestor = true
+          missingAncestorId = ancestorId
+          break
+        }
       }
     }
 
     // Look up the entity in the registry
-    const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+    const entity = hasMissingAncestor
+      ? undefined
+      : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+
+    if (missingAncestorId) {
+      markdown.appendMarkdown(`GTS Parent Type Not Found\n\n`)
+      markdown.appendMarkdown(`Missing ancestor: ${escapeMarkdown(missingAncestorId)}\n\n`)
+      markdown.appendMarkdown(`This segment is invalid because it derives from a missing type.`)
+      return new vscode.Hover(markdown, hoverRange)
+    }
 
     if (!entity) {
       // Entity not found - show error with suggestions
