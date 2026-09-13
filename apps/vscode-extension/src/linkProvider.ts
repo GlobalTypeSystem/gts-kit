@@ -1,8 +1,9 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern } from '@gts/shared'
+import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
 import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
 import * as jsonc from 'jsonc-parser'
+import * as YAML from 'yaml'
 
 /**
  * Represents a GTS ID reference found in the document
@@ -256,8 +257,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     const document = editor.document
 
-    // Only decorate JSON/JSONC/GTS files
-    if (!['json', 'jsonc', 'gts'].includes(document.languageId)) {
+    // Only decorate JSON/JSONC/GTS/YAML files
+    if (!['json', 'jsonc', 'gts', 'yaml'].includes(document.languageId) && !isYamlFileName(document.fileName)) {
       return
     }
 
@@ -385,16 +386,11 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           if (inExamples) {
             unresolvedRanges.push(partRange)
           } else {
+            // Red chip only — the authoritative "GTS reference not found"
+            // diagnostic for this is published by the shared validator
+            // (registry.validateEntity, surfaced via validation.ts) so we
+            // don't publish a second, duplicate diagnostic for the same miss.
             errorRanges.push(partRange)
-
-            // Create diagnostic for missing entity
-            const diagnostic = new vscode.Diagnostic(
-              partRange,
-              `GTS entity not found: "${entityIdToLookup}"`,
-              vscode.DiagnosticSeverity.Error
-            )
-            diagnostic.source = 'gts'
-            diagnostics.push(diagnostic)
           }
         }
 
@@ -414,9 +410,115 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
-   * Find all GTS ID references in the document using jsonc-parser
+   * Find all GTS ID references in the document, using the parser appropriate
+   * for its format (YAML vs JSON/JSONC), so YAML files get exactly the same
+   * blue/red/gray annotations, hovers and links as JSON files do.
    */
   private findGtsReferences(document: vscode.TextDocument): GtsIdReference[] {
+    if (document.languageId === 'yaml' || isYamlFileName(document.fileName)) {
+      return this.findGtsReferencesYaml(document)
+    }
+    return this.findGtsReferencesJson(document)
+  }
+
+  /**
+   * Build a GtsIdReference from a raw string value found at a known document
+   * offset range. Shared by both the JSON and YAML reference finders.
+   */
+  private buildGtsIdReference(rawValue: string, fieldName: string, sourcePath: string, range: vscode.Range): GtsIdReference {
+    const id = normalizeGtsId(rawValue)
+    const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
+    const isValid = isGtsId(id)
+    // Also accept wildcard patterns (e.g. "gts.*") using gts-ts validation
+    const isWildcardPattern = !isValid && isGtsPattern(id)
+    const urlPrefixIssue = checkGtsUriPrefix(fieldName, rawValue)
+
+    return {
+      id,
+      rawValue,
+      uriPrefixLength,
+      fieldName,
+      range,
+      sourcePath,
+      isValid: isValid || isWildcardPattern,
+      isPattern: isWildcardPattern,
+      urlPrefixIssue
+    }
+  }
+
+  /**
+   * Find all GTS ID references in a YAML document.
+   *
+   * YAML has no widely-used equivalent of jsonc-parser's offset-tracking
+   * visitor for JSON, so we use the `yaml` package's CST, which records a
+   * `range` (character offsets into the source text) on every scalar node.
+   * `range.start` here is normalized to point at the first character of the
+   * actual string content (skipping any opening quote), independent of the
+   * quote style used, so downstream consumers that were written for the JSON
+   * path (which skip a leading `"` themselves) work unchanged for YAML too.
+   */
+  private findGtsReferencesYaml(document: vscode.TextDocument): GtsIdReference[] {
+    const references: GtsIdReference[] = []
+    const text = document.getText()
+
+    let doc: YAML.Document.Parsed
+    try {
+      doc = YAML.parseDocument(text)
+    } catch (error) {
+      console.error('[GTS LinkProvider] Error parsing YAML document:', error)
+      return references
+    }
+    if (doc.contents == null) {
+      return references
+    }
+
+    try {
+      YAML.visit(doc, {
+        Scalar: (key, node, path) => {
+          const value = (node as YAML.Scalar).value
+          // Only interested in string values; never the YAML key tokens.
+          if (key === 'key' || typeof value !== 'string') return
+          if (!(value.startsWith('gts.') || value.startsWith(GTS_URI_PREFIX))) return
+
+          const nodeRange = node.range
+          if (!nodeRange) return
+          const [startOffset, valueEndOffset] = nodeRange
+
+          // Skip the opening quote (if any) so the range points directly at
+          // the string's content, matching what downstream code expects.
+          const raw = text.slice(startOffset, valueEndOffset)
+          const quoteLen = raw.startsWith('"') || raw.startsWith("'") ? 1 : 0
+          const valueStartOffset = startOffset + quoteLen
+
+          const startPos = document.positionAt(valueStartOffset)
+          const endPos = document.positionAt(valueStartOffset + value.length)
+          const range = new vscode.Range(startPos, endPos)
+
+          // Build the ancestor key path (used only to detect "examples"
+          // context, same as the JSON path) from the enclosing Map Pairs.
+          const pathKeys: string[] = []
+          for (const ancestor of path) {
+            if (YAML.isPair(ancestor) && YAML.isScalar(ancestor.key)) {
+              pathKeys.push(String((ancestor.key as YAML.Scalar).value))
+            }
+          }
+          const fieldName = pathKeys[pathKeys.length - 1] || ''
+          const sourcePath = pathKeys.join('.')
+
+          references.push(this.buildGtsIdReference(value, fieldName, sourcePath, range))
+        }
+      })
+    } catch (error) {
+      console.error('[GTS LinkProvider] Error visiting YAML document:', error)
+    }
+
+    return references
+  }
+
+  /**
+   * Find all GTS ID references in a JSON/JSONC document using jsonc-parser
+   */
+  private findGtsReferencesJson(document: vscode.TextDocument): GtsIdReference[] {
     const references: GtsIdReference[] = []
     const text = document.getText()
 

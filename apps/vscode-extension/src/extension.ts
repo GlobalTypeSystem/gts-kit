@@ -230,7 +230,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const documentSelector: vscode.DocumentSelector = [
     { language: 'json', scheme: 'file' },
     { language: 'jsonc', scheme: 'file' },
-    { language: 'gts', scheme: 'file' }
+    { language: 'gts', scheme: 'file' },
+    { language: 'yaml', scheme: 'file' }
   ]
 
   context.subscriptions.push(

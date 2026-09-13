@@ -76,10 +76,20 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   // offending string value precisely.
   if ((error.keyword === 'gts-uri-prefix' || error.keyword === 'x-gts-ref') && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
-    const idx = text.indexOf(`"${value}"`)
+    // Quoted (JSON, or a quoted YAML scalar) first, then bare YAML scalar.
+    let idx = text.indexOf(`"${value}"`)
+    let quoteLen = 1
+    if (idx === -1) {
+      idx = text.indexOf(`'${value}'`)
+      quoteLen = idx !== -1 ? 1 : 0
+    }
+    if (idx === -1) {
+      idx = text.indexOf(value)
+      quoteLen = 0
+    }
     if (idx !== -1) {
-      const startPos = document.positionAt(idx + 1) // +1 to skip opening quote
-      const endPos = document.positionAt(idx + 1 + value.length)
+      const startPos = document.positionAt(idx + quoteLen)
+      const endPos = document.positionAt(idx + quoteLen + value.length)
       return new vscode.Range(startPos, endPos)
     }
   }
@@ -109,11 +119,12 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   // For additionalProperties errors, look for the actual property mentioned in params
   if (error.keyword === 'additionalProperties' && error.params && 'additionalProperty' in error.params) {
     const additionalProp = (error.params as any).additionalProperty
-    const searchPattern = new RegExp(`["']${escapeRegex(additionalProp)}["']\\s*:`, 'g')
+    const searchPattern = keyRegex(additionalProp)
     const match = searchPattern.exec(text)
     if (match) {
-      const startPos = document.positionAt(match.index + 1) // +1 to skip opening quote
-      const endPos = document.positionAt(match.index + 1 + additionalProp.length)
+      const quoteLen = match[1] ? 1 : 0
+      const startPos = document.positionAt(match.index + quoteLen)
+      const endPos = document.positionAt(match.index + quoteLen + additionalProp.length)
       return new vscode.Range(startPos, endPos)
     }
   }
@@ -146,11 +157,12 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
 
     if (lastSegment && !/^\d+$/.test(lastSegment)) {
       // Not an array index, try to find the property name
-      const searchPattern = new RegExp(`["']${escapeRegex(lastSegment)}["']\\s*:`, 'g')
+      const searchPattern = keyRegex(lastSegment)
       const match = searchPattern.exec(text)
       if (match) {
-        const startPos = document.positionAt(match.index + 1) // +1 to skip opening quote
-        const endPos = document.positionAt(match.index + 1 + lastSegment.length)
+        const quoteLen = match[1] ? 1 : 0
+        const startPos = document.positionAt(match.index + quoteLen)
+        const endPos = document.positionAt(match.index + quoteLen + lastSegment.length)
         return new vscode.Range(startPos, endPos)
       }
     }
@@ -170,14 +182,15 @@ function findTypeFieldByValue(text: string, document: vscode.TextDocument, typeV
   // Escape the typeValue for use in regex
   const escapedValue = escapeRegex(typeValue)
 
-  // Search for: "type": "typeValue"
-  const searchPattern = new RegExp(`"type"\\s*:\\s*"${escapedValue}"`, 'g')
+  // Search for: type: typeValue (key and/or value optionally quoted, so this
+  // matches both JSON's `"type": "typeValue"` and YAML's bare `type: typeValue`)
+  const searchPattern = new RegExp(`(["']?)type\\1\\s*:\\s*(["']?)${escapedValue}\\2`, 'g')
   const match = searchPattern.exec(text)
 
   if (match) {
     // Highlight the "type" property name (not the value)
-    const typeKeyStart = match.index + 1 // +1 to skip opening quote
-    const typeKeyEnd = match.index + 5 // "type" is 4 characters, +1 for the quote
+    const typeKeyStart = match.index + (match[1] ? 1 : 0)
+    const typeKeyEnd = typeKeyStart + 4 // "type" is 4 characters
 
     const startPos = document.positionAt(typeKeyStart)
     const endPos = document.positionAt(typeKeyEnd)
@@ -310,6 +323,17 @@ function findNthObjectInArray(text: string, document: vscode.TextDocument, index
  */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Build a regex matching a property key followed by `:`, whether the key is
+ * quoted (JSON, or a quoted YAML key) or bare (a typical unquoted YAML key).
+ * Capture group 1 is the opening quote character, or empty for a bare key —
+ * used by callers to compute the correct offset past it.
+ */
+function keyRegex(name: string): RegExp {
+  const esc = escapeRegex(name)
+  return new RegExp(`(["']?)${esc}\\1\\s*:`, 'g')
 }
 
 /**

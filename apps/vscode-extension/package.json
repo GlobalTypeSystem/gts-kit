@@ -52,6 +52,7 @@
         {
           "id": "gts.fileExplorer",
           "name": "Discovered GTS files",
+          "icon": "resources/icon.svg",
           "contextualTitle": "GTS Files"
         }
       ]
@@ -116,6 +117,7 @@
     "esbuild": "^0.19.0",
     "ignore": "^5.3.2",
     "jsonc-parser": "^3.3.1",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "yaml": "^2.9.1"
   }
 }
