@@ -1,5 +1,6 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
+import { isYamlFileName } from './parse.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
 import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
@@ -393,6 +394,38 @@ export class JsonRegistry {
   }
 
   /**
+   * Recursively collect GTS entity definitions embedded inline under any nested
+   * `entities:` array within a parsed (YAML) document. This supports config
+   * files that seed GTS types/instances inline — e.g. a service's
+   * `types-registry.config.entities` block — where each array element is a full
+   * JSON Schema / instance keyed by its own `$id`.
+   *
+   * The returned contents are handed to the normal entity pipeline
+   * (`createEntity` + `isGtsEntity`), so non-GTS `entities` entries are filtered
+   * out naturally and only genuine definitions are registered.
+   */
+  private static collectInlineEntityDefinitions(root: any): any[] {
+    const out: any[] = []
+    const visit = (node: any): void => {
+      if (!node || typeof node !== 'object') return
+      if (Array.isArray(node)) {
+        node.forEach(visit)
+        return
+      }
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'entities' && Array.isArray(value)) {
+          for (const el of value) {
+            if (el && typeof el === 'object' && !Array.isArray(el)) out.push(el)
+          }
+        }
+        visit(value)
+      }
+    }
+    visit(root)
+    return out
+  }
+
+  /**
    * Process a file and store its entities if they are GTS entities.
    * This is a helper used by both scanFile and ingestFiles.
    */
@@ -417,17 +450,9 @@ export class JsonRegistry {
     // when a raw string was passed in.
     const parsedContent = jsonFile.content
 
-    // Normalize content to array and process each entity
-    const entities = normalizeToArray(parsedContent)
-    entities.forEach((entityContent: any, idx: number) => {
-      const seq = Array.isArray(parsedContent) ? idx : undefined
-      const entity = createEntity({
-        file: jsonFile,
-        listSequence: seq,
-        content: entityContent,
-        cfg
-      })
-
+    // Register one entity content as a schema/instance if it is a GTS entity.
+    const registerEntity = (entityContent: any, seq: number | undefined) => {
+      const entity = createEntity({ file: jsonFile, listSequence: seq, content: entityContent, cfg })
       if (entity && entity.isGtsEntity()) {
         hasGtsEntities = true
         if (entity instanceof JsonSchema) {
@@ -438,7 +463,26 @@ export class JsonRegistry {
           this.jsonFileObjs.set(path, [...this.jsonFileObjs.get(path) || [], entity as JsonObj])
         }
       }
+    }
+
+    // Top level: a single entity, or a top-level array of entities. This is the
+    // only shape recognized for JSON/JSONC/.gts files.
+    const entities = normalizeToArray(parsedContent)
+    entities.forEach((entityContent: any, idx: number) => {
+      registerEntity(entityContent, Array.isArray(parsedContent) ? idx : undefined)
     })
+
+    // YAML ONLY: config files may additionally *define* GTS types/instances
+    // inline under nested `entities:` arrays (e.g. a types-registry
+    // `config.entities` seed block), possibly buried several levels deep inside
+    // otherwise-non-GTS config. Register each such element as a real definition
+    // so its `$id` is treated as a definition instead of being harvested as a
+    // dangling reference. JSON files intentionally keep the strict shape above.
+    if (isYamlFileName(name)) {
+      for (const def of JsonRegistry.collectInlineEntityDefinitions(parsedContent)) {
+        registerEntity(def, undefined)
+      }
+    }
 
     // Only store the JsonFile once if it contains GTS entities
     if (hasGtsEntities && !this.jsonFiles.has(path)) {

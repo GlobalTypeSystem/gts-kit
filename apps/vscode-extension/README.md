@@ -111,8 +111,13 @@ See the full [GTS Specification](https://github.com/globaltypesystem/gts-spec) f
 
 - **`.json`** — Standard JSON (schemas and instances)
 - **`.jsonc`** — JSON with Comments (single-line, multi-line, trailing commas)
-- **`.yaml` / `.yml`** — YAML files parsed and treated identically to JSON
+- **`.yaml` / `.yml`** — YAML files parsed and treated like JSON, **plus** inline GTS definitions (see below)
 - **`.gts`** — GTS-specific files
+
+#### Supported GTS Entity Definitions
+
+- **JSON / JSONC / `.gts`** — a document must be either a **single entity** or a **top-level array of entities**. GTS IDs anywhere else are treated as *references*.
+- **YAML** — everything above, **plus** inline definitions: a config file may *define* GTS types/instances under any nested `entities:` array (e.g. a service's `types-registry.config.entities` seed block), even deep inside otherwise-non-GTS config. Each element is registered by its `$id` as a real definition, so it is not flagged as an unresolved reference.
 
 ### Validation
 
