@@ -86,7 +86,23 @@ function countGtsProblems(): number {
   return count
 }
 
-export class GtsFileTreeProvider implements vscode.TreeDataProvider<GtsTreeElement> {
+/** Collect every file path under an element (a single file, or all files under a folder subtree). */
+function collectFilePaths(element: GtsTreeElement, out: string[]): void {
+  if (element.kind === 'file') {
+    out.push(element.fsPath)
+    return
+  }
+  for (const child of element.children.values()) collectFilePaths(child, out)
+}
+
+export class GtsFileTreeProvider
+  implements vscode.TreeDataProvider<GtsTreeElement>, vscode.TreeDragAndDropController<GtsTreeElement>
+{
+  // Advertise `text/uri-list` so dragged items are understood by the editor,
+  // the Explorer and the chat as regular file references. We don't accept drops.
+  readonly dragMimeTypes = ['text/uri-list']
+  readonly dropMimeTypes: string[] = []
+
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<GtsTreeElement | undefined | void>()
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event
 
@@ -146,6 +162,23 @@ export class GtsFileTreeProvider implements vscode.TreeDataProvider<GtsTreeEleme
     if (!folder) return []
     return sortedChildren(folder)
   }
+
+  /**
+   * Expose dragged files (and every file under a dragged folder) as a
+   * `text/uri-list` payload — a newline-separated list of file URIs — which the
+   * editor and chat accept as file references, so items can be dropped there.
+   */
+  handleDrag(
+    source: readonly GtsTreeElement[],
+    dataTransfer: vscode.DataTransfer,
+    _token: vscode.CancellationToken
+  ): void {
+    const fsPaths: string[] = []
+    for (const element of source) collectFilePaths(element, fsPaths)
+    if (fsPaths.length === 0) return
+    const uriList = fsPaths.map(p => vscode.Uri.file(p).toString()).join('\r\n')
+    dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uriList))
+  }
 }
 
 /**
@@ -199,6 +232,7 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
 
   const treeView = vscode.window.createTreeView('gts.fileExplorer', {
     treeDataProvider: treeProvider,
+    dragAndDropController: treeProvider,
     showCollapseAll: true
   })
 
