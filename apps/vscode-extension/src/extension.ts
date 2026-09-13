@@ -372,7 +372,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('gts.openViewer', (resource?: vscode.Uri) => {
+    vscode.commands.registerCommand('gts-kit.openViewer', (resource?: vscode.Uri) => {
       openViewer(context, resource)
     })
   )

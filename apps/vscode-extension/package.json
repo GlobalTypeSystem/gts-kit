@@ -33,7 +33,7 @@
     ],
     "commands": [
       {
-        "command": "gts.openViewer",
+        "command": "gts-kit.openViewer",
         "title": "GTS: Open Viewer",
         "category": "GTS"
       }
@@ -50,7 +50,7 @@
     "views": {
       "gts-viewer": [
         {
-          "id": "gts.fileExplorer",
+          "id": "gts-kit.fileExplorer",
           "name": "Discovered GTS files",
           "icon": "resources/icon.svg",
           "contextualTitle": "GTS Files"
@@ -59,38 +59,38 @@
     },
     "viewsWelcome": [
       {
-        "view": "gts.fileExplorer",
+        "view": "gts-kit.fileExplorer",
         "contents": "No GTS files discovered yet.\nGTS files (schemas and instances) found anywhere in the workspace will be listed here."
       }
     ],
     "menus": {
       "explorer/context": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
       "editor/title": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == json"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == jsonc"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == gts"
         }
       ],
       "menubar/file": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "2_open"
         }
       ]

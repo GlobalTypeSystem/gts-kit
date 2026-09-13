@@ -141,7 +141,7 @@ export class GtsFileTreeProvider
       item.resourceUri = vscode.Uri.file(element.fsPath)
       item.contextValue = 'gtsFile'
       item.command = {
-        command: 'gts.openFileFromTree',
+        command: 'gts-kit.openFileFromTree',
         title: 'Open GTS File',
         arguments: [element.fsPath]
       }
@@ -230,7 +230,7 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
   const treeProvider = new GtsFileTreeProvider()
   const decorationProvider = new GtsFileDecorationProvider()
 
-  const treeView = vscode.window.createTreeView('gts.fileExplorer', {
+  const treeView = vscode.window.createTreeView('gts-kit.fileExplorer', {
     treeDataProvider: treeProvider,
     dragAndDropController: treeProvider,
     showCollapseAll: true
@@ -239,7 +239,7 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
   context.subscriptions.push(
     treeView,
     vscode.window.registerFileDecorationProvider(decorationProvider),
-    vscode.commands.registerCommand('gts.openFileFromTree', async (fsPath: string) => {
+    vscode.commands.registerCommand('gts-kit.openFileFromTree', async (fsPath: string) => {
       try {
         const uri = vscode.Uri.file(fsPath)
         await vscode.window.showTextDocument(uri, { preview: false })
