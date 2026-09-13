@@ -1,5 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as fs from 'fs'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
@@ -57,6 +58,59 @@ function isUriIgnored(uri: vscode.Uri, matcher = getCachedMatcher()): boolean {
   return isIgnoredRel(matcher, vscode.workspace.asRelativePath(uri, false))
 }
 
+// Maps a file's resolved *real* path -> the workspace path we index it under.
+// The workspace symlinks (e.g. .gts-spec, .gts-spec-ext, .gears-rust/.gts-spec)
+// can make the same physical file reachable via several paths; without this the
+// same GTS entity would be scanned multiple times, producing duplicate tree rows
+// and a nondeterministic id->file mapping. We index each physical file exactly
+// once and let the most-recently-scanned/edited path win (so an open file, which
+// is scanned first, stays canonical and gets its in-editor diagnostics).
+const realPathIndex = new Map<string, string>()
+
+/** Resolve a path to its canonical real path; fall back to the input on error. */
+function resolveRealPath(fsPath: string): string {
+  try { return fs.realpathSync.native(fsPath) } catch { return fsPath }
+}
+
+/** Drop any canonical-path entries that point at `fsPath` (on delete/rename). */
+function forgetIndexedPath(fsPath: string): void {
+  for (const [real, p] of realPathIndex) {
+    if (p === fsPath) realPathIndex.delete(real)
+  }
+}
+
+/**
+ * Keep only one URI per physical file, recording the canonical path chosen.
+ * First-seen wins, so callers should pass higher-priority paths (open files)
+ * first. Duplicates reached through other symlinks are dropped.
+ */
+function dedupeUrisByRealPath(uris: vscode.Uri[]): vscode.Uri[] {
+  const out: vscode.Uri[] = []
+  for (const uri of uris) {
+    const real = resolveRealPath(uri.fsPath)
+    if (realPathIndex.has(real)) continue
+    realPathIndex.set(real, uri.fsPath)
+    out.push(uri)
+  }
+  return out
+}
+
+/**
+ * Index a single file's live change, ensuring the physical file stays indexed
+ * under exactly one path. If another symlinked path currently owns this real
+ * file, drop it so the just-touched path becomes canonical (its diagnostics show
+ * in the editor). Returns nothing; callers still index the content themselves.
+ */
+function claimCanonicalPath(fsPath: string): void {
+  const real = resolveRealPath(fsPath)
+  const existing = realPathIndex.get(real)
+  if (existing && existing !== fsPath) {
+    removeFileFromRegistry(existing)
+    forgetIndexedPath(existing)
+  }
+  realPathIndex.set(real, fsPath)
+}
+
 let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
@@ -98,7 +152,11 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
     // GTS.
     const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
     const exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
-    const uris = await vscode.workspace.findFiles(include, exclude, 40000)
+    const enumerated = await vscode.workspace.findFiles(include, exclude, 40000)
+    // A full (re)scan re-establishes the canonical physical-file set; collapse
+    // symlinked duplicates so the same GTS entity isn't scanned/listed twice.
+    realPathIndex.clear()
+    const uris = dedupeUrisByRealPath(enumerated)
 
     const total = uris.length
     const startTime = Date.now()
@@ -275,6 +333,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidRenameFiles(async event => {
       for (const { oldUri, newUri } of event.files) {
         removeFileFromRegistry(oldUri.fsPath)
+        forgetIndexedPath(oldUri.fsPath)
         if (isIgnoredGtsPath(newUri.fsPath)) continue
         if (!/\.(json|jsonc|gts|ya?ml)$/i.test(newUri.fsPath)) continue
         const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === newUri.fsPath)
@@ -444,6 +503,9 @@ async function performInitialScan() {
     const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
     const openPaths = collectOpenGtsPaths()
 
+    // A full scan re-establishes the canonical set of physical files.
+    realPathIndex.clear()
+
     // --- Phase 1: fast pass -------------------------------------------------
     // Enumerate with FAST_EXCLUDE_GLOB (+ gitignore) so build-output/dependency
     // trees (target, node_modules, ...) and ignored paths aren't even walked.
@@ -466,8 +528,11 @@ async function performInitialScan() {
       phase1Paths.add(uri.fsPath)
     }
 
-    console.log(`[GTS] Phase 1: ${phase1Candidates.length} candidate files (of ${fastUris.length} enumerated)`)
-    const files1 = await readGtsCandidateFiles(phase1Candidates)
+    // Collapse symlinked duplicates to one physical file each (open files first,
+    // so they stay canonical).
+    const phase1Deduped = dedupeUrisByRealPath(phase1Candidates)
+    console.log(`[GTS] Phase 1: ${phase1Deduped.length} candidate files (of ${fastUris.length} enumerated, ${phase1Candidates.length} before real-path dedup)`)
+    const files1 = await readGtsCandidateFiles(phase1Deduped)
     setLastScanFiles(files1)
     const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
@@ -486,7 +551,10 @@ async function performInitialScan() {
     // files. Runs after the UI is already coloured, so its cost is not visible.
     const phase2Exclude = combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs)
     const allUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase2Exclude, 100000)
-    const phase2Uris = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    // Skip anything already indexed in phase 1 and any symlinked duplicate of a
+    // physical file we've already taken (the realPathIndex still holds phase 1).
+    const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
     if (phase2Uris.length > 0) {
       const files2 = await readGtsCandidateFiles(phase2Uris)
       if (files2.length > 0) {
@@ -551,6 +619,8 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
     const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
+    // Keep one entry per physical file even when reached via a symlinked path.
+    claimCanonicalPath(fsPath)
     indexFileInRegistry(fsPath, name, content)
     gtsExplorer?.refresh()
   } catch (e) {
@@ -566,6 +636,7 @@ function onDiskFileDeleted(uri: vscode.Uri): void {
   if (isIgnoredGtsPath(fsPath)) return
   if (isUriIgnored(uri)) return
   removeFileFromRegistry(fsPath)
+  forgetIndexedPath(fsPath)
   gtsExplorer?.refresh()
   scheduleExternalChangeSettle()
 }
@@ -619,6 +690,8 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
     const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
+    // Ensure this physical file is indexed under exactly this (open) path.
+    claimCanonicalPath(fsPath)
     indexFileInRegistry(fsPath, name, content)
     gtsExplorer?.refresh()
   } catch (e) {

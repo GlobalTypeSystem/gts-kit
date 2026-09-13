@@ -91,12 +91,32 @@ export class GtsFileTreeProvider implements vscode.TreeDataProvider<GtsTreeEleme
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event
 
   private root: GtsFolderNode = { kind: 'folder', label: '', children: new Map() }
+  // The set of discovered file paths currently reflected in the tree. Used to
+  // avoid rebuilding (and thus visually flickering) the whole tree when only
+  // file *contents* changed but the file list is the same.
+  private knownPaths = new Set<string>()
 
-  /** Rebuild the tree structure from the current registry state. */
-  refresh(): void {
+  /**
+   * Reconcile the tree with the current registry state. Only rebuilds (and fires
+   * a tree-data change) when the *set* of discovered files actually changed —
+   * green/red error state is handled separately via file decorations, so a plain
+   * content edit must not rebuild the tree. Returns the URIs that were added or
+   * removed so the caller can refresh just those decorations.
+   */
+  refresh(): vscode.Uri[] {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
-    this.root = buildFileTree(getDiscoveredFilePaths(), workspaceRoot)
+    const paths = getDiscoveredFilePaths()
+    const nextSet = new Set(paths)
+
+    const changed: vscode.Uri[] = []
+    for (const p of nextSet) if (!this.knownPaths.has(p)) changed.push(vscode.Uri.file(p))
+    for (const p of this.knownPaths) if (!nextSet.has(p)) changed.push(vscode.Uri.file(p))
+    if (changed.length === 0) return []
+
+    this.knownPaths = nextSet
+    this.root = buildFileTree(paths, workspaceRoot)
     this._onDidChangeTreeData.fire()
+    return changed
   }
 
   getTreeItem(element: GtsTreeElement): vscode.TreeItem {
@@ -208,8 +228,11 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
     treeProvider,
     decorationProvider,
     refresh() {
-      treeProvider.refresh()
-      decorationProvider.refresh()
+      // Only the added/removed files need a decoration repaint; error-state
+      // changes on existing files are repainted by the onDidChangeDiagnostics
+      // handler above. A global decoration refresh here would flicker every file.
+      const changed = treeProvider.refresh()
+      if (changed.length > 0) decorationProvider.refresh(changed)
       updateBadge(treeView)
     }
   }
