@@ -553,6 +553,11 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
   }
 }
 
+export function resetValidationDiagnostics(): void {
+  diagnosticCollection?.clear()
+  workspaceDiagnosticCollection?.clear()
+}
+
 export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 

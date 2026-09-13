@@ -6,7 +6,7 @@ import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents } from './validation'
+import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
@@ -374,6 +374,14 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('gts-kit.openViewer', (resource?: vscode.Uri) => {
       openViewer(context, resource)
+    }),
+    vscode.commands.registerCommand('gts-kit.refreshFileExplorer', async () => {
+      try {
+        await refreshGtsFileExplorer(gtsDiagnostics)
+      } catch (error: any) {
+        console.error('[GTS] Full refresh failed:', error)
+        vscode.window.showErrorMessage(`Failed to refresh GTS files: ${error?.message || String(error)}`)
+      }
     })
   )
 
@@ -493,6 +501,24 @@ function revalidateOpenDocs(): void {
   vscode.workspace.textDocuments.forEach(doc => {
     if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
   })
+}
+
+async function refreshGtsFileExplorer(linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
+  if (changeTimer) clearTimeout(changeTimer)
+  if (externalChangeTimer) clearTimeout(externalChangeTimer)
+  changeTimer = null
+  externalChangeTimer = null
+  preEditIdsByPath.clear()
+  pendingOpenFile = null
+  realPathIndex.clear()
+  resetWorkspaceIgnore()
+  setLastScanFiles([])
+  await rebuildRegistry([], DEFAULT_GTS_CONFIG)
+  resetValidationDiagnostics()
+  linkDiagnostics.clear()
+  gtsExplorer?.reset()
+  await gtsLinkProvider?.refresh()
+  await performInitialScan()
 }
 
 async function performInitialScan() {

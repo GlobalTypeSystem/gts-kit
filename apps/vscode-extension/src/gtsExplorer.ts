@@ -212,6 +212,7 @@ export class GtsFileDecorationProvider implements vscode.FileDecorationProvider 
 export interface GtsExplorer {
   treeProvider: GtsFileTreeProvider
   decorationProvider: GtsFileDecorationProvider
+  reset(): void
   /** Call after the registry's set of discovered files may have changed (rescan, index/remove file). */
   refresh(): void
 }
@@ -261,6 +262,11 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
   return {
     treeProvider,
     decorationProvider,
+    reset() {
+      treeProvider.refresh()
+      decorationProvider.refresh()
+      updateBadge(treeView)
+    },
     refresh() {
       // Only the added/removed files need a decoration repaint; error-state
       // changes on existing files are repainted by the onDidChangeDiagnostics

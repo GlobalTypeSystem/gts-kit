@@ -39,6 +39,12 @@
         "command": "gts-kit.openViewer",
         "title": "GTS: Open Viewer",
         "category": "GTS"
+      },
+      {
+        "command": "gts-kit.refreshFileExplorer",
+        "title": "GTS: Refresh Discovered Files",
+        "category": "GTS",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -72,6 +78,13 @@
           "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "gts-kit.refreshFileExplorer",
+          "group": "navigation@1",
+          "when": "view == gts-kit.fileExplorer"
         }
       ],
       "editor/title": [
