@@ -8,6 +8,7 @@ import { RepoLayoutStorage } from './storage'
 import { initValidation, validateOpenDocument, validateWorkspaceInBackground } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
+import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
 
 // Glob used for all GTS workspace scans and the on-disk file watcher.
@@ -62,6 +63,8 @@ let hasPerformedInitialScan: boolean = false // Track if initial scan with defau
 let gtsLinkProvider: GtsLinkProvider | null = null
 // File the user explicitly requested (context menu / command palette) — consumed by the first scanAndPost
 let pendingOpenFile: string | null = null
+// Left-sidebar GTS file browser (tree view + red/green file decorations), shares the same registry as everything else.
+let gtsExplorer: GtsExplorer | null = null
 
 function getNonce(): string {
   let text = ''
@@ -145,6 +148,7 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
     if (selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
+    gtsExplorer?.refresh()
 
     // Send scan result with default file path so the webview can compute initial selection
     if (hasViewer) {
@@ -218,6 +222,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize and register GTS link provider for clickable GTS IDs
   gtsLinkProvider = new GtsLinkProvider(gtsDiagnostics)
+
+  // Left sidebar: file browser tree + red/green file decorations, sharing the same registry.
+  gtsExplorer = registerGtsExplorer(context)
 
   // Register link provider for JSON, JSONC, and GTS files
   const documentSelector: vscode.DocumentSelector = [
@@ -492,6 +499,7 @@ async function performInitialScan() {
     setLastScanFiles(files1)
     const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
+    gtsExplorer?.refresh()
 
     // Paint decorations + validate now that phase-1 registry is available.
     await gtsLinkProvider?.refresh()
@@ -510,6 +518,7 @@ async function performInitialScan() {
       if (files2.length > 0) {
         for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
         setLastScanFiles([...files1, ...files2])
+        gtsExplorer?.refresh()
         await gtsLinkProvider?.refresh()
         await validateWorkspaceInBackground(getBackgroundValidationRoots())
         revalidateOpenDocs()
@@ -535,6 +544,7 @@ export async function deactivate() {
     gtsLinkProvider = null
   }
 
+  gtsExplorer = null
   layoutStorage = null
 }
 
@@ -568,6 +578,7 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
     indexFileInRegistry(fsPath, name, content)
+    gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Failed to reindex changed file from disk:', fsPath, e)
     return
@@ -581,6 +592,7 @@ function onDiskFileDeleted(uri: vscode.Uri): void {
   if (isIgnoredGtsPath(fsPath)) return
   if (isUriIgnored(uri)) return
   removeFileFromRegistry(fsPath)
+  gtsExplorer?.refresh()
   scheduleExternalChangeSettle()
 }
 
@@ -618,6 +630,7 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
     indexFileInRegistry(doc.uri.fsPath, name, content)
+    gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Incremental index failed:', e)
   }
