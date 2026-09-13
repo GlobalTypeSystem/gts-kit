@@ -2,10 +2,10 @@ import * as vscode from 'vscode'
 import * as path from 'path'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
-import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
+import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, validateOpenDocument, validateWorkspaceInBackground } from './validation'
+import { initValidation, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
@@ -189,7 +189,7 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     // Publish workspace-wide file diagnostics for unopened files, then refresh
     // open-document diagnostics with precise ranges.
-    await validateWorkspaceInBackground(getBackgroundValidationRoots())
+    await validateWorkspaceInBackground()
 
     // Re-validate all open documents now that we have the full registry
     console.log('[GTS] Re-validating all open documents...')
@@ -436,35 +436,6 @@ function revalidateOpenDocs(): void {
   })
 }
 
-/**
- * Background validation scope: currently focused GTS folder(s), not whole repo.
- * VS Code does not expose built-in Explorer expanded folders, so we scope by
- * active/open GTS docs as the closest approximation.
- */
-function getBackgroundValidationRoots(): string[] {
-  const roots: string[] = []
-  const seen = new Set<string>()
-  const add = (dir: string) => {
-    if (!seen.has(dir)) {
-      seen.add(dir)
-      roots.push(dir)
-    }
-  }
-
-  const active = vscode.window.activeTextEditor?.document
-  if (active?.uri.scheme === 'file' && isGtsCandidateFile(active)) {
-    add(path.dirname(active.uri.fsPath))
-  }
-
-  for (const doc of vscode.workspace.textDocuments) {
-    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
-      add(path.dirname(doc.uri.fsPath))
-    }
-  }
-
-  return roots
-}
-
 async function performInitialScan() {
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
@@ -503,8 +474,10 @@ async function performInitialScan() {
     gtsExplorer?.refresh()
 
     // Paint decorations + validate now that phase-1 registry is available.
+    // Validate the whole workspace (not just the folders of currently-open docs)
+    // so all findings/badge counts are present immediately after a window reload.
     await gtsLinkProvider?.refresh()
-    await validateWorkspaceInBackground(getBackgroundValidationRoots())
+    await validateWorkspaceInBackground()
     revalidateOpenDocs()
 
     // --- Phase 2: background pass -------------------------------------------
@@ -521,7 +494,7 @@ async function performInitialScan() {
         setLastScanFiles([...files1, ...files2])
         gtsExplorer?.refresh()
         await gtsLinkProvider?.refresh()
-        await validateWorkspaceInBackground(getBackgroundValidationRoots())
+        await validateWorkspaceInBackground()
         revalidateOpenDocs()
       }
       console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
@@ -609,10 +582,12 @@ function scheduleExternalChangeSettle(): void {
       return
     }
     // No viewer: repaint + refresh workspace diagnostics and then re-validate
-    // open docs with precise ranges.
+    // open docs with precise ranges. A burst of on-disk changes can touch files
+    // anywhere in the repo (git checkout, external tools), so validate the whole
+    // workspace rather than only the currently-focused folders.
     void (async () => {
       await gtsLinkProvider?.refresh()
-      await validateWorkspaceInBackground(getBackgroundValidationRoots())
+      await validateWorkspaceInBackground()
       vscode.workspace.textDocuments.forEach(doc => {
         if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
       })
@@ -620,17 +595,31 @@ function scheduleExternalChangeSettle(): void {
   }, 300)
 }
 
+// Ids each file defined *before* the current burst of edits, captured prior to
+// the first reindex so a renamed/removed id still revalidates its old referrers.
+// Keyed by fsPath; cleared when the debounced revalidation fires.
+const preEditIdsByPath = new Map<string, Set<string>>()
+
 function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   if (!isGtsCandidateFile(doc)) return
+
+  const fsPath = doc.uri.fsPath
+
+  // Snapshot the file's ids from before this edit burst (once per burst), before
+  // the immediate reindex below overwrites them in the registry.
+  if (!preEditIdsByPath.has(fsPath)) {
+    const registry = getRegistry()
+    preEditIdsByPath.set(fsPath, new Set(registry?.getEntityIdsForFile(fsPath) || []))
+  }
 
   // Immediate + cheap: keep the shared registry index and the editor's color
   // annotations in sync with the live document as the user types. No Ajv here.
   try {
     const text = doc.getText()
-    const name = path.basename(doc.uri.fsPath)
+    const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
-    indexFileInRegistry(doc.uri.fsPath, name, content)
+    indexFileInRegistry(fsPath, name, content)
     gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Incremental index failed:', e)
@@ -644,9 +633,17 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   // panel is open) run the full workspace rescan that feeds the webview.
   if (changeTimer) clearTimeout(changeTimer)
   changeTimer = setTimeout(() => {
-    void validateOpenDocument(doc)
+    const previousIds = preEditIdsByPath.get(fsPath)
+    preEditIdsByPath.clear()
+    void (async () => {
+      await validateOpenDocument(doc)
+      // Re-check everything that depends on this file (derived/instantiated
+      // types, $ref/allOf composers, and GTS-id referrers) so their markers
+      // reflect the edit, not just this doc.
+      await revalidateDependents(fsPath, previousIds)
+    })()
     if (viewerPanel) {
-      void scanAndPost(GTS_SCAN_GLOB, false, doc.uri.fsPath)
+      void scanAndPost(GTS_SCAN_GLOB, false, fsPath)
     }
   }, delayMsec)
 }

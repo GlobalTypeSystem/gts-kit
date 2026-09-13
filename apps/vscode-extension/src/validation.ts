@@ -480,6 +480,79 @@ export async function validateWorkspaceInBackground(scopeRoots?: string[]): Prom
   workspaceDiagnosticCollection.set(entries)
 }
 
+/**
+ * Validate a single file that is NOT open in an editor and publish coarse
+ * (line-0) workspace diagnostics for it, using the shared registry as context.
+ * Uses the single-URI overload of `set` so only this file's markers change.
+ */
+async function validateClosedFile(filePath: string): Promise<void> {
+  const registry = getRegistry()
+  if (!registry || !workspaceDiagnosticCollection) return
+
+  // Entity validation itself is shared registry logic; here we only turn the
+  // resulting errors into coarse (line-0) workspace diagnostics.
+  await registry.validateFile(filePath)
+
+  const diagnostics: vscode.Diagnostic[] = []
+  const push = (error: ValidationError) => {
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(0, 0, 0, 1),
+      error.message,
+      vscode.DiagnosticSeverity.Error
+    )
+    diagnostic.source = 'GTS'
+    diagnostic.code = error.keyword
+    diagnostics.push(diagnostic)
+  }
+
+  const invalid = registry.invalidFiles.get(filePath)
+  if (invalid?.validation && invalid.validation.errors.length > 0) {
+    for (const error of invalid.validation.errors) push(error)
+  } else {
+    const fileSchemas = registry.jsonFileSchemas.get(filePath) || []
+    const fileObjs = registry.jsonFileObjs.get(filePath) || []
+    for (const entity of [...fileSchemas, ...fileObjs]) {
+      for (const error of entity.validation?.errors || []) push(error)
+    }
+  }
+
+  const uri = vscode.Uri.file(filePath)
+  workspaceDiagnosticCollection.set(uri, diagnostics.length > 0 ? diagnostics : undefined)
+}
+
+/**
+ * Revalidate every file that depends on `changedPath` (instances of a changed
+ * type, schemas derived from it, or entities that GTS-reference it). Open files
+ * get precise in-editor diagnostics; closed files get coarse workspace markers.
+ * This is what keeps derived types/instances in sync when a base file changes.
+ */
+export async function revalidateDependents(changedPath: string, previousIds?: Iterable<string>): Promise<void> {
+  const registry = getRegistry()
+  if (!registry) return
+
+  // `previousIds` carries the ids the file defined *before* the edit so that a
+  // renamed/removed id still revalidates whatever referenced its old id.
+  const dependentPaths = registry.getDependentFilePaths(changedPath, previousIds)
+  if (dependentPaths.size === 0) return
+
+  const openByPath = new Map<string, vscode.TextDocument>()
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
+      openByPath.set(doc.uri.fsPath, doc)
+    }
+  }
+
+  console.log(`[GTS Validation] Revalidating ${dependentPaths.size} dependents of ${path.basename(changedPath)}`)
+  for (const dependentPath of dependentPaths) {
+    const openDoc = openByPath.get(dependentPath)
+    if (openDoc) {
+      await validateOpenDocument(openDoc)
+    } else {
+      await validateClosedFile(dependentPath)
+    }
+  }
+}
+
 export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 

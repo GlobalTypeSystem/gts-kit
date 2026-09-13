@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react'
 import { JsonRegistry, parseJSONC, parseYAML } from '@gts/shared'
-import { Scanner } from '../../../../packages/fs-adapters/types'
+import { Scanner, FileChange } from '../../../../packages/fs-adapters/types'
 // Use the smart scanner that automatically chooses the best implementation
 import { WebSmartScanner } from '../../../../packages/fs-adapters/fs-adapter-web/src/index'
 import { AppConfig } from '@/lib/config'
@@ -18,6 +18,10 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
   const registryRef = useRef<JsonRegistry>(new JsonRegistry())
   const watcherRef = useRef<(() => void) | null>(null)
   const hasInitiallySelectedRef = useRef<boolean>(false)
+  // Serializes incremental file-change handling so overlapping watch events
+  // don't validate against a half-updated registry.
+  const changeQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const versionBumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Browser/Electron init path:
   // - Prompt for directory, scan and ingest files
@@ -133,7 +137,48 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
     }
   }
 
-  // Watch for file changes and trigger reloads to keep registry/layout in sync
+  // Coalesce a burst of incremental changes into a single re-render.
+  function scheduleVersionBump() {
+    if (versionBumpTimerRef.current) clearTimeout(versionBumpTimerRef.current)
+    versionBumpTimerRef.current = setTimeout(() => setVersion(v => v + 1), 100)
+  }
+
+  // Incrementally apply a single file change through the shared registry logic:
+  // reindex the changed file and revalidate it plus everything that depends on it
+  // (derivation, instantiation, $ref/allOf, GTS-id references). This is the same
+  // revalidation the VS Code extension performs, so behavior is identical across
+  // Web, Electron and VS Code.
+  async function applyIncrementalChange(change: FileChange) {
+    const scanner = scannerRef.current
+    const registry = registryRef.current
+    if (!scanner) return
+    const { type, doc } = change
+    try {
+      if (type === 'unlink') {
+        await registry.applyFileChange(doc.path, doc.name, null, AppConfig.get().gts)
+      } else {
+        const text = await scanner.read(doc.path)
+        const isYaml = doc.name.endsWith('.yaml') || doc.name.endsWith('.yml')
+        let content: any
+        try {
+          content = isYaml ? parseYAML(text) : parseJSONC(text)
+        } catch {
+          // Surface parse errors only for files that look GTS-related; ignore
+          // unrelated malformed JSON (matches loadFromScanner's filter).
+          if (!text.includes('gts.')) return
+          content = text
+        }
+        await registry.applyFileChange(doc.path, doc.name, content, AppConfig.get().gts)
+      }
+      scheduleVersionBump()
+    } catch (err) {
+      console.error('Failed to revalidate after file change:', err)
+    }
+  }
+
+  // Watch for file changes and revalidate incrementally to keep registry/layout
+  // in sync (dependent types/instances are revalidated too, not just the file
+  // that changed).
   function startWatching() {
     const scanner = scannerRef.current
     if (!scanner) return
@@ -148,19 +193,20 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
       { glob: '**/*.{json,jsonc,gts,yaml,yml}' },
       (change) => {
         console.log('File change detected:', change)
-        // Reload data when files change
-        loadFromScanner().catch(err => {
-          console.error('Failed to reload after file change:', err)
-        })
+        // Serialize changes so each validates against a fully-updated registry.
+        changeQueueRef.current = changeQueueRef.current.then(() => applyIncrementalChange(change))
       }
     )
   }
 
-  // Cleanup watcher on unmount
+  // Cleanup watcher and pending timers on unmount
   React.useEffect(() => {
     return () => {
       if (watcherRef.current) {
         watcherRef.current()
+      }
+      if (versionBumpTimerRef.current) {
+        clearTimeout(versionBumpTimerRef.current)
       }
     }
   }, [])

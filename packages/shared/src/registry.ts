@@ -26,6 +26,36 @@ function normalizeToArray(content: any): any[] {
 }
 
 /**
+ * Reverse-dependency graph, split by how a change propagates.
+ *
+ * `structural.get(id)` — entity ids whose *effective schema* incorporates `id`
+ *   (derivation, multi-level derivation, instantiation, `$ref`/`allOf`). A change
+ *   to `id` changes their meaning, so this relation is followed **transitively**.
+ *
+ * `references.get(id)` — entity ids that merely *point at* `id` by GTS id (any
+ *   GTS id field, `x-gts-ref`). They must be re-checked when `id` changes/renames,
+ *   but their own shape is unaffected, so this relation is applied **depth-1**.
+ */
+interface DependencyGraph {
+  structural: Map<string, Set<string>>
+  references: Map<string, Set<string>>
+}
+
+/**
+ * Outcome of handling a single file change (see JsonRegistry.applyFileChange /
+ * revalidateAfterChange). All paths are the entity file paths that were
+ * revalidated in the registry so callers can refresh exactly those.
+ */
+export interface RevalidationResult {
+  /** The file that changed. */
+  changedPath: string
+  /** Files whose entities depend on the changed file and were revalidated. */
+  dependentPaths: Set<string>
+  /** All revalidated paths (the changed file, if still present, plus dependents). */
+  revalidatedPaths: string[]
+}
+
+/**
  * JsonRegistry: central store and fetch cache for JsonFile/JsonObj/JsonSchema
  */
 export class JsonRegistry {
@@ -52,6 +82,11 @@ export class JsonRegistry {
   // gts-ts store (register() throws these per §9.11.1), keyed by schema id.
   private gtsStoreDeclErrors: Map<string, string> = new Map()
 
+  // Cached reverse-dependency graph used by getDependentFilePaths(). Rebuilt
+  // lazily and invalidated whenever the entity set changes (any indexFile /
+  // invalidateFile / reset). See buildDependencyGraph() for the edge model.
+  private depGraph: DependencyGraph | null = null
+
   constructor() {
     this.jsonObjs = new Map<string, JsonObj>()
     this.jsonSchemas = new Map<string, JsonSchema>()
@@ -74,6 +109,7 @@ export class JsonRegistry {
     this.jsonFileSchemas.clear()
     this.defaultFilePath = null
     this.invalidateGtsStore()
+    this.depGraph = null
   }
 
   /** Drop the cached gts-ts store so it is rebuilt from current schemas on next use. */
@@ -108,8 +144,10 @@ export class JsonRegistry {
    * Invalidate a file and remove its JsonFile and associated records from the registry.
    */
   invalidateFile(path: string): void {
-    // Any schema set change invalidates the derived gts-ts store.
+    // Any schema set change invalidates the derived gts-ts store and the
+    // reverse-dependency graph (both are rebuilt lazily on next use).
     this.invalidateGtsStore()
+    this.depGraph = null
     if (this.jsonFiles.has(path)) {
       this.jsonFiles.delete(path)
     }
@@ -130,6 +168,228 @@ export class JsonRegistry {
       this.jsonFileSchemas.delete(path)
       this.jsonFileSchemas.set(path, [])
     }
+  }
+
+  /**
+   * Cumulative `~`-terminated prefixes of a GTS id — its ancestor *type* chain.
+   *
+   * GTS encodes derivation directly in the id: a type id and every derived type
+   * appended after it are separated by `~`. So for
+   * `gts.a.b.c.d.v1~k.l.m.n.v1~` the ancestor type ids are
+   * `gts.a.b.c.d.v1~` (the base) and `gts.a.b.c.d.v1~k.l.m.n.v1~` (the full id).
+   * This is how single-level derivation, multi-level derivation and
+   * instantiation are all reduced to one relation: "does this id's type chain
+   * contain the changed type id?".
+   */
+  private static ancestorTypeIds(id: string): string[] {
+    const out: string[] = []
+    if (!id) return out
+    let idx = id.indexOf('~')
+    while (idx !== -1) {
+      out.push(id.slice(0, idx + 1))
+      idx = id.indexOf('~', idx + 1)
+    }
+    return out
+  }
+
+  /** All entity ids currently defined in the given file (schemas + instances). */
+  getEntityIdsForFile(path: string): string[] {
+    const ids: string[] = []
+    for (const s of this.jsonFileSchemas.get(path) || []) ids.push(s.id)
+    for (const o of this.jsonFileObjs.get(path) || []) ids.push(o.id)
+    return ids
+  }
+
+  /**
+   * Build (once, then cache) the reverse-dependency graph. See DependencyGraph
+   * for the two edge kinds and how each propagates. Edges recorded per entity:
+   *
+   *  structural (transitive — Type #1 schema dependency):
+   *    - derivation / multi-level derivation: a schema whose own id has the
+   *      target in its ancestor type chain (id prefix at `~` boundaries)
+   *    - instantiation: an instance whose `schemaId` chain contains the target
+   *      (its direct type and every base of that type)
+   *    - `$ref` / `allOf` / ...: a schema whose JSON-Schema refs point at target
+   *      (JsonSchema.schemaRefs)
+   *
+   *  references (depth-1 — Type #2 id reference):
+   *    - any GTS id used anywhere in the entity's content (JsonEntity.gtsRefs),
+   *      which already includes `x-gts-ref` targets (their concrete values are
+   *      valid GTS ids). Wildcard `x-gts-ref` *patterns* are authoring
+   *      constraints; the concrete instance value that matches carries the real
+   *      id edge via gtsRefs, so patterns need no separate reverse edge.
+   */
+  private buildDependencyGraph(): DependencyGraph {
+    if (this.depGraph) return this.depGraph
+
+    const structural = new Map<string, Set<string>>()
+    const references = new Map<string, Set<string>>()
+    const link = (map: Map<string, Set<string>>, target: string, dependent: string) => {
+      if (!target || !dependent || target === dependent) return
+      let set = map.get(target)
+      if (!set) { set = new Set<string>(); map.set(target, set) }
+      set.add(dependent)
+    }
+
+    const addEntity = (entity: JsonEntity, isSchema: boolean) => {
+      const eid = entity.id
+      if (!eid) return
+
+      // Structural: derivation & instantiation via the type chain. Schemas
+      // derive from their proper ancestors (exclude their own full id); an
+      // instance depends on every type in its schemaId chain (incl. direct type).
+      const chainSource = isSchema ? eid : (entity.schemaId || '')
+      for (const ancestor of JsonRegistry.ancestorTypeIds(chainSource)) {
+        if (isSchema && ancestor === eid) continue
+        link(structural, ancestor, eid)
+      }
+      // Structural: JSON-Schema $ref / allOf composition (schemas only).
+      if (isSchema) {
+        const schemaRefs = (entity as JsonSchema).schemaRefs
+        if (schemaRefs) for (const ref of schemaRefs) link(structural, ref.id, eid)
+      }
+
+      // References (depth-1): every GTS id the entity points at.
+      if (entity.gtsRefs) {
+        for (const ref of entity.gtsRefs) link(references, ref.id, eid)
+      }
+    }
+
+    for (const schema of this.jsonSchemas.values()) addEntity(schema, true)
+    for (const obj of this.jsonObjs.values()) addEntity(obj, false)
+
+    this.depGraph = { structural, references }
+    return this.depGraph
+  }
+
+  /**
+   * Return the set of file paths (excluding `changedPath`) whose entities must be
+   * revalidated when `changedPath` changes.
+   *
+   * Two relations are combined (see DependencyGraph):
+   *   1. structural dependents are followed **transitively** (a derived type's
+   *      own dependents are affected too);
+   *   2. plain id-reference dependents of the changed (seed) ids are added
+   *      **depth-1**. A structural descendant's *shape* may change, but a plain
+   *      id reference only checks its target's existence/id — which is unchanged
+   *      — so references are not propagated through the structural closure.
+   *
+   * The structural walk is breadth-first guarded by a `visited` set, so
+   * derivation can never cycle and reference cycles (schema A `$ref`s B and B
+   * `$ref`s A) terminate.
+   *
+   * `extraSeedIds` lets callers add ids that existed *before* an edit (captured
+   * prior to reindexing) so that renaming/removing an id still revalidates the
+   * files that referenced its old id.
+   */
+  getDependentFilePaths(changedPath: string, extraSeedIds?: Iterable<string>): Set<string> {
+    const paths = new Set<string>()
+
+    const seedIds = new Set<string>(this.getEntityIdsForFile(changedPath))
+    if (extraSeedIds) for (const id of extraSeedIds) if (id) seedIds.add(id)
+    if (seedIds.size === 0) return paths
+
+    const { structural, references } = this.buildDependencyGraph()
+
+    const addFile = (entityId: string) => {
+      const filePath = this.jsonSchemas.get(entityId)?.file?.path
+        || this.jsonObjs.get(entityId)?.file?.path
+      if (filePath && filePath !== changedPath) paths.add(filePath)
+    }
+
+    // 1. Transitive structural closure over the changed ids. `visited` guards
+    //    the BFS against cycles (reference-induced or otherwise).
+    const visited = new Set<string>(seedIds)
+    const queue = [...seedIds]
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      const dependents = structural.get(current)
+      if (!dependents) continue
+      for (const dependent of dependents) {
+        if (visited.has(dependent)) continue
+        visited.add(dependent)
+        queue.push(dependent)
+        addFile(dependent)
+      }
+    }
+
+    // 2. Depth-1 id-reference dependents of the changed (seed) ids only.
+    for (const id of seedIds) {
+      const referrers = references.get(id)
+      if (!referrers) continue
+      for (const referrer of referrers) addFile(referrer)
+    }
+
+    return paths
+  }
+
+  /**
+   * Validate every entity currently indexed for `path` (schemas first, then
+   * instances) against the current registry context. Files that failed to parse
+   * already carry their error on the JsonFile in `invalidFiles`, so they are
+   * skipped here.
+   */
+  async validateFile(path: string): Promise<void> {
+    if (this.invalidFiles.has(path)) return
+    for (const schema of this.jsonFileSchemas.get(path) || []) {
+      await this.validateEntity(schema)
+    }
+    for (const obj of this.jsonFileObjs.get(path) || []) {
+      await this.validateEntity(obj)
+    }
+  }
+
+  /**
+   * Revalidate `changedPath` and every file that (transitively/­referentially)
+   * depends on it. Assumes the changed file's new content is *already indexed*
+   * (via `indexFile`/`invalidateFile`). `previousIds` should carry the ids the
+   * file defined before the edit so a rename/removal still revalidates the files
+   * that referenced the old id.
+   *
+   * Returns the affected file paths (the changed file, when it still holds
+   * entities, plus all dependents) so callers can refresh their UI/markers.
+   */
+  async revalidateAfterChange(
+    changedPath: string,
+    previousIds?: Iterable<string>
+  ): Promise<RevalidationResult> {
+    const dependents = this.getDependentFilePaths(changedPath, previousIds)
+
+    const revalidatedPaths: string[] = []
+    const changedStillPresent = this.jsonFiles.has(changedPath) || this.invalidFiles.has(changedPath)
+    if (changedStillPresent) {
+      await this.validateFile(changedPath)
+      revalidatedPaths.push(changedPath)
+    }
+    for (const dependentPath of dependents) {
+      await this.validateFile(dependentPath)
+      revalidatedPaths.push(dependentPath)
+    }
+
+    return { changedPath, dependentPaths: dependents, revalidatedPaths }
+  }
+
+  /**
+   * End-to-end handler for a single file change, shared by every app (Web,
+   * Electron, VS Code) so revalidation behaves identically everywhere:
+   *   1. snapshot the file's previous entity ids (for rename/removal),
+   *   2. (re)index the new `content` — or drop the file when `content` is
+   *      null/undefined (deletion),
+   *   3. revalidate the changed file and all of its dependents.
+   */
+  async applyFileChange(
+    path: string,
+    name: string,
+    content: any,
+    cfg: GtsConfig = getGtsConfig(undefined)
+  ): Promise<RevalidationResult> {
+    const previousIds = this.getEntityIdsForFile(path)
+    if (content === null || content === undefined) {
+      this.invalidateFile(path)
+    } else {
+      this.indexFile(path, name, content, cfg)
+    }
+    return this.revalidateAfterChange(path, previousIds)
   }
 
   /**

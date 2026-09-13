@@ -1,6 +1,7 @@
 export * from './types.js'
 export * from './entities.js'
 export { JsonRegistry } from './registry.js'
+export type { RevalidationResult } from './registry.js'
 export * from './jsonc.js'
 export * from './yaml.js'
 export * from './parse.js'
