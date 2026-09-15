@@ -1,5 +1,7 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as YAML from 'yaml'
+import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
@@ -71,6 +73,24 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
 
   // Remove leading slash from instancePath (e.g., '/users/0/email' -> 'users/0/email')
   const path = instancePath.replace(/^\//, '')
+
+  // Errors that point at a specific scalar *value* — GTS reference-not-found
+  // (params.gtsId), x-gts-ref assertion failures, and gts:// prefix violations —
+  // all carry a precise instancePath that includes array indices. Resolve the
+  // exact value node at that path first so repeated values under different array
+  // items (e.g. the same subject_type inside several tokens) each get their own
+  // marker instead of collapsing onto the first textual match. Falls through to
+  // the coarser strategies below when the path can't be resolved.
+  const targetsScalarValue =
+    (error.params != null && 'gtsId' in error.params) ||
+    error.keyword === 'x-gts-ref' ||
+    error.keyword === 'gts-uri-prefix'
+  if (targetsScalarValue && instancePath && instancePath !== '/') {
+    const pathRange = findValueRangeAtInstancePath(document, instancePath)
+    if (pathRange) {
+      return pathRange
+    }
+  }
 
   // For gts:// prefix violations and x-gts-ref mismatches, highlight the
   // offending string value precisely.
@@ -334,6 +354,87 @@ function escapeRegex(str: string): string {
 function keyRegex(name: string): RegExp {
   const esc = escapeRegex(name)
   return new RegExp(`(["']?)${esc}\\1\\s*:`, 'g')
+}
+
+/**
+ * Split an AJV-style instancePath ("/tokens/2/subject_type") into path segments,
+ * converting numeric segments into numbers so array indices resolve to the
+ * correct list item rather than being treated as a property key. Empty segments
+ * (from the leading slash or a "/" root path) are dropped.
+ */
+function instancePathSegments(instancePath: string): Array<string | number> {
+  return instancePath
+    .split('/')
+    .filter(seg => seg.length > 0)
+    .map(seg => (/^\d+$/.test(seg) ? Number(seg) : seg))
+}
+
+/**
+ * Resolve the document range of the *value* at a given instancePath, honoring
+ * array indices. This is what lets repeated keys under different array items
+ * (e.g. `subject_type` inside several `tokens`) each resolve to their own
+ * occurrence instead of every error collapsing onto the first textual match.
+ *
+ * Returns null when the path cannot be resolved (e.g. multi-entity files whose
+ * per-entity paths are not rooted at the document), so callers can fall back to
+ * the coarser text-search strategies.
+ */
+function findValueRangeAtInstancePath(document: vscode.TextDocument, instancePath: string): vscode.Range | null {
+  const segments = instancePathSegments(instancePath)
+  if (segments.length === 0) return null
+
+  const text = document.getText()
+  const isYaml = document.languageId === 'yaml' || isYamlFileName(document.fileName)
+  return isYaml
+    ? findValueRangeYaml(text, document, segments)
+    : findValueRangeJson(text, document, segments)
+}
+
+/** Resolve a value range by navigating the YAML CST to the node at `segments`. */
+function findValueRangeYaml(text: string, document: vscode.TextDocument, segments: Array<string | number>): vscode.Range | null {
+  let doc: YAML.Document.Parsed
+  try {
+    doc = YAML.parseDocument(text)
+  } catch {
+    return null
+  }
+  if (doc.contents == null) return null
+
+  const node = doc.getIn(segments, true)
+  if (!YAML.isScalar(node) || !node.range) return null
+
+  const [startOffset, valueEndOffset] = node.range
+  // Skip the opening quote (if any) so the range points at the string content.
+  const raw = text.slice(startOffset, valueEndOffset)
+  const quoteLen = raw.startsWith('"') || raw.startsWith("'") ? 1 : 0
+  const valueStart = startOffset + quoteLen
+  const value = String(node.value)
+
+  const startPos = document.positionAt(valueStart)
+  const endPos = document.positionAt(valueStart + value.length)
+  return new vscode.Range(startPos, endPos)
+}
+
+/** Resolve a value range by navigating the JSON tree to the node at `segments`. */
+function findValueRangeJson(text: string, document: vscode.TextDocument, segments: Array<string | number>): vscode.Range | null {
+  const root = jsonc.parseTree(text, undefined, { allowTrailingComma: true })
+  if (!root) return null
+
+  const node = jsonc.findNodeAtLocation(root, segments)
+  if (!node) return null
+
+  let offset = node.offset
+  let length = node.length
+  // jsonc node offsets for strings include the surrounding quotes; strip them
+  // so the range covers only the string content.
+  if (node.type === 'string') {
+    offset += 1
+    length = Math.max(0, length - 2)
+  }
+
+  const startPos = document.positionAt(offset)
+  const endPos = document.positionAt(offset + length)
+  return new vscode.Range(startPos, endPos)
 }
 
 /**
