@@ -7,7 +7,24 @@ import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-
 // XGtsRefValidator is not re-exported from the package index, so import it from
 // its published subpath module.
 import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
+import type { Format } from 'ajv'
 import * as path from 'path'
+
+/**
+ * Evaluate one of `ajv-formats`' standard `Format` definitions against a string.
+ * A `Format` may be a `RegExp`, a validator function, or a
+ * `{ validate }` object whose `validate` is again a regex or a function.
+ */
+function matchesFormat(format: Format, value: string): boolean {
+  if (format instanceof RegExp) return format.test(value)
+  // The `Format` union also covers async/number variants; the temporal string
+  // formats we compose here are synchronous, so narrow the callable/regex forms.
+  const def = format as { validate?: RegExp | ((v: string) => boolean) } | ((v: string) => boolean)
+  const validate = typeof def === 'function' ? def : def?.validate
+  if (validate instanceof RegExp) return validate.test(value)
+  if (typeof validate === 'function') return Boolean(validate(value))
+  return false
+}
 
 /**
  * Convert an XGtsRefValidator field path (dot/bracket notation, e.g.
@@ -838,8 +855,24 @@ export class JsonRegistry {
       }
     })
 
-    // Add format validation (email, uri, date-time, etc.)
+    // Add format validation (email, uri, date-time, etc.). Default "full" mode
+    // validates real value ranges (e.g. rejects month 13, offset +25:00).
     addFormats(ajv)
+
+    // Tighten the temporal formats to strict RFC 3339. ajv-formats' full-mode
+    // date/time splits on `/t|\s/i`, so it accepts a space instead of `T`
+    // (permitted by RFC 3339 §5.6's NOTE, but not by the ABNF grammar GTS
+    // requires). Compose the two *standard* ajv-formats validators so a value
+    // must satisfy BOTH: the "fast" grammar (strict `T` separator + mandatory
+    // time-offset) AND the "full" validator (real calendar/clock ranges).
+    for (const name of ['date', 'time', 'date-time'] as const) {
+      const fast = addFormats.get(name, 'fast')
+      const full = addFormats.get(name, 'full')
+      ajv.addFormat(name, {
+        type: 'string',
+        validate: (value: string) => matchesFormat(fast, value) && matchesFormat(full, value),
+      })
+    }
 
     // Add custom schema loader that resolves GTS IDs from the registry
     ajv.addKeyword({
