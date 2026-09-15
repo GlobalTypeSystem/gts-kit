@@ -234,6 +234,7 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
   const treeView = vscode.window.createTreeView('gts-kit.fileExplorer', {
     treeDataProvider: treeProvider,
     dragAndDropController: treeProvider,
+    canSelectMany: true,
     showCollapseAll: true
   })
 
