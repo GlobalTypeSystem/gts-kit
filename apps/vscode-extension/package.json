@@ -19,8 +19,16 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Visualization",
-    "Other"
+    "Formatters",
+    "Linters",
+    "Visualization"
+  ],
+  "tags": [
+    "gts",
+    "json",
+    "jsonc",
+    "jsonchema",
+    "validation"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
