@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
+import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, analyzeGtsIdForStyling, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
 import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
 import * as jsonc from 'jsonc-parser'
@@ -331,8 +331,15 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         continue
       }
 
-      // Parse the GTS ID into parts
-      const parts = parseGtsIdParts(ref.id)
+      // Classify the segments using the shared, core-backed styling analyzer so
+      // schema-vs-instance is derived STRUCTURALLY from the GTS ID via gts-ts —
+      // NOT from how the referenced document happens to be shaped. The registry
+      // lookup below only informs existence (found → valid, missing → error).
+      const registry = this.registry
+      const analysis = analyzeGtsIdForStyling(ref.id, (entityId: string) => {
+        const entity = registry.jsonSchemas.get(entityId) || registry.jsonObjs.get(entityId)
+        return entity ? { exists: true, isSchema: entity.isSchema } : { exists: false }
+      })
 
       // Calculate the offset of the string value (excluding quotes)
       const text = document.getText()
@@ -346,12 +353,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       }
       gtsStartOffset += ref.uriPrefixLength
 
-      let currentOffset = gtsStartOffset
-      let hasMissingAncestor = false
-      for (let segIndex = 0; segIndex < parts.length; segIndex++) {
-        const part = parts[segIndex]
-        const partStartPos = document.positionAt(currentOffset)
-        const partEndPos = document.positionAt(currentOffset + part.length)
+      // References inside an "examples" field show missing entities as a neutral
+      // gray chip instead of a red error.
+      const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
+
+      for (let segIndex = 0; segIndex < analysis.segments.length; segIndex++) {
+        const seg = analysis.segments[segIndex]
+        const partStartPos = document.positionAt(gtsStartOffset + seg.startOffset)
+        const partEndPos = document.positionAt(gtsStartOffset + seg.endOffset)
         const partRange = new vscode.Range(partStartPos, partEndPos)
 
         // Every segment after the first gets a uniform leading gap, so the
@@ -361,37 +370,20 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           gapRanges.push(partRange)
         }
 
-        // Determine the full entity ID to look up
-        const entityIdToLookup = parts.slice(0, segIndex + 1).join('')
-
-        // Look up the entity in the registry
-        const entity = hasMissingAncestor
-          ? undefined
-          : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
-
-        if (entity) {
-          if (entity.isSchema) {
-            schemaRanges.push(partRange)
-          } else {
-            instanceRanges.push(partRange)
-          }
+        if (seg.type === 'schema') {
+          schemaRanges.push(partRange)
+        } else if (seg.type === 'instance') {
+          instanceRanges.push(partRange)
+        } else if (inExamples) {
+          // Entity not found inside an examples block — neutral gray chip.
+          unresolvedRanges.push(partRange)
         } else {
-          // Entity not found — if the reference is inside an "examples" field,
-          // show a neutral gray chip instead of a red error.
-          const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
-          if (inExamples && !hasMissingAncestor) {
-            unresolvedRanges.push(partRange)
-          } else {
-            // Red chip only — the authoritative "GTS reference not found"
-            // diagnostic for this is published by the shared validator
-            // (registry.validateEntity, surfaced via validation.ts) so we
-            // don't publish a second, duplicate diagnostic for the same miss.
-            errorRanges.push(partRange)
-            hasMissingAncestor = true
-          }
+          // Red chip only — the authoritative "GTS reference not found"
+          // diagnostic for this is published by the shared validator
+          // (registry.validateEntity, surfaced via validation.ts) so we
+          // don't publish a second, duplicate diagnostic for the same miss.
+          errorRanges.push(partRange)
         }
-
-        currentOffset += part.length
       }
     }
 

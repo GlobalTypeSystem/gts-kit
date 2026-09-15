@@ -1,4 +1,4 @@
-import { isGtsId, normalizeGtsId } from './entities.js'
+import { isGtsId, isGtsType, normalizeGtsId } from './entities.js'
 
 /**
  * Parse a GTS ID string and extract its parts
@@ -106,12 +106,18 @@ export function analyzeGtsIdForStyling(
     const part = parts[partIndex]
     const entityIdToLookup = parts.slice(0, partIndex + 1).join('')
 
-    // Look up the entity
+    // Look up the entity (existence only — see below).
     const lookupResult = hasMissingAncestor ? { exists: false } : entityLookup(entityIdToLookup)
 
     let segmentType: 'schema' | 'instance' | 'error'
     if (lookupResult.exists) {
-      segmentType = lookupResult.isSchema ? 'schema' : 'instance'
+      // Classify schema vs instance STRUCTURALLY from the GTS ID itself via the
+      // core gts-ts library: a segment whose cumulative ID ends in "~" is a type
+      // (schema), otherwise an instance. This is deliberately independent of how
+      // the referenced *document* happens to be shaped (its `isSchema` flag),
+      // so a malformed instance whose id ends in "~" is still styled as a type.
+      // The registry lookup above is used only to decide existence (error/valid).
+      segmentType = isGtsType(entityIdToLookup) ? 'schema' : 'instance'
     } else {
       segmentType = 'error'
       hasMissingAncestor = true
