@@ -622,6 +622,29 @@ async function validateClosedFile(filePath: string): Promise<void> {
 }
 
 /**
+ * Re-read a (now-closed) file from disk and re-index it into the shared registry.
+ *
+ * When an editor closes, any unsaved buffer edits are discarded, so the registry
+ * may still hold the stale live content that `validateOpenDocument` indexed. Re-
+ * indexing from disk makes the subsequent closed-file validation reflect what is
+ * actually on disk. No-op for non-file schemes or unreadable/deleted files.
+ */
+async function reindexClosedFileFromDisk(uri: vscode.Uri): Promise<void> {
+  if (uri.scheme !== 'file') return
+  try {
+    const data = await vscode.workspace.fs.readFile(uri)
+    const text = Buffer.from(data).toString('utf8')
+    const name = path.basename(uri.fsPath)
+    let content: any
+    try { content = parseGtsFileContent(name, text) } catch { content = text }
+    indexFile(uri.fsPath, name, content)
+  } catch {
+    // File may have been deleted/renamed; leave the registry as-is so the
+    // watcher's delete handler can drop it.
+  }
+}
+
+/**
  * Revalidate every file that depends on `changedPath` (instances of a changed
  * type, schemas derived from it, or entities that GTS-reference it). Open files
  * get precise in-editor diagnostics; closed files get coarse workspace markers.
@@ -663,7 +686,7 @@ export function initValidation(context: vscode.ExtensionContext) {
     console.log('[GTS Validation] Initializing validation system...')
 
     // Create diagnostic collection for validation errors
-    diagnosticCollection = vscode.languages.createDiagnosticCollection('gts')
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('gts-validation')
     context.subscriptions.push(diagnosticCollection)
     workspaceDiagnosticCollection = vscode.languages.createDiagnosticCollection('gts-workspace')
     context.subscriptions.push(workspaceDiagnosticCollection)
@@ -684,12 +707,19 @@ export function initValidation(context: vscode.ExtensionContext) {
       })
     )
 
-    // Clear diagnostics when document is closed
+    // When a document is closed (e.g. a preview tab replaced by clicking another
+    // file in the Explorer), drop its precise in-editor diagnostics and republish
+    // the coarse workspace diagnostic so the file keeps showing as invalid in the
+    // Explorer/tree. Without this the file would go green: validateOpenDocument
+    // removed the workspace marker when it was opened, and nothing restores it.
     context.subscriptions.push(
-      vscode.workspace.onDidCloseTextDocument(doc => {
+      vscode.workspace.onDidCloseTextDocument(async doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document closed: ${doc.fileName}`)
         diagnosticCollection.delete(doc.uri)
+        if (doc.uri.scheme !== 'file') return
+        await reindexClosedFileFromDisk(doc.uri)
+        await validateClosedFile(doc.uri.fsPath)
       })
     )
 

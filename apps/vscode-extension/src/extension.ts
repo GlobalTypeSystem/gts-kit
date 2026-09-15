@@ -275,7 +275,7 @@ export async function activate(context: vscode.ExtensionContext) {
   initValidation(context)
 
   // Create diagnostic collection for GTS validation
-  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts')
+  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts-link-format')
   context.subscriptions.push(gtsDiagnostics)
 
   // Initialize and register GTS link provider for clickable GTS IDs
