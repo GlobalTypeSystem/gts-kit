@@ -73,7 +73,13 @@ function getDiscoveredFilePaths(): string[] {
 
 /** True if the given file currently has a GTS validation error reported on it. */
 export function hasGtsErrors(uri: vscode.Uri): boolean {
-  return vscode.languages.getDiagnostics(uri).some(d => d.source === 'GTS')
+  if (vscode.languages.getDiagnostics(uri).some(d => d.source === 'GTS')) return true
+  const registry = getRegistry()
+  if (!registry) return false
+  const fsPath = uri.fsPath
+  if (registry.invalidFiles.get(fsPath)?.validation?.errors.length) return true
+  const entities = [...(registry.jsonFileSchemas.get(fsPath) || []), ...(registry.jsonFileObjs.get(fsPath) || [])]
+  return entities.some(entity => Boolean(entity.validation?.errors.length))
 }
 
 /** Total number of GTS validation problems currently reported across the workspace. */

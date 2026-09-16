@@ -732,6 +732,24 @@ export class JsonRegistry {
           params: { value: err.value, refPattern: err.refPattern }
         })
       }
+
+      if (entity.validation.errors.length === 0) {
+        const ancestors = JsonRegistry.ancestorTypeIds(entity.id)
+        const parentId = ancestors.length > 1 ? ancestors[ancestors.length - 2] : null
+        const parent = parentId ? this.jsonSchemas.get(parentId) : undefined
+        if (parent) {
+          await this.validateEntity(parent)
+          if (parent.validation?.errors.length) {
+            entity.validation.errors.push({
+              instancePath: '/$id',
+              schemaPath: '#',
+              keyword: 'x-gts-schema',
+              message: `Parent schema '${parentId}' has GTS validation errors`,
+              params: { schemaId: parentId }
+            })
+          }
+        }
+      }
     } else if (entity instanceof JsonObj) {
       // Validate the object against its schema
       if (!entity.schemaId) {
