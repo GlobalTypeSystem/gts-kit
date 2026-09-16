@@ -256,7 +256,14 @@ export function levenshteinDistance(a: string, b: string): number {
  * ```
  */
 export function findSimilarEntityIds(targetId: string, allIds: string[], maxResults: number = 3): string[] {
-  const similarities = allIds.map(id => ({
+  // Deduplicate the candidate list and never suggest the queried id itself.
+  // Callers typically build `allIds` by concatenating several registry maps
+  // (e.g. schemas + instances), so the same id can appear more than once; and a
+  // "Did you mean...?" that echoes the exact id the user hovered is noise that
+  // renders as a confusing self-reference / duplicated row.
+  const candidates = Array.from(new Set(allIds)).filter(id => id !== targetId)
+
+  const similarities = candidates.map(id => ({
     id,
     distance: levenshteinDistance(targetId, id)
   }))
