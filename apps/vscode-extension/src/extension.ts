@@ -323,15 +323,42 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Keep the shared registry in sync with on-disk changes that don't go through
   // the editor: files edited outside the IDE (git pull/checkout, terminal,
-  // external tools) and create/rename/delete performed anywhere. The watcher
-  // also fires for in-IDE saves/creates/deletes; those cases either defer to the
-  // editor handlers (open documents) or are handled idempotently here.
+  // external tools).
   const gtsWatcher = vscode.workspace.createFileSystemWatcher(GTS_SCAN_GLOB)
   context.subscriptions.push(gtsWatcher)
   context.subscriptions.push(
     gtsWatcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
     gtsWatcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
     gtsWatcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+  )
+
+  // The recursive workspace watcher above does NOT follow directory symlinks
+  // that resolve outside the watched folder, so files reached only through such
+  // a symlink (e.g. `.examples -> ../gts-spec/...`) never emit create/change/
+  // delete events. Add an explicit recursive watcher rooted at each symlinked
+  // directory so external OS edits under it are tracked too.
+  void watchSymlinkedDirs(context)
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { void watchSymlinkedDirs(context) })
+  )
+
+  context.subscriptions.push(
+    vscode.workspace.onDidCreateFiles(event => {
+      for (const uri of event.files) {
+        if (!isGtsScanPath(uri.fsPath)) continue
+        const openDoc = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === uri.fsPath)
+        if (openDoc) {
+          handleFileChange(openDoc, 0)
+        } else {
+          void onDiskFileChanged(uri)
+        }
+      }
+    }),
+    vscode.workspace.onDidDeleteFiles(event => {
+      for (const uri of event.files) {
+        if (isGtsScanPath(uri.fsPath)) onDiskFileDeleted(uri)
+      }
+    })
   )
 
   // Handle in-IDE renames explicitly: the watcher's create event is skipped for
@@ -344,7 +371,7 @@ export async function activate(context: vscode.ExtensionContext) {
         removeFileFromRegistry(oldUri.fsPath)
         forgetIndexedPath(oldUri.fsPath)
         if (isIgnoredGtsPath(newUri.fsPath)) continue
-        if (!/\.(json|jsonc|gts|ya?ml)$/i.test(newUri.fsPath)) continue
+        if (!isGtsScanPath(newUri.fsPath)) continue
         const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === newUri.fsPath)
         if (openDoc) {
           handleFileChange(openDoc, 0)
@@ -627,6 +654,57 @@ export async function deactivate() {
 
 // Debounced rescan on change to auto-refresh layout view while typing
 let changeTimer: NodeJS.Timeout | null = null
+
+function isGtsScanPath(fsPath: string): boolean {
+  return /\.(json|jsonc|gts|ya?ml)$/i.test(fsPath)
+}
+
+// Symlinked directories we've already attached a dedicated watcher to (keyed by
+// the symlink's fsPath), so repeated setup calls don't create duplicate watchers.
+const watchedSymlinkDirs = new Set<string>()
+
+/**
+ * VS Code's recursive workspace watcher does not follow directory symlinks that
+ * point outside the watched folder. Create an explicit recursive watcher rooted
+ * at each top-level symlinked directory in every workspace folder so on-disk
+ * create/change/delete events under it are reported. VS Code preserves the
+ * watched (symlink) path in the emitted URIs, which matches how the scan indexes
+ * those files, so no path translation is needed.
+ */
+async function watchSymlinkedDirs(context: vscode.ExtensionContext): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders || []
+  for (const folder of folders) {
+    let entries: [string, vscode.FileType][]
+    try {
+      entries = await vscode.workspace.fs.readDirectory(folder.uri)
+    } catch {
+      continue
+    }
+    for (const [name, type] of entries) {
+      if (!(type & vscode.FileType.SymbolicLink)) continue
+      const linkUri = vscode.Uri.joinPath(folder.uri, name)
+      if (watchedSymlinkDirs.has(linkUri.fsPath)) continue
+      // Only follow symlinks that resolve to a directory (stat follows the link).
+      try {
+        const stat = await vscode.workspace.fs.stat(linkUri)
+        if (!(stat.type & vscode.FileType.Directory)) continue
+      } catch {
+        continue
+      }
+      if (isIgnoredGtsPath(linkUri.fsPath + path.sep)) continue
+      watchedSymlinkDirs.add(linkUri.fsPath)
+      const pattern = new vscode.RelativePattern(linkUri, `**/*.{json,jsonc,gts,yaml,yml}`)
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern)
+      context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
+        watcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
+        watcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+      )
+      console.log('[GTS] Watching symlinked directory:', linkUri.fsPath)
+    }
+  }
+}
 
 /** Paths we never index (build output, VCS internals, our own cache). */
 function isIgnoredGtsPath(fsPath: string): boolean {
