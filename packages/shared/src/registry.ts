@@ -753,29 +753,7 @@ export class JsonRegistry {
     } else if (entity instanceof JsonObj) {
       // Validate the object against its schema
       if (!entity.schemaId) {
-        // gts-ts's GtsExtractor derived no type_id for this instance, so there
-        // is no GTS type to validate it against. gts-ts cannot, on its own,
-        // distinguish the two shapes that land here (both return `ok:false`
-        // "No schema found" from validateInstance and both register), so we
-        // split on the one signal gts-ts DOES compute — `selected_entity_field`:
-        //
-        //  - Schema-shaped documents identified via the JSON-Schema `$id`
-        //    keyword (e.g. `{ "$$schema": …, "$id": "gts://…v1~" }`, the
-        //    .gts-spec DoubleDollarSchemaWithRealId case shipped under valid/):
-        //    the reference server records these as VALID via registration, so we
-        //    defer to that verdict (accept if gts-ts registered them).
-        //  - Plain instances (`id`/`gtsId`/…) whose id is a bare *type* id have
-        //    no instance segment and no resolvable type; OP#6 validation rejects
-        //    them ("No schema found for instance"). Surface that gts-ts verdict
-        //    so they are flagged (matches .examples/invalid/instances/*).
-        //
-        // NOTE: this `$id` split is a workaround for a gts-ts gap — see
-        // docs/GTS_TS_MIGRATION.md Gap I (no single validate verdict that
-        // separates a schema-shaped schema-less entity from a malformed
-        // bare-type-id instance).
         const store = this.getGtsStore()
-        const identifiedBySchemaIdentityField = entity.selectedEntityIdField === '$id'
-        if (identifiedBySchemaIdentityField && store.get(entity.id)) return
         const result = store.validateInstance(entity.id)
         if (!result.ok) {
           const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
