@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
-import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
+import { rebuildRegistry, rebuildRegistryIfUnchanged, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry, getRegistryRevision } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
 import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
@@ -120,6 +120,21 @@ let gtsLinkProvider: GtsLinkProvider | null = null
 let pendingOpenFile: string | null = null
 // Left-sidebar GTS file browser (tree view + red/green file decorations), shares the same registry as everything else.
 let gtsExplorer: GtsExplorer | null = null
+let workspaceMutationRevision = 0
+let fullScanQueue: Promise<void> = Promise.resolve()
+
+type StableScanOperation = (expectedMutationRevision: number) => Promise<boolean>
+
+function enqueueStableScan(operation: StableScanOperation): Promise<void> {
+  const execute = async () => {
+    while (!await operation(workspaceMutationRevision)) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  const run = fullScanQueue.then(execute, execute)
+  fullScanQueue = run.catch(() => {})
+  return run
+}
 
 function getNonce(): string {
   let text = ''
@@ -130,8 +145,13 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null) {
+async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null): Promise<void> {
+  await enqueueStableScan(expectedMutationRevision => scanAndPostPass(includeGlob, isInitialScan, refreshFilePath, expectedMutationRevision))
+}
+
+async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refreshFilePath: string | null | undefined, expectedMutationRevision: number): Promise<boolean> {
   const hasViewer = viewerPanel !== null
+  const expectedRegistryRevision = getRegistryRevision()
 
   try {
     let selectedFilePath: string | null = null
@@ -203,7 +223,9 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     // Update the shared, persistent, index-only registry (used by decorations,
     // links, hovers and as validation resolution context). This is cheap.
-    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
+    if (workspaceMutationRevision !== expectedMutationRevision) return false
+    const registry = await rebuildRegistryIfUnchanged(files, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
+    if (!registry) return false
     if (selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
@@ -258,21 +280,17 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
         void validateOpenDocument(doc)
       }
     })
+    return workspaceMutationRevision === expectedMutationRevision
   } catch (error: any) {
     if (hasViewer) {
       viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
     }
+    return true
   }
 }
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('[GTS] Extension activating...')
-
-  // Perform initial workspace scan for validation (background, non-blocking)
-  console.log('[GTS] Starting initial workspace scan for validation...')
-  performInitialScan().catch(error => {
-    console.error('[GTS] Initial scan failed:', error)
-  })
 
   initValidation(context)
 
@@ -368,6 +386,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidRenameFiles(async event => {
       for (const { oldUri, newUri } of event.files) {
+        beginFileMutation(oldUri.fsPath)
         removeFileFromRegistry(oldUri.fsPath)
         forgetIndexedPath(oldUri.fsPath)
         if (isIgnoredGtsPath(newUri.fsPath)) continue
@@ -388,6 +407,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore')
   context.subscriptions.push(gitignoreWatcher)
   const onGitignoreChanged = () => {
+    workspaceMutationRevision++
     resetWorkspaceIgnore()
     void performInitialScan()
   }
@@ -396,6 +416,12 @@ export async function activate(context: vscode.ExtensionContext) {
     gitignoreWatcher.onDidChange(onGitignoreChanged),
     gitignoreWatcher.onDidDelete(onGitignoreChanged)
   )
+
+  // Perform initial workspace scan for validation (background, non-blocking)
+  console.log('[GTS] Starting initial workspace scan for validation...')
+  performInitialScan().catch(error => {
+    console.error('[GTS] Initial scan failed:', error)
+  })
 
   // Initial decoration for all visible editors
   if (gtsLinkProvider) {
@@ -540,6 +566,8 @@ function revalidateOpenDocs(): void {
 }
 
 async function refreshGtsFileExplorer(linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
+  workspaceMutationRevision++
+  fileMutationRevisions.clear()
   if (changeTimer) clearTimeout(changeTimer)
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   changeTimer = null
@@ -557,7 +585,12 @@ async function refreshGtsFileExplorer(linkDiagnostics: vscode.DiagnosticCollecti
   await performInitialScan()
 }
 
-async function performInitialScan() {
+async function performInitialScan(): Promise<void> {
+  await enqueueStableScan(performInitialScanPass)
+}
+
+async function performInitialScanPass(expectedMutationRevision: number): Promise<boolean> {
+  const expectedRegistryRevision = getRegistryRevision()
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
     // files/folders (at enumeration time via globs, plus an authoritative
@@ -595,8 +628,10 @@ async function performInitialScan() {
     const phase1Deduped = dedupeUrisByRealPath(phase1Candidates)
     console.log(`[GTS] Phase 1: ${phase1Deduped.length} candidate files (of ${fastUris.length} enumerated, ${phase1Candidates.length} before real-path dedup)`)
     const files1 = await readGtsCandidateFiles(phase1Deduped)
+    if (workspaceMutationRevision !== expectedMutationRevision) return false
+    const registry = await rebuildRegistryIfUnchanged(files1, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
+    if (!registry) return false
     setLastScanFiles(files1)
-    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
     gtsExplorer?.refresh()
 
@@ -619,6 +654,7 @@ async function performInitialScan() {
     const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
     if (phase2Uris.length > 0) {
       const files2 = await readGtsCandidateFiles(phase2Uris)
+      if (workspaceMutationRevision !== expectedMutationRevision) return false
       if (files2.length > 0) {
         for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
         setLastScanFiles([...files1, ...files2])
@@ -629,6 +665,7 @@ async function performInitialScan() {
       }
       console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
     }
+    return workspaceMutationRevision === expectedMutationRevision
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -726,12 +763,14 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   if (isIgnoredGtsPath(fsPath)) return
   if (isUriIgnored(uri)) return
   if (isOpenInEditor(fsPath)) return
+  const mutationRevision = beginFileMutation(fsPath)
   try {
     const data = await vscode.workspace.fs.readFile(uri)
     const text = Buffer.from(data).toString('utf8')
     const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
+    if (fileMutationRevisions.get(fsPath) !== mutationRevision || !fs.existsSync(fsPath)) return
     // Keep one entry per physical file even when reached via a symlinked path.
     claimCanonicalPath(fsPath)
     indexFileInRegistry(fsPath, name, content)
@@ -746,8 +785,7 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
 /** A GTS file was deleted/renamed-away on disk. Drop its entities from the registry. */
 function onDiskFileDeleted(uri: vscode.Uri): void {
   const fsPath = uri.fsPath
-  if (isIgnoredGtsPath(fsPath)) return
-  if (isUriIgnored(uri)) return
+  beginFileMutation(fsPath)
   removeFileFromRegistry(fsPath)
   forgetIndexedPath(fsPath)
   gtsExplorer?.refresh()
@@ -757,6 +795,15 @@ function onDiskFileDeleted(uri: vscode.Uri): void {
 // Debounce a burst of on-disk changes (e.g. a git checkout touching many files)
 // into a single UI/validation refresh.
 let externalChangeTimer: NodeJS.Timeout | null = null
+const fileMutationRevisions = new Map<string, number>()
+
+function beginFileMutation(fsPath: string): number {
+  workspaceMutationRevision++
+  const revision = (fileMutationRevisions.get(fsPath) || 0) + 1
+  fileMutationRevisions.set(fsPath, revision)
+  return revision
+}
+
 function scheduleExternalChangeSettle(): void {
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   externalChangeTimer = setTimeout(() => {
@@ -788,6 +835,7 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   if (!isGtsCandidateFile(doc)) return
 
   const fsPath = doc.uri.fsPath
+  beginFileMutation(fsPath)
 
   // Snapshot the file's ids from before this edit burst (once per burst), before
   // the immediate reindex below overwrites them in the registry.

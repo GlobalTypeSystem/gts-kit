@@ -4,7 +4,7 @@ import * as YAML from 'yaml'
 import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
-import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
+import { getRegistry, getRegistryRevision, rebuildRegistry, indexFile } from './registryStore'
 import { isGtsCandidateFile } from './helpers'
 
 let diagnosticCollection: vscode.DiagnosticCollection
@@ -12,7 +12,9 @@ let workspaceDiagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
 
 const documentValidationErrors = new Map<string, ValidationError[]>()
+const documentValidationGenerations = new Map<string, number>()
 const validationCompletedListeners = new Set<(uri: vscode.Uri) => void>()
+let workspaceValidationGeneration = 0
 
 export function getDocumentValidationErrors(uri: vscode.Uri): ValidationError[] {
   return documentValidationErrors.get(uri.toString()) || []
@@ -526,6 +528,10 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     return
   }
 
+  const validationKey = document.uri.toString()
+  const validationGeneration = (documentValidationGenerations.get(validationKey) || 0) + 1
+  documentValidationGenerations.set(validationKey, validationGeneration)
+
   try {
     const text = document.getText()
     const fileName = path.basename(document.fileName)
@@ -590,6 +596,11 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
       }
     }
 
+    if (
+      documentValidationGenerations.get(validationKey) !== validationGeneration ||
+      getRegistry() !== registry
+    ) return
+
     // This document is now open and gets precise diagnostics; drop any coarse
     // background diagnostic so markers aren't duplicated.
     workspaceDiagnosticCollection?.delete(document.uri)
@@ -614,7 +625,8 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     }
   } catch (error) {
     console.error('[GTS Validation] ✗ Error validating document:', error)
-    documentValidationErrors.delete(document.uri.toString())
+    if (documentValidationGenerations.get(validationKey) !== validationGeneration) return
+    documentValidationErrors.delete(validationKey)
     diagnosticCollection.delete(document.uri)
   }
 }
@@ -627,6 +639,8 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 export async function validateWorkspaceInBackground(scopeRoots?: string[]): Promise<void> {
   const registry = getRegistry()
   if (!registry || !workspaceDiagnosticCollection) return
+  const validationGeneration = ++workspaceValidationGeneration
+  const registryRevision = getRegistryRevision()
 
   const openPaths = new Set<string>()
   for (const doc of vscode.workspace.textDocuments) {
@@ -661,10 +675,19 @@ export async function validateWorkspaceInBackground(scopeRoots?: string[]): Prom
   const entities = [...registry.jsonSchemas.values(), ...registry.jsonObjs.values()]
   for (const entity of entities) {
     await registry.validateEntity(entity)
+    if (
+      workspaceValidationGeneration !== validationGeneration ||
+      getRegistryRevision() !== registryRevision
+    ) return
     if (!entity.file?.path) continue
     const errors = entity.validation?.errors || []
     for (const error of errors) addError(entity.file.path, error)
   }
+
+  if (
+    workspaceValidationGeneration !== validationGeneration ||
+    getRegistryRevision() !== registryRevision
+  ) return
 
   const entries: Array<[vscode.Uri, vscode.Diagnostic[]]> = []
   for (const [filePath, diagnostics] of diagnosticsByPath.entries()) {
@@ -771,6 +794,8 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
 
 export function resetValidationDiagnostics(): void {
   documentValidationErrors.clear()
+  documentValidationGenerations.clear()
+  workspaceValidationGeneration++
   diagnosticCollection?.clear()
   workspaceDiagnosticCollection?.clear()
 }
@@ -809,7 +834,9 @@ export function initValidation(context: vscode.ExtensionContext) {
       vscode.workspace.onDidCloseTextDocument(async doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document closed: ${doc.fileName}`)
-        documentValidationErrors.delete(doc.uri.toString())
+        const validationKey = doc.uri.toString()
+        documentValidationGenerations.set(validationKey, (documentValidationGenerations.get(validationKey) || 0) + 1)
+        documentValidationErrors.delete(validationKey)
         diagnosticCollection.delete(doc.uri)
         if (doc.uri.scheme !== 'file') return
         await reindexClosedFileFromDisk(doc.uri)

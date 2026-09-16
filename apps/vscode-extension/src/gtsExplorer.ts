@@ -1,5 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as fs from 'fs'
 import { getRegistry } from './registryStore'
 
 /**
@@ -67,7 +68,7 @@ function getDiscoveredFilePaths(): string[] {
   const registry = getRegistry()
   if (!registry) return []
   const paths = new Set<string>([...registry.jsonFiles.keys(), ...registry.invalidFiles.keys()])
-  return Array.from(paths)
+  return Array.from(paths).filter(fs.existsSync)
 }
 
 /** True if the given file currently has a GTS validation error reported on it. */
@@ -253,11 +254,14 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
     // badge) change independently of the file list — repaint whenever a URI's
     // diagnostics changed.
     vscode.languages.onDidChangeDiagnostics(event => {
-      decorationProvider.refresh(event.uris as vscode.Uri[])
+      const changed = treeProvider.refresh()
+      decorationProvider.refresh([...event.uris, ...changed] as vscode.Uri[])
       updateBadge(treeView)
     })
   )
 
+  treeProvider.refresh()
+  decorationProvider.refresh()
   updateBadge(treeView)
 
   return {
