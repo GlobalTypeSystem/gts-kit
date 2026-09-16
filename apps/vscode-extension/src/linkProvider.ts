@@ -2,6 +2,7 @@ import * as vscode from 'vscode'
 import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, analyzeGtsIdForStyling, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
 import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
+import { getDocumentValidationErrors } from './validation'
 import * as jsonc from 'jsonc-parser'
 import * as YAML from 'yaml'
 
@@ -248,6 +249,17 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
+   * Update decorations for visible editors showing the given document URI.
+   */
+  public updateDecorationsForUri(uri: vscode.Uri): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.uri.toString() === uri.toString()) {
+        this.updateDecorations(editor)
+      }
+    }
+  }
+
+  /**
    * Update decorations for a specific editor
    */
   public updateDecorations(editor: vscode.TextEditor): void {
@@ -256,11 +268,19 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     }
 
     const document = editor.document
+    const filePath = document.uri.fsPath
 
     // Only decorate JSON/JSONC/GTS/YAML files
     if (!['json', 'jsonc', 'gts', 'yaml'].includes(document.languageId) && !isYamlFileName(document.fileName)) {
       return
     }
+
+    const docErrors = [
+      ...getDocumentValidationErrors(document.uri),
+      ...(this.registry.jsonFileSchemas.get(filePath) || []).flatMap(e => e.validation?.errors || []),
+      ...(this.registry.jsonFileObjs.get(filePath) || []).flatMap(e => e.validation?.errors || []),
+      ...(this.registry.invalidFiles.get(filePath)?.validation?.errors || [])
+    ]
 
     const schemaRanges: vscode.Range[] = []
     const instanceRanges: vscode.Range[] = []
@@ -332,13 +352,33 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       }
 
       // Classify the segments using the shared, core-backed styling analyzer so
-      // schema-vs-instance is derived STRUCTURALLY from the GTS ID via gts-ts —
-      // NOT from how the referenced document happens to be shaped. The registry
-      // lookup below only informs existence (found → valid, missing → error).
+      // schema-vs-instance is derived STRUCTURALLY from the GTS ID via gts-ts.
+      // Correctness (red vs blue/green) comes from the authoritative gts-ts
+      // validation results: a *schema* segment whose entity failed gts-ts
+      // validation (e.g. an invalid derived schema in the chain) is `isValid:
+      // false` → red. Instance-level, field-specific errors (abstract type,
+      // x-gts-ref, ...) are handled by `hasFieldError` below, not by flagging the
+      // whole instance entity, so an instance's own id is not reddened merely
+      // because some other field of it failed. No GTS rules are re-derived here.
       const registry = this.registry
       const analysis = analyzeGtsIdForStyling(ref.id, (entityId: string) => {
-        const entity = registry.jsonSchemas.get(entityId) || registry.jsonObjs.get(entityId)
-        return entity ? { exists: true, isSchema: entity.isSchema } : { exists: false }
+        const schema = registry.jsonSchemas.get(entityId)
+        if (schema) {
+          return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
+        }
+        const obj = registry.jsonObjs.get(entityId)
+        if (obj) {
+          return { exists: true, isSchema: false }
+        }
+        return { exists: false }
+      })
+
+      // A gts-ts validation error reported at (or under) this field's instance
+      // path means the value written here is what's wrong — colour every segment
+      // red regardless of its structural classification.
+      const refInstancePath = '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+      const hasFieldError = docErrors.some(err => {
+        return Boolean(err.instancePath && (err.instancePath === refInstancePath || err.instancePath.startsWith(refInstancePath + '/')))
       })
 
       // Calculate the offset of the string value (excluding quotes)
@@ -370,7 +410,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           gapRanges.push(partRange)
         }
 
-        if (seg.type === 'schema') {
+        if (hasFieldError) {
+          errorRanges.push(partRange)
+        } else if (seg.type === 'schema') {
           schemaRanges.push(partRange)
         } else if (seg.type === 'instance') {
           instanceRanges.push(partRange)
@@ -533,12 +575,11 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
             // Get the property path for this value
             const node = jsonc.findNodeAtOffset(root, offset)
-            const path = jsonc.getNodePath(node?.parent || node || root)
-            const sourcePath = path.join('.')
+            const valuePath = jsonc.getNodePath(node || root)
+            const sourcePath = valuePath.join('.')
 
             // Determine the leaf field name this value is assigned to. The value
             // node's own path ends with its property key (or an array index).
-            const valuePath = jsonc.getNodePath(node || root)
             let fieldName = ''
             for (let i = valuePath.length - 1; i >= 0; i--) {
               if (typeof valuePath[i] === 'string') {
@@ -831,31 +872,46 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       segmentStartOffset = segmentEndOffset
     }
 
-    let hasMissingAncestor = false
-    let missingAncestorId: string | undefined
-    if (hoveredSegmentIndex !== undefined) {
-      for (let partIndex = 0; partIndex <= hoveredSegmentIndex; partIndex++) {
-        const ancestorId = parts.slice(0, partIndex + 1).join('')
-        const ancestor = this.registry.jsonSchemas.get(ancestorId) || this.registry.jsonObjs.get(ancestorId)
-        if (!ancestor) {
-          hasMissingAncestor = true
-          missingAncestorId = ancestorId
-          break
-        }
+    // Classify the hovered segment with the SAME analyzer that drives the
+    // colouring, so the hover verdict never contradicts the red/blue/green chip
+    // and we don't hand-roll a second, divergent notion of "missing".
+    const registry = this.registry
+    const analysis = analyzeGtsIdForStyling(gtsId, (id: string) => {
+      const schema = registry.jsonSchemas.get(id)
+      if (schema) return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
+      const obj = registry.jsonObjs.get(id)
+      if (obj) return { exists: true, isSchema: false }
+      return { exists: false }
+    })
+    const hoveredSeg = hoveredSegmentIndex !== undefined ? analysis.segments[hoveredSegmentIndex] : undefined
+
+    if (hoveredSeg && hoveredSeg.type === 'error') {
+      const firstErrorIdx = analysis.segments.findIndex(s => s.type === 'error')
+      // An earlier segment is the real cause; this one only cascades from it.
+      if (firstErrorIdx !== -1 && hoveredSegmentIndex !== undefined && firstErrorIdx < hoveredSegmentIndex) {
+        const culprit = analysis.segments[firstErrorIdx].entityId
+        markdown.appendMarkdown(`GTS Parent Type Not Found\n\n`)
+        markdown.appendMarkdown(`This segment derives from \`${escapeMarkdown(culprit)}\`, which is not a defined GTS type.`)
+        return new vscode.Hover(markdown, hoverRange)
       }
+      // This segment itself is the cause. A "~"-terminated id that resolves only
+      // to an instance document (or nothing) names a TYPE that is not defined —
+      // it is NOT an ancestor/derivation problem.
+      const schemaHere = this.registry.jsonSchemas.get(entityIdToLookup)
+      const objHere = this.registry.jsonObjs.get(entityIdToLookup)
+      if (!schemaHere && objHere) {
+        markdown.appendMarkdown(`⚠️ GTS Type Not Found\n\n`)
+        markdown.appendMarkdown(`ID: ${escapeMarkdown(entityIdToLookup)}\n\n`)
+        markdown.appendMarkdown(`This is a GTS type identifier, but no type (schema) with this id is defined.`)
+        return new vscode.Hover(markdown, hoverRange)
+      }
+      // Not found at all → fall through to the "GTS Entity Not Found" + suggestions block.
     }
 
-    // Look up the entity in the registry
-    const entity = hasMissingAncestor
+    // Look up the entity in the registry (only when the segment is not an error).
+    const entity = hoveredSeg && hoveredSeg.type === 'error'
       ? undefined
       : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
-
-    if (missingAncestorId) {
-      markdown.appendMarkdown(`GTS Parent Type Not Found\n\n`)
-      markdown.appendMarkdown(`Missing ancestor: ${escapeMarkdown(missingAncestorId)}\n\n`)
-      markdown.appendMarkdown(`This segment is invalid because it derives from a missing type.`)
-      return new vscode.Hover(markdown, hoverRange)
-    }
 
     if (!entity) {
       // Entity not found - show error with suggestions
@@ -917,7 +973,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     // Make the GTS ID itself clickable
     markdown.appendMarkdown(`GTS ID: [${escapeMarkdown(entityIdToLookup)}](${fileUri.toString()})\n\n`)
-    markdown.appendMarkdown(`Type: ${entityType}\n\n`)
+    markdown.appendMarkdown(`Kind: ${entityType}\n\n`)
     markdown.appendMarkdown(`Definition: [${escapeMarkdown(relativePath)}](${fileUri.toString()})`)
 
     // Add description if available (on a new line, no label)

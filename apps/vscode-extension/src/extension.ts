@@ -2,11 +2,12 @@ import * as vscode from 'vscode'
 import * as path from 'path'
 import * as fs from 'fs'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
+import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents } from './validation'
+import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
@@ -229,10 +230,11 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
       try {
         const vreg = new JsonRegistry()
         await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
-        const objs = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-        const schemas = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-        const invalidFilesHost = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
-        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: { objs, schemas, invalidFiles: invalidFilesHost } })
+        const objs: ObjValidationDto[] = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
+        const schemas: EntityValidationDto[] = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
+        const invalidFiles: InvalidFileValidationDto[] = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
+        const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
+        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: payload })
       } catch (ve: any) {
         viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
       }
@@ -280,6 +282,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize and register GTS link provider for clickable GTS IDs
   gtsLinkProvider = new GtsLinkProvider(gtsDiagnostics)
+
+  // Repaint editor decorations whenever document validation completes
+  context.subscriptions.push(
+    onValidationCompleted(uri => {
+      gtsLinkProvider?.updateDecorationsForUri(uri)
+    })
+  )
 
   // Left sidebar: file browser tree + red/green file decorations, sharing the same registry.
   gtsExplorer = registerGtsExplorer(context)

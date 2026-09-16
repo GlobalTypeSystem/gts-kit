@@ -11,6 +11,18 @@ let diagnosticCollection: vscode.DiagnosticCollection
 let workspaceDiagnosticCollection: vscode.DiagnosticCollection
 let isInitialScanComplete = false
 
+const documentValidationErrors = new Map<string, ValidationError[]>()
+const validationCompletedListeners = new Set<(uri: vscode.Uri) => void>()
+
+export function getDocumentValidationErrors(uri: vscode.Uri): ValidationError[] {
+  return documentValidationErrors.get(uri.toString()) || []
+}
+
+export function onValidationCompleted(listener: (uri: vscode.Uri) => void): vscode.Disposable {
+  validationCompletedListeners.add(listener)
+  return new vscode.Disposable(() => validationCompletedListeners.delete(listener))
+}
+
 function isPathUnderAnyRoot(filePath: string, roots: string[] | undefined): boolean {
   if (!roots || roots.length === 0) return true
   for (const root of roots) {
@@ -74,25 +86,59 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
   // Remove leading slash from instancePath (e.g., '/users/0/email' -> 'users/0/email')
   const path = instancePath.replace(/^\//, '')
 
-  // Errors that point at a specific scalar *value* — GTS reference-not-found
-  // (params.gtsId), x-gts-ref assertion failures, and gts:// prefix violations —
-  // all carry a precise instancePath that includes array indices. Resolve the
-  // exact value node at that path first so repeated values under different array
-  // items (e.g. the same subject_type inside several tokens) each get their own
-  // marker instead of collapsing onto the first textual match. Falls through to
-  // the coarser strategies below when the path can't be resolved.
-  const targetsScalarValue =
-    (error.params != null && 'gtsId' in error.params) ||
-    error.keyword === 'x-gts-ref' ||
-    error.keyword === 'gts-uri-prefix'
-  if (targetsScalarValue && instancePath && instancePath !== '/') {
-    const pathRange = findValueRangeAtInstancePath(document, instancePath)
-    if (pathRange) {
-      return pathRange
+  // 1. Required property missing: the property is not in data, highlight the parent object opening brace
+  if (error.keyword === 'required' && error.params && 'missingProperty' in error.params) {
+    if (!path) {
+      // Error at root level - find first opening brace
+      const rootMatch = text.match(/\{/)
+      if (rootMatch && rootMatch.index !== undefined) {
+        const pos = document.positionAt(rootMatch.index)
+        return new vscode.Range(pos, pos.translate(0, 1))
+      }
+    } else {
+      const position = findObjectAtPath(text, document, path)
+      if (position) {
+        return position
+      }
     }
   }
 
-  // For gts:// prefix violations and x-gts-ref mismatches, highlight the
+  // 2. Additional properties error: highlight the unexpected property key
+  if (error.keyword === 'additionalProperties' && error.params && 'additionalProperty' in error.params) {
+    const additionalProp = (error.params as any).additionalProperty
+    const keyRange = findKeyRangeAtInstancePath(document, instancePath, additionalProp)
+    if (keyRange) {
+      return keyRange
+    }
+    const searchPattern = keyRegex(additionalProp)
+    const match = searchPattern.exec(text)
+    if (match) {
+      const quoteLen = match[1] ? 1 : 0
+      const startPos = document.positionAt(match.index + quoteLen)
+      const endPos = document.positionAt(match.index + quoteLen + additionalProp.length)
+      return new vscode.Range(startPos, endPos)
+    }
+  }
+
+  // 3. For any error carrying an instance path, underline the offending node.
+  // The choice of what to underline is STRUCTURAL, not keyword-specific: a
+  // scalar value (format/uuid/pattern/x-gts-abstract/x-gts-ref/type/enum on a
+  // leaf, or the schema's own $id) is underlined directly; when the path
+  // resolves to an object/array subschema (e.g. an OP#12 derivation error at
+  // `/allOf/1/properties/level`, whose value is itself a schema) the property
+  // key is underlined instead.
+  if (instancePath && instancePath !== '/') {
+    const valueRange = findValueRangeAtInstancePath(document, instancePath)
+    if (valueRange) {
+      return valueRange
+    }
+    const keyRange = findKeyRangeAtInstancePath(document, instancePath)
+    if (keyRange) {
+      return keyRange
+    }
+  }
+
+  // 4. For gts:// prefix violations and x-gts-ref mismatches, highlight the
   // offending string value precisely.
   if ((error.keyword === 'gts-uri-prefix' || error.keyword === 'x-gts-ref') && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
@@ -114,7 +160,7 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
     }
   }
 
-  // For schema errors, find the object that references the missing schema
+  // 5. For schema errors without a resolvable instancePath, search by schemaId in params
   if (error.keyword === 'schema') {
     console.log(`[GTS Validation] Schema error detected, path='${path}'`)
 
@@ -136,42 +182,12 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
     }
   }
 
-  // For additionalProperties errors, look for the actual property mentioned in params
-  if (error.keyword === 'additionalProperties' && error.params && 'additionalProperty' in error.params) {
-    const additionalProp = (error.params as any).additionalProperty
-    const searchPattern = keyRegex(additionalProp)
-    const match = searchPattern.exec(text)
-    if (match) {
-      const quoteLen = match[1] ? 1 : 0
-      const startPos = document.positionAt(match.index + quoteLen)
-      const endPos = document.positionAt(match.index + quoteLen + additionalProp.length)
-      return new vscode.Range(startPos, endPos)
-    }
-  }
-
-  // For required property errors, find the parent object and place error at the opening brace
-  if (error.keyword === 'required' && error.params && 'missingProperty' in error.params) {
-    const missingProp = (error.params as any).missingProperty
-
-    // Try to find the parent object by navigating through the path
-    if (!path) {
-      // Error at root level - find first opening brace
-      const rootMatch = text.match(/\{/)
-      if (rootMatch && rootMatch.index !== undefined) {
-        const pos = document.positionAt(rootMatch.index)
-        return new vscode.Range(pos, pos.translate(0, 1))
-      }
-    } else {
-      // Find the object that should contain this property
-      const position = findObjectAtPath(text, document, path)
-      if (position) {
-        return position
-      }
-    }
-  }
-
-  // General case: try to find the property mentioned in the path
+  // 6. Fallback: try to find the property key using AST or quoted regex
   if (path) {
+    const keyRange = findKeyRangeAtInstancePath(document, instancePath)
+    if (keyRange) {
+      return keyRange
+    }
     const segments = path.split('/')
     const lastSegment = segments[segments.length - 1]
 
@@ -346,14 +362,12 @@ function escapeRegex(str: string): string {
 }
 
 /**
- * Build a regex matching a property key followed by `:`, whether the key is
- * quoted (JSON, or a quoted YAML key) or bare (a typical unquoted YAML key).
- * Capture group 1 is the opening quote character, or empty for a bare key —
- * used by callers to compute the correct offset past it.
+ * Build a regex matching a quoted property key followed by `:`.
+ * Requires quotes so it never accidentally matches bare words inside comments.
  */
 function keyRegex(name: string): RegExp {
   const esc = escapeRegex(name)
-  return new RegExp(`(["']?)${esc}\\1\\s*:`, 'g')
+  return new RegExp(`(["'])${esc}\\1\\s*:`, 'g')
 }
 
 /**
@@ -367,6 +381,65 @@ function instancePathSegments(instancePath: string): Array<string | number> {
     .split('/')
     .filter(seg => seg.length > 0)
     .map(seg => (/^\d+$/.test(seg) ? Number(seg) : seg))
+}
+
+/**
+ * Resolve the document range of a property key at a given instancePath.
+ * If keyName is provided, searches for a child property with that name under instancePath.
+ */
+function findKeyRangeAtInstancePath(document: vscode.TextDocument, instancePath: string, keyName?: string): vscode.Range | null {
+  const segments = instancePathSegments(instancePath)
+  if (keyName) {
+    segments.push(keyName)
+  }
+  if (segments.length === 0) return null
+
+  const text = document.getText()
+  const isYaml = document.languageId === 'yaml' || isYamlFileName(document.fileName)
+
+  if (isYaml) {
+    let doc: YAML.Document.Parsed
+    try {
+      doc = YAML.parseDocument(text)
+    } catch {
+      return null
+    }
+    if (doc.contents == null) return null
+
+    const parentSegments = segments.slice(0, -1)
+    const targetKey = String(segments[segments.length - 1])
+    const parentNode = parentSegments.length === 0 ? doc.contents : doc.getIn(parentSegments, true)
+    if (YAML.isMap(parentNode)) {
+      const pair = parentNode.items.find(item => YAML.isScalar(item.key) && String(item.key.value) === targetKey)
+      if (pair && YAML.isScalar(pair.key) && pair.key.range) {
+        const [startOffset, endOffset] = pair.key.range
+        const raw = text.slice(startOffset, endOffset)
+        const quoteLen = raw.startsWith('"') || raw.startsWith("'") ? 1 : 0
+        const start = startOffset + quoteLen
+        const end = endOffset - quoteLen
+        return new vscode.Range(document.positionAt(start), document.positionAt(end))
+      }
+    }
+    return null
+  }
+
+  const root = jsonc.parseTree(text, undefined, { allowTrailingComma: true })
+  if (!root) return null
+
+  const node = jsonc.findNodeAtLocation(root, segments)
+  if (node && node.parent && node.parent.type === 'property' && node.parent.children) {
+    const keyNode = node.parent.children[0]
+    if (keyNode) {
+      let offset = keyNode.offset
+      let length = keyNode.length
+      if (keyNode.type === 'string') {
+        offset += 1
+        length = Math.max(0, length - 2)
+      }
+      return new vscode.Range(document.positionAt(offset), document.positionAt(offset + length))
+    }
+  }
+  return null
 }
 
 /**
@@ -415,13 +488,21 @@ function findValueRangeYaml(text: string, document: vscode.TextDocument, segment
   return new vscode.Range(startPos, endPos)
 }
 
-/** Resolve a value range by navigating the JSON tree to the node at `segments`. */
+/**
+ * Resolve the document range of the *scalar value* at a given instancePath,
+ * honoring array indices. Returns null when the node is not a scalar (an
+ * object/array subschema — e.g. a derivation error pointing at a property whose
+ * value is itself a schema), so callers can fall back to highlighting the key.
+ */
 function findValueRangeJson(text: string, document: vscode.TextDocument, segments: Array<string | number>): vscode.Range | null {
   const root = jsonc.parseTree(text, undefined, { allowTrailingComma: true })
   if (!root) return null
 
   const node = jsonc.findNodeAtLocation(root, segments)
   if (!node) return null
+  // Only scalars have a meaningful "value" range to underline; objects/arrays
+  // resolve to the property key instead (handled by findKeyRangeAtInstancePath).
+  if (node.type === 'object' || node.type === 'array') return null
 
   let offset = node.offset
   let length = node.length
@@ -514,15 +595,26 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     workspaceDiagnosticCollection?.delete(document.uri)
 
     if (errors.length > 0) {
+      documentValidationErrors.set(document.uri.toString(), errors)
       const diagnostics = validationErrorsToDiagnostics(errors, document)
       diagnosticCollection.set(document.uri, diagnostics)
       console.log(`[GTS Validation] ✗ Got ${diagnostics.length} GTS diagnostics errors for ${fileName} - Errors:`, diagnostics.map(d => ({ message: d.message, range: d.range })))
     } else {
+      documentValidationErrors.delete(document.uri.toString())
       diagnosticCollection.delete(document.uri)
       console.log(`[GTS Validation] ✓ No errors, cleared diagnostics for ${fileName}`)
     }
+
+    for (const listener of validationCompletedListeners) {
+      try {
+        listener(document.uri)
+      } catch (err) {
+        console.error('[GTS Validation] Error in validation completed listener:', err)
+      }
+    }
   } catch (error) {
     console.error('[GTS Validation] ✗ Error validating document:', error)
+    documentValidationErrors.delete(document.uri.toString())
     diagnosticCollection.delete(document.uri)
   }
 }
@@ -678,6 +770,7 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
 }
 
 export function resetValidationDiagnostics(): void {
+  documentValidationErrors.clear()
   diagnosticCollection?.clear()
   workspaceDiagnosticCollection?.clear()
 }
@@ -716,6 +809,7 @@ export function initValidation(context: vscode.ExtensionContext) {
       vscode.workspace.onDidCloseTextDocument(async doc => {
         if (!isGtsCandidateFile(doc)) return
         console.log(`[GTS Validation] Document closed: ${doc.fileName}`)
+        documentValidationErrors.delete(doc.uri.toString())
         diagnosticCollection.delete(doc.uri)
         if (doc.uri.scheme !== 'file') return
         await reindexClosedFileFromDisk(doc.uri)

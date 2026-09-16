@@ -352,3 +352,51 @@ function getSchemaChildren(schema: any): PropertyInfo[] | undefined {
 
   return undefined
 }
+
+/**
+ * Locate the JSON Pointer instancePath of a property within a schema document
+ * (including inside allOf branches or top-level properties).
+ */
+export function findSchemaPropertyPath(content: any, propPath: string): string | null {
+  if (!content || typeof content !== 'object') return null
+  const parts = propPath.split('.')
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+
+    if (node.properties && typeof node.properties === 'object') {
+      let cur = node.properties
+      let curPath = currentPath ? `${currentPath}/properties` : '/properties'
+      let found = true
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]
+        if (cur && cur[p] !== undefined) {
+          curPath += `/${p}`
+          cur = cur[p]
+        } else if (cur && cur.properties && cur.properties[p] !== undefined) {
+          curPath += `/properties/${p}`
+          cur = cur.properties[p]
+        } else if (cur && cur.items && p === 'items') {
+          curPath += '/items'
+          cur = cur.items
+        } else {
+          found = false
+          break
+        }
+      }
+      if (found) return curPath
+    }
+
+    if (Array.isArray(node.allOf)) {
+      for (let i = 0; i < node.allOf.length; i++) {
+        const branchPath = currentPath ? `${currentPath}/allOf/${i}` : `/allOf/${i}`
+        const res = walk(node.allOf[i], branchPath)
+        if (res) return res
+      }
+    }
+
+    return null
+  }
+
+  return walk(content, '')
+}

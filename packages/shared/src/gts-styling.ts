@@ -59,10 +59,20 @@ export interface GtsStyleAnalysis {
 }
 
 /**
- * Analyze a GTS ID and determine how each part should be styled
+ * Analyze a GTS ID and determine how each part should be styled.
+ *
+ * Schema-vs-instance classification is derived STRUCTURALLY from the GTS ID via
+ * gts-ts (`isGtsType`). Correctness (blue/green vs red) is derived from the
+ * authoritative gts-ts validation results surfaced through `entityLookup`:
+ * a segment whose cumulative entity failed gts-ts validation (`isValid: false`)
+ * is rendered as an error. GTS *rule* violations (abstract instantiation,
+ * derivation incompatibility, x-gts-ref, ...) are therefore not re-derived here;
+ * they are read back from `entityLookup`/the caller's validation errors, keeping
+ * gts-ts the single source of truth.
  *
  * @param gtsId - The GTS ID to analyze (may have gts:// prefix which is stripped)
- * @param entityLookup - Function to look up whether an entity exists and its type
+ * @param entityLookup - Function to look up whether an entity exists, its kind,
+ *   and whether gts-ts validation found it valid
  * @returns Analysis result with styled segments
  *
  * @example
@@ -78,7 +88,7 @@ export interface GtsStyleAnalysis {
  */
 export function analyzeGtsIdForStyling(
   gtsId: string,
-  entityLookup: (entityId: string) => { exists: boolean; isSchema?: boolean }
+  entityLookup: (entityId: string) => { exists: boolean; isSchema?: boolean; isValid?: boolean }
 ): GtsStyleAnalysis {
   // Normalize to strip gts:// prefix per GTS spec
   const normalizedId = normalizeGtsId(gtsId)
@@ -106,21 +116,35 @@ export function analyzeGtsIdForStyling(
     const part = parts[partIndex]
     const entityIdToLookup = parts.slice(0, partIndex + 1).join('')
 
-    // Look up the entity (existence only — see below).
+    // A cumulative id ending in "~" names a TYPE (schema); otherwise it names
+    // an INSTANCE. This shape is derived structurally from the GTS ID itself.
+    const structuralIsType = isGtsType(entityIdToLookup)
+
+    // Existence + validity lookup (skipped once an ancestor is already
+    // missing/invalid, so the error cascades to the rest of the chain).
     const lookupResult = hasMissingAncestor ? { exists: false } : entityLookup(entityIdToLookup)
 
     let segmentType: 'schema' | 'instance' | 'error'
-    if (lookupResult.exists) {
-      // Classify schema vs instance STRUCTURALLY from the GTS ID itself via the
-      // core gts-ts library: a segment whose cumulative ID ends in "~" is a type
-      // (schema), otherwise an instance. This is deliberately independent of how
-      // the referenced *document* happens to be shaped (its `isSchema` flag),
-      // so a malformed instance whose id ends in "~" is still styled as a type.
-      // The registry lookup above is used only to decide existence (error/valid).
-      segmentType = isGtsType(entityIdToLookup) ? 'schema' : 'instance'
-    } else {
+    if (!lookupResult.exists || lookupResult.isValid === false) {
+      // Missing entity, or an entity gts-ts validation rejected → error.
       segmentType = 'error'
       hasMissingAncestor = true
+    } else if (structuralIsType) {
+      // A "~"-terminated (type) segment is valid only when a *schema* with that
+      // id actually exists. A type-shaped id backed only by an instance document
+      // (or nothing) is an error — e.g. an instance whose own id ends in "~"
+      // has no backing schema.
+      if (lookupResult.isSchema === true) {
+        segmentType = 'schema'
+      } else {
+        segmentType = 'error'
+        hasMissingAncestor = true
+      }
+    } else if (lookupResult.isSchema === true) {
+      // Instance-shaped id backed by a schema document → malformed.
+      segmentType = 'error'
+    } else {
+      segmentType = 'instance'
     }
 
     segments.push({
