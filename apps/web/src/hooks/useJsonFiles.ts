@@ -165,8 +165,7 @@ export function useJsonObjsWithScanner(createScanner: () => Scanner) {
         } catch {
           // Surface parse errors only for files that look GTS-related; ignore
           // unrelated malformed JSON (matches loadFromScanner's filter).
-          if (!text.includes('gts.')) return
-          content = text
+          content = text.includes('gts.') ? text : null
         }
         await registry.applyFileChange(doc.path, doc.name, content, AppConfig.get().gts)
       }
