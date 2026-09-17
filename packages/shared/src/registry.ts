@@ -541,9 +541,10 @@ export class JsonRegistry {
     const parsedContent = jsonFile.content
 
     // Register one entity content as a schema/instance if it is a GTS entity.
-    const registerEntity = (entityContent: any, seq: number | undefined) => {
+    const registerEntity = (entityContent: any, seq: number | undefined, requireSelectedId = false) => {
       const entity = createEntity({ file: jsonFile, listSequence: seq, content: entityContent, cfg })
-      if (entity && entity.isGtsEntity()) {
+      const hasSelectedId = entity?.selectedEntityIdField !== undefined || entity?.selectedSchemaIdField !== undefined
+      if (entity && (!requireSelectedId || hasSelectedId) && entity.isGtsEntity()) {
         hasGtsEntities = true
         if (entity instanceof JsonSchema) {
           this.jsonSchemas.set(entity.id, entity)
@@ -559,7 +560,7 @@ export class JsonRegistry {
     // only shape recognized for JSON/JSONC/.gts files.
     const entities = normalizeToArray(parsedContent)
     entities.forEach((entityContent: any, idx: number) => {
-      registerEntity(entityContent, Array.isArray(parsedContent) ? idx : undefined)
+      registerEntity(entityContent, Array.isArray(parsedContent) ? idx : undefined, isYamlFileName(name))
     })
 
     // YAML ONLY: config files may additionally *define* GTS types/instances
