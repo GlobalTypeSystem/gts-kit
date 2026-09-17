@@ -4,7 +4,9 @@ All notable changes to the GTS Viewer extension will be documented in this file.
 
 ## [Unreleased]
 
-## [0.2.7] - 2026-09-13
+## [0.3.0] - 2026-09-18
+
+
 
 ## [0.2.6] - 2026-09-07
 

@@ -2,7 +2,7 @@
   "name": "gts-kit",
   "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "private": true,
   "publisher": "GlobalTypeSystem",
   "license": "Apache-2.0",
@@ -77,7 +77,7 @@
     "viewsWelcome": [
       {
         "view": "gts-kit.fileExplorer",
-        "contents": "No GTS files discovered yet.\nGTS files (schemas and instances) found anywhere in the workspace will be listed here."
+        "contents": "No [GTS](https://globaltypesystem.org/#vscode-plugins) files discovered yet.\n[GTS](https://globaltypesystem.org/#vscode-plugins) files (schemas and instances) found anywhere in the workspace will be listed here."
       }
     ],
     "menus": {
