@@ -11,6 +11,20 @@ import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
 import type { Format } from 'ajv'
 import * as path from 'path'
 
+const JSON_SCHEMA_ANNOTATION_KEYWORDS = new Set([
+  '$comment',
+  'title',
+  'description',
+  'default',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  'examples',
+  'contentEncoding',
+  'contentMediaType',
+  'contentSchema'
+])
+
 /**
  * Prepare a schema for Ajv instance validation by removing the `x-gts-ref`
  * keyword, mirroring gts-ts's own `GtsStore.normalizeSchema` (the reference
@@ -38,19 +52,19 @@ function stripXGtsRefForAjv(schema: any): any {
     normalized[key] = value && typeof value === 'object' ? stripXGtsRefForAjv(value) : value
   }
 
-  // Drop combinator subschemas that were `x-gts-ref`-only (now empty), so Ajv
-  // doesn't treat them as always-true branches.
+  // Drop combinator subschemas whose only assertion was `x-gts-ref`, so Ajv
+  // doesn't treat their remaining annotations as always-true branches.
   for (const combinator of ['oneOf', 'anyOf', 'allOf'] as const) {
     if (!Array.isArray(normalized[combinator])) continue
     normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
       const original = (schema as any)[combinator]?.[idx]
-      const isXGtsRefOnly =
+      const hasOnlyXGtsRefAssertion =
         original &&
         typeof original === 'object' &&
         !Array.isArray(original) &&
-        Object.keys(original).length === 1 &&
-        original['x-gts-ref'] !== undefined
-      return !isXGtsRefOnly
+        original['x-gts-ref'] !== undefined &&
+        Object.keys(original).every(key => key === 'x-gts-ref' || JSON_SCHEMA_ANNOTATION_KEYWORDS.has(key))
+      return !hasOnlyXGtsRefAssertion
     })
     if (normalized[combinator].length === 0) delete normalized[combinator]
   }
