@@ -1,6 +1,5 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
-import * as fs from 'fs'
 import { getRegistry } from './registryStore'
 
 /**
@@ -68,7 +67,7 @@ function getDiscoveredFilePaths(): string[] {
   const registry = getRegistry()
   if (!registry) return []
   const paths = new Set<string>([...registry.jsonFiles.keys(), ...registry.invalidFiles.keys()])
-  return Array.from(paths).filter(fs.existsSync)
+  return Array.from(paths)
 }
 
 /** True if the given file currently has a GTS validation error reported on it. */
