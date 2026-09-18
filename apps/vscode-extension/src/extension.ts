@@ -1,13 +1,16 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
+import * as fs from 'fs'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
+import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
-import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry } from './registryStore'
+import { rebuildRegistry, rebuildRegistryIfUnchanged, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry, getRegistryRevision } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
-import { initValidation, validateOpenDocument, validateWorkspaceInBackground } from './validation'
+import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
+import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
 
 // Glob used for all GTS workspace scans and the on-disk file watcher.
@@ -56,12 +59,82 @@ function isUriIgnored(uri: vscode.Uri, matcher = getCachedMatcher()): boolean {
   return isIgnoredRel(matcher, vscode.workspace.asRelativePath(uri, false))
 }
 
+// Maps a file's resolved *real* path -> the workspace path we index it under.
+// The workspace symlinks (e.g. .gts-spec, .gts-spec-ext, .gears-rust/.gts-spec)
+// can make the same physical file reachable via several paths; without this the
+// same GTS entity would be scanned multiple times, producing duplicate tree rows
+// and a nondeterministic id->file mapping. We index each physical file exactly
+// once and let the most-recently-scanned/edited path win (so an open file, which
+// is scanned first, stays canonical and gets its in-editor diagnostics).
+const realPathIndex = new Map<string, string>()
+
+/** Resolve a path to its canonical real path; fall back to the input on error. */
+function resolveRealPath(fsPath: string): string {
+  try { return fs.realpathSync.native(fsPath) } catch { return fsPath }
+}
+
+/** Drop any canonical-path entries that point at `fsPath` (on delete/rename). */
+function forgetIndexedPath(fsPath: string): void {
+  for (const [real, p] of realPathIndex) {
+    if (p === fsPath) realPathIndex.delete(real)
+  }
+}
+
+/**
+ * Keep only one URI per physical file, recording the canonical path chosen.
+ * First-seen wins, so callers should pass higher-priority paths (open files)
+ * first. Duplicates reached through other symlinks are dropped.
+ */
+function dedupeUrisByRealPath(uris: vscode.Uri[]): vscode.Uri[] {
+  const out: vscode.Uri[] = []
+  for (const uri of uris) {
+    const real = resolveRealPath(uri.fsPath)
+    if (realPathIndex.has(real)) continue
+    realPathIndex.set(real, uri.fsPath)
+    out.push(uri)
+  }
+  return out
+}
+
+/**
+ * Index a single file's live change, ensuring the physical file stays indexed
+ * under exactly one path. If another symlinked path currently owns this real
+ * file, drop it so the just-touched path becomes canonical (its diagnostics show
+ * in the editor). Returns nothing; callers still index the content themselves.
+ */
+function claimCanonicalPath(fsPath: string): void {
+  const real = resolveRealPath(fsPath)
+  const existing = realPathIndex.get(real)
+  if (existing && existing !== fsPath) {
+    removeFileFromRegistry(existing)
+    forgetIndexedPath(existing)
+  }
+  realPathIndex.set(real, fsPath)
+}
+
 let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
 let gtsLinkProvider: GtsLinkProvider | null = null
 // File the user explicitly requested (context menu / command palette) — consumed by the first scanAndPost
 let pendingOpenFile: string | null = null
+// Left-sidebar GTS file browser (tree view + red/green file decorations), shares the same registry as everything else.
+let gtsExplorer: GtsExplorer | null = null
+let workspaceMutationRevision = 0
+let fullScanQueue: Promise<void> = Promise.resolve()
+
+type StableScanOperation = (expectedMutationRevision: number) => Promise<boolean>
+
+function enqueueStableScan(operation: StableScanOperation): Promise<void> {
+  const execute = async () => {
+    while (!await operation(workspaceMutationRevision)) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  const run = fullScanQueue.then(execute, execute)
+  fullScanQueue = run.catch(() => {})
+  return run
+}
 
 function getNonce(): string {
   let text = ''
@@ -72,8 +145,13 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null) {
+async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null): Promise<void> {
+  await enqueueStableScan(expectedMutationRevision => scanAndPostPass(includeGlob, isInitialScan, refreshFilePath, expectedMutationRevision))
+}
+
+async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refreshFilePath: string | null | undefined, expectedMutationRevision: number): Promise<boolean> {
   const hasViewer = viewerPanel !== null
+  const expectedRegistryRevision = getRegistryRevision()
 
   try {
     let selectedFilePath: string | null = null
@@ -95,7 +173,11 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
     // GTS.
     const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
     const exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
-    const uris = await vscode.workspace.findFiles(include, exclude, 40000)
+    const enumerated = await vscode.workspace.findFiles(include, exclude, 40000)
+    // A full (re)scan re-establishes the canonical physical-file set; collapse
+    // symlinked duplicates so the same GTS entity isn't scanned/listed twice.
+    realPathIndex.clear()
+    const uris = dedupeUrisByRealPath(enumerated)
 
     const total = uris.length
     const startTime = Date.now()
@@ -141,10 +223,13 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     // Update the shared, persistent, index-only registry (used by decorations,
     // links, hovers and as validation resolution context). This is cheap.
-    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
+    if (workspaceMutationRevision !== expectedMutationRevision) return false
+    const registry = await rebuildRegistryIfUnchanged(files, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
+    if (!registry) return false
     if (selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
+    gtsExplorer?.refresh()
 
     // Send scan result with default file path so the webview can compute initial selection
     if (hasViewer) {
@@ -167,10 +252,11 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
       try {
         const vreg = new JsonRegistry()
         await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
-        const objs = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-        const schemas = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-        const invalidFilesHost = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
-        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: { objs, schemas, invalidFiles: invalidFilesHost } })
+        const objs: ObjValidationDto[] = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
+        const schemas: EntityValidationDto[] = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
+        const invalidFiles: InvalidFileValidationDto[] = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
+        const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
+        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: payload })
       } catch (ve: any) {
         viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
       }
@@ -185,7 +271,7 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
 
     // Publish workspace-wide file diagnostics for unopened files, then refresh
     // open-document diagnostics with precise ranges.
-    await validateWorkspaceInBackground(getBackgroundValidationRoots())
+    await validateWorkspaceInBackground()
 
     // Re-validate all open documents now that we have the full registry
     console.log('[GTS] Re-validating all open documents...')
@@ -194,36 +280,43 @@ async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: b
         void validateOpenDocument(doc)
       }
     })
+    return workspaceMutationRevision === expectedMutationRevision
   } catch (error: any) {
     if (hasViewer) {
       viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
     }
+    return true
   }
 }
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('[GTS] Extension activating...')
 
-  // Perform initial workspace scan for validation (background, non-blocking)
-  console.log('[GTS] Starting initial workspace scan for validation...')
-  performInitialScan().catch(error => {
-    console.error('[GTS] Initial scan failed:', error)
-  })
-
   initValidation(context)
 
   // Create diagnostic collection for GTS validation
-  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts')
+  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts-link-format')
   context.subscriptions.push(gtsDiagnostics)
 
   // Initialize and register GTS link provider for clickable GTS IDs
   gtsLinkProvider = new GtsLinkProvider(gtsDiagnostics)
 
+  // Repaint editor decorations whenever document validation completes
+  context.subscriptions.push(
+    onValidationCompleted(uri => {
+      gtsLinkProvider?.updateDecorationsForUri(uri)
+    })
+  )
+
+  // Left sidebar: file browser tree + red/green file decorations, sharing the same registry.
+  gtsExplorer = registerGtsExplorer(context)
+
   // Register link provider for JSON, JSONC, and GTS files
   const documentSelector: vscode.DocumentSelector = [
     { language: 'json', scheme: 'file' },
     { language: 'jsonc', scheme: 'file' },
-    { language: 'gts', scheme: 'file' }
+    { language: 'gts', scheme: 'file' },
+    { language: 'yaml', scheme: 'file' }
   ]
 
   context.subscriptions.push(
@@ -248,15 +341,42 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Keep the shared registry in sync with on-disk changes that don't go through
   // the editor: files edited outside the IDE (git pull/checkout, terminal,
-  // external tools) and create/rename/delete performed anywhere. The watcher
-  // also fires for in-IDE saves/creates/deletes; those cases either defer to the
-  // editor handlers (open documents) or are handled idempotently here.
+  // external tools).
   const gtsWatcher = vscode.workspace.createFileSystemWatcher(GTS_SCAN_GLOB)
   context.subscriptions.push(gtsWatcher)
   context.subscriptions.push(
     gtsWatcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
     gtsWatcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
     gtsWatcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+  )
+
+  // The recursive workspace watcher above does NOT follow directory symlinks
+  // that resolve outside the watched folder, so files reached only through such
+  // a symlink (e.g. `.examples -> ../gts-spec/...`) never emit create/change/
+  // delete events. Add an explicit recursive watcher rooted at each symlinked
+  // directory so external OS edits under it are tracked too.
+  void watchSymlinkedDirs(context)
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { void watchSymlinkedDirs(context) })
+  )
+
+  context.subscriptions.push(
+    vscode.workspace.onDidCreateFiles(event => {
+      for (const uri of event.files) {
+        if (!isGtsScanPath(uri.fsPath)) continue
+        const openDoc = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === uri.fsPath)
+        if (openDoc) {
+          handleFileChange(openDoc, 0)
+        } else {
+          void onDiskFileChanged(uri)
+        }
+      }
+    }),
+    vscode.workspace.onDidDeleteFiles(event => {
+      for (const uri of event.files) {
+        if (isGtsScanPath(uri.fsPath)) onDiskFileDeleted(uri)
+      }
+    })
   )
 
   // Handle in-IDE renames explicitly: the watcher's create event is skipped for
@@ -266,9 +386,11 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidRenameFiles(async event => {
       for (const { oldUri, newUri } of event.files) {
+        beginFileMutation(oldUri.fsPath)
         removeFileFromRegistry(oldUri.fsPath)
+        forgetIndexedPath(oldUri.fsPath)
         if (isIgnoredGtsPath(newUri.fsPath)) continue
-        if (!/\.(json|jsonc|gts|ya?ml)$/i.test(newUri.fsPath)) continue
+        if (!isGtsScanPath(newUri.fsPath)) continue
         const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === newUri.fsPath)
         if (openDoc) {
           handleFileChange(openDoc, 0)
@@ -285,6 +407,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore')
   context.subscriptions.push(gitignoreWatcher)
   const onGitignoreChanged = () => {
+    workspaceMutationRevision++
     resetWorkspaceIgnore()
     void performInitialScan()
   }
@@ -293,6 +416,12 @@ export async function activate(context: vscode.ExtensionContext) {
     gitignoreWatcher.onDidChange(onGitignoreChanged),
     gitignoreWatcher.onDidDelete(onGitignoreChanged)
   )
+
+  // Perform initial workspace scan for validation (background, non-blocking)
+  console.log('[GTS] Starting initial workspace scan for validation...')
+  performInitialScan().catch(error => {
+    console.error('[GTS] Initial scan failed:', error)
+  })
 
   // Initial decoration for all visible editors
   if (gtsLinkProvider) {
@@ -305,8 +434,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('gts.openViewer', (resource?: vscode.Uri) => {
+    vscode.commands.registerCommand('gts-kit.openViewer', (resource?: vscode.Uri) => {
       openViewer(context, resource)
+    }),
+    vscode.commands.registerCommand('gts-kit.refreshFileExplorer', async () => {
+      try {
+        await refreshGtsFileExplorer(gtsDiagnostics)
+      } catch (error: any) {
+        console.error('[GTS] Full refresh failed:', error)
+        vscode.window.showErrorMessage(`Failed to refresh GTS files: ${error?.message || String(error)}`)
+      }
     })
   )
 
@@ -428,42 +565,41 @@ function revalidateOpenDocs(): void {
   })
 }
 
-/**
- * Background validation scope: currently focused GTS folder(s), not whole repo.
- * VS Code does not expose built-in Explorer expanded folders, so we scope by
- * active/open GTS docs as the closest approximation.
- */
-function getBackgroundValidationRoots(): string[] {
-  const roots: string[] = []
-  const seen = new Set<string>()
-  const add = (dir: string) => {
-    if (!seen.has(dir)) {
-      seen.add(dir)
-      roots.push(dir)
-    }
-  }
-
-  const active = vscode.window.activeTextEditor?.document
-  if (active?.uri.scheme === 'file' && isGtsCandidateFile(active)) {
-    add(path.dirname(active.uri.fsPath))
-  }
-
-  for (const doc of vscode.workspace.textDocuments) {
-    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
-      add(path.dirname(doc.uri.fsPath))
-    }
-  }
-
-  return roots
+async function refreshGtsFileExplorer(linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
+  workspaceMutationRevision++
+  fileMutationRevisions.clear()
+  if (changeTimer) clearTimeout(changeTimer)
+  if (externalChangeTimer) clearTimeout(externalChangeTimer)
+  changeTimer = null
+  externalChangeTimer = null
+  preEditIdsByPath.clear()
+  pendingOpenFile = null
+  realPathIndex.clear()
+  resetWorkspaceIgnore()
+  setLastScanFiles([])
+  await rebuildRegistry([], DEFAULT_GTS_CONFIG)
+  resetValidationDiagnostics()
+  linkDiagnostics.clear()
+  gtsExplorer?.reset()
+  await gtsLinkProvider?.refresh()
+  await performInitialScan()
 }
 
-async function performInitialScan() {
+async function performInitialScan(): Promise<void> {
+  await enqueueStableScan(performInitialScanPass)
+}
+
+async function performInitialScanPass(expectedMutationRevision: number): Promise<boolean> {
+  const expectedRegistryRevision = getRegistryRevision()
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
     // files/folders (at enumeration time via globs, plus an authoritative
     // matcher for edge cases such as negations and nested ignores).
     const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
     const openPaths = collectOpenGtsPaths()
+
+    // A full scan re-establishes the canonical set of physical files.
+    realPathIndex.clear()
 
     // --- Phase 1: fast pass -------------------------------------------------
     // Enumerate with FAST_EXCLUDE_GLOB (+ gitignore) so build-output/dependency
@@ -487,15 +623,23 @@ async function performInitialScan() {
       phase1Paths.add(uri.fsPath)
     }
 
-    console.log(`[GTS] Phase 1: ${phase1Candidates.length} candidate files (of ${fastUris.length} enumerated)`)
-    const files1 = await readGtsCandidateFiles(phase1Candidates)
+    // Collapse symlinked duplicates to one physical file each (open files first,
+    // so they stay canonical).
+    const phase1Deduped = dedupeUrisByRealPath(phase1Candidates)
+    console.log(`[GTS] Phase 1: ${phase1Deduped.length} candidate files (of ${fastUris.length} enumerated, ${phase1Candidates.length} before real-path dedup)`)
+    const files1 = await readGtsCandidateFiles(phase1Deduped)
+    if (workspaceMutationRevision !== expectedMutationRevision) return false
+    const registry = await rebuildRegistryIfUnchanged(files1, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
+    if (!registry) return false
     setLastScanFiles(files1)
-    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
+    gtsExplorer?.refresh()
 
     // Paint decorations + validate now that phase-1 registry is available.
+    // Validate the whole workspace (not just the folders of currently-open docs)
+    // so all findings/badge counts are present immediately after a window reload.
     await gtsLinkProvider?.refresh()
-    await validateWorkspaceInBackground(getBackgroundValidationRoots())
+    await validateWorkspaceInBackground()
     revalidateOpenDocs()
 
     // --- Phase 2: background pass -------------------------------------------
@@ -504,18 +648,24 @@ async function performInitialScan() {
     // files. Runs after the UI is already coloured, so its cost is not visible.
     const phase2Exclude = combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs)
     const allUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase2Exclude, 100000)
-    const phase2Uris = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    // Skip anything already indexed in phase 1 and any symlinked duplicate of a
+    // physical file we've already taken (the realPathIndex still holds phase 1).
+    const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
     if (phase2Uris.length > 0) {
       const files2 = await readGtsCandidateFiles(phase2Uris)
+      if (workspaceMutationRevision !== expectedMutationRevision) return false
       if (files2.length > 0) {
         for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
         setLastScanFiles([...files1, ...files2])
+        gtsExplorer?.refresh()
         await gtsLinkProvider?.refresh()
-        await validateWorkspaceInBackground(getBackgroundValidationRoots())
+        await validateWorkspaceInBackground()
         revalidateOpenDocs()
       }
       console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
     }
+    return workspaceMutationRevision === expectedMutationRevision
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -535,11 +685,63 @@ export async function deactivate() {
     gtsLinkProvider = null
   }
 
+  gtsExplorer = null
   layoutStorage = null
 }
 
 // Debounced rescan on change to auto-refresh layout view while typing
 let changeTimer: NodeJS.Timeout | null = null
+
+function isGtsScanPath(fsPath: string): boolean {
+  return /\.(json|jsonc|gts|ya?ml)$/i.test(fsPath)
+}
+
+// Symlinked directories we've already attached a dedicated watcher to (keyed by
+// the symlink's fsPath), so repeated setup calls don't create duplicate watchers.
+const watchedSymlinkDirs = new Set<string>()
+
+/**
+ * VS Code's recursive workspace watcher does not follow directory symlinks that
+ * point outside the watched folder. Create an explicit recursive watcher rooted
+ * at each top-level symlinked directory in every workspace folder so on-disk
+ * create/change/delete events under it are reported. VS Code preserves the
+ * watched (symlink) path in the emitted URIs, which matches how the scan indexes
+ * those files, so no path translation is needed.
+ */
+async function watchSymlinkedDirs(context: vscode.ExtensionContext): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders || []
+  for (const folder of folders) {
+    let entries: [string, vscode.FileType][]
+    try {
+      entries = await vscode.workspace.fs.readDirectory(folder.uri)
+    } catch {
+      continue
+    }
+    for (const [name, type] of entries) {
+      if (!(type & vscode.FileType.SymbolicLink)) continue
+      const linkUri = vscode.Uri.joinPath(folder.uri, name)
+      if (watchedSymlinkDirs.has(linkUri.fsPath)) continue
+      // Only follow symlinks that resolve to a directory (stat follows the link).
+      try {
+        const stat = await vscode.workspace.fs.stat(linkUri)
+        if (!(stat.type & vscode.FileType.Directory)) continue
+      } catch {
+        continue
+      }
+      if (isIgnoredGtsPath(linkUri.fsPath + path.sep)) continue
+      watchedSymlinkDirs.add(linkUri.fsPath)
+      const pattern = new vscode.RelativePattern(linkUri, `**/*.{json,jsonc,gts,yaml,yml}`)
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern)
+      context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
+        watcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
+        watcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+      )
+      console.log('[GTS] Watching symlinked directory:', linkUri.fsPath)
+    }
+  }
+}
 
 /** Paths we never index (build output, VCS internals, our own cache). */
 function isIgnoredGtsPath(fsPath: string): boolean {
@@ -561,13 +763,18 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   if (isIgnoredGtsPath(fsPath)) return
   if (isUriIgnored(uri)) return
   if (isOpenInEditor(fsPath)) return
+  const mutationRevision = beginFileMutation(fsPath)
   try {
     const data = await vscode.workspace.fs.readFile(uri)
     const text = Buffer.from(data).toString('utf8')
     const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
+    if (fileMutationRevisions.get(fsPath) !== mutationRevision || !fs.existsSync(fsPath)) return
+    // Keep one entry per physical file even when reached via a symlinked path.
+    claimCanonicalPath(fsPath)
     indexFileInRegistry(fsPath, name, content)
+    gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Failed to reindex changed file from disk:', fsPath, e)
     return
@@ -578,15 +785,25 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
 /** A GTS file was deleted/renamed-away on disk. Drop its entities from the registry. */
 function onDiskFileDeleted(uri: vscode.Uri): void {
   const fsPath = uri.fsPath
-  if (isIgnoredGtsPath(fsPath)) return
-  if (isUriIgnored(uri)) return
+  beginFileMutation(fsPath)
   removeFileFromRegistry(fsPath)
+  forgetIndexedPath(fsPath)
+  gtsExplorer?.refresh()
   scheduleExternalChangeSettle()
 }
 
 // Debounce a burst of on-disk changes (e.g. a git checkout touching many files)
 // into a single UI/validation refresh.
 let externalChangeTimer: NodeJS.Timeout | null = null
+const fileMutationRevisions = new Map<string, number>()
+
+function beginFileMutation(fsPath: string): number {
+  workspaceMutationRevision++
+  const revision = (fileMutationRevisions.get(fsPath) || 0) + 1
+  fileMutationRevisions.set(fsPath, revision)
+  return revision
+}
+
 function scheduleExternalChangeSettle(): void {
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   externalChangeTimer = setTimeout(() => {
@@ -596,10 +813,12 @@ function scheduleExternalChangeSettle(): void {
       return
     }
     // No viewer: repaint + refresh workspace diagnostics and then re-validate
-    // open docs with precise ranges.
+    // open docs with precise ranges. A burst of on-disk changes can touch files
+    // anywhere in the repo (git checkout, external tools), so validate the whole
+    // workspace rather than only the currently-focused folders.
     void (async () => {
       await gtsLinkProvider?.refresh()
-      await validateWorkspaceInBackground(getBackgroundValidationRoots())
+      await validateWorkspaceInBackground()
       vscode.workspace.textDocuments.forEach(doc => {
         if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
       })
@@ -607,17 +826,35 @@ function scheduleExternalChangeSettle(): void {
   }, 300)
 }
 
+// Ids each file defined *before* the current burst of edits, captured prior to
+// the first reindex so a renamed/removed id still revalidates its old referrers.
+// Keyed by fsPath; cleared when the debounced revalidation fires.
+const preEditIdsByPath = new Map<string, Set<string>>()
+
 function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   if (!isGtsCandidateFile(doc)) return
+
+  const fsPath = doc.uri.fsPath
+  beginFileMutation(fsPath)
+
+  // Snapshot the file's ids from before this edit burst (once per burst), before
+  // the immediate reindex below overwrites them in the registry.
+  if (!preEditIdsByPath.has(fsPath)) {
+    const registry = getRegistry()
+    preEditIdsByPath.set(fsPath, new Set(registry?.getEntityIdsForFile(fsPath) || []))
+  }
 
   // Immediate + cheap: keep the shared registry index and the editor's color
   // annotations in sync with the live document as the user types. No Ajv here.
   try {
     const text = doc.getText()
-    const name = path.basename(doc.uri.fsPath)
+    const name = path.basename(fsPath)
     let content: any
     try { content = parseGtsFileContent(name, text) } catch { content = text }
-    indexFileInRegistry(doc.uri.fsPath, name, content)
+    // Ensure this physical file is indexed under exactly this (open) path.
+    claimCanonicalPath(fsPath)
+    indexFileInRegistry(fsPath, name, content)
+    gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Incremental index failed:', e)
   }
@@ -630,9 +867,17 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   // panel is open) run the full workspace rescan that feeds the webview.
   if (changeTimer) clearTimeout(changeTimer)
   changeTimer = setTimeout(() => {
-    void validateOpenDocument(doc)
+    const previousIds = preEditIdsByPath.get(fsPath)
+    preEditIdsByPath.clear()
+    void (async () => {
+      await validateOpenDocument(doc)
+      // Re-check everything that depends on this file (derived/instantiated
+      // types, $ref/allOf composers, and GTS-id referrers) so their markers
+      // reflect the edit, not just this doc.
+      await revalidateDependents(fsPath, previousIds)
+    })()
     if (viewerPanel) {
-      void scanAndPost(GTS_SCAN_GLOB, false, doc.uri.fsPath)
+      void scanAndPost(GTS_SCAN_GLOB, false, fsPath)
     }
   }, delayMsec)
 }

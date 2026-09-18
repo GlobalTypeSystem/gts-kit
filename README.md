@@ -8,6 +8,8 @@ A three-headed application for validating and viewing the [GTS](https://github.c
 
 This project is aimed at exploring and using GTS schemas and instances across platforms.
 
+The repository is conformant with gts-spec v0.13.4.
+
 ![GTS Viewer](./docs/gts-viewer.png)
 
 ## Quick Start

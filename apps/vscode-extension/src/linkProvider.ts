@@ -1,8 +1,10 @@
 import * as vscode from 'vscode'
-import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern } from '@gts/shared'
+import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, analyzeGtsIdForStyling, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
 import type { GtsPrefixIssue } from '@gts/shared'
 import { getRegistry } from './registryStore'
+import { getDocumentValidationErrors } from './validation'
 import * as jsonc from 'jsonc-parser'
+import * as YAML from 'yaml'
 
 /**
  * Represents a GTS ID reference found in the document
@@ -247,6 +249,17 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
+   * Update decorations for visible editors showing the given document URI.
+   */
+  public updateDecorationsForUri(uri: vscode.Uri): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.uri.toString() === uri.toString()) {
+        this.updateDecorations(editor)
+      }
+    }
+  }
+
+  /**
    * Update decorations for a specific editor
    */
   public updateDecorations(editor: vscode.TextEditor): void {
@@ -255,11 +268,19 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     }
 
     const document = editor.document
+    const filePath = document.uri.fsPath
 
-    // Only decorate JSON/JSONC/GTS files
-    if (!['json', 'jsonc', 'gts'].includes(document.languageId)) {
+    // Only decorate JSON/JSONC/GTS/YAML files
+    if (!['json', 'jsonc', 'gts', 'yaml'].includes(document.languageId) && !isYamlFileName(document.fileName)) {
       return
     }
+
+    const docErrors = [
+      ...getDocumentValidationErrors(document.uri),
+      ...(this.registry.jsonFileSchemas.get(filePath) || []).flatMap(e => e.validation?.errors || []),
+      ...(this.registry.jsonFileObjs.get(filePath) || []).flatMap(e => e.validation?.errors || []),
+      ...(this.registry.invalidFiles.get(filePath)?.validation?.errors || [])
+    ]
 
     const schemaRanges: vscode.Range[] = []
     const instanceRanges: vscode.Range[] = []
@@ -330,8 +351,35 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         continue
       }
 
-      // Parse the GTS ID into parts
-      const parts = parseGtsIdParts(ref.id)
+      // Classify the segments using the shared, core-backed styling analyzer so
+      // schema-vs-instance is derived STRUCTURALLY from the GTS ID via gts-ts.
+      // Correctness (red vs blue/green) comes from the authoritative gts-ts
+      // validation results: a *schema* segment whose entity failed gts-ts
+      // validation (e.g. an invalid derived schema in the chain) is `isValid:
+      // false` → red. Instance-level, field-specific errors (abstract type,
+      // x-gts-ref, ...) are handled by `hasFieldError` below, not by flagging the
+      // whole instance entity, so an instance's own id is not reddened merely
+      // because some other field of it failed. No GTS rules are re-derived here.
+      const registry = this.registry
+      const analysis = analyzeGtsIdForStyling(ref.id, (entityId: string) => {
+        const schema = registry.jsonSchemas.get(entityId)
+        if (schema) {
+          return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
+        }
+        const obj = registry.jsonObjs.get(entityId)
+        if (obj) {
+          return { exists: true, isSchema: false }
+        }
+        return { exists: false }
+      })
+
+      // A gts-ts validation error reported at (or under) this field's instance
+      // path means the value written here is what's wrong — colour every segment
+      // red regardless of its structural classification.
+      const refInstancePath = '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+      const hasFieldError = docErrors.some(err => {
+        return Boolean(err.instancePath && (err.instancePath === refInstancePath || err.instancePath.startsWith(refInstancePath + '/')))
+      })
 
       // Calculate the offset of the string value (excluding quotes)
       const text = document.getText()
@@ -345,11 +393,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       }
       gtsStartOffset += ref.uriPrefixLength
 
-      let currentOffset = gtsStartOffset
-      for (let segIndex = 0; segIndex < parts.length; segIndex++) {
-        const part = parts[segIndex]
-        const partStartPos = document.positionAt(currentOffset)
-        const partEndPos = document.positionAt(currentOffset + part.length)
+      // References inside an "examples" field show missing entities as a neutral
+      // gray chip instead of a red error.
+      const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
+
+      for (let segIndex = 0; segIndex < analysis.segments.length; segIndex++) {
+        const seg = analysis.segments[segIndex]
+        const partStartPos = document.positionAt(gtsStartOffset + seg.startOffset)
+        const partEndPos = document.positionAt(gtsStartOffset + seg.endOffset)
         const partRange = new vscode.Range(partStartPos, partEndPos)
 
         // Every segment after the first gets a uniform leading gap, so the
@@ -359,46 +410,22 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           gapRanges.push(partRange)
         }
 
-        // Determine the full entity ID to look up
-        let entityIdToLookup: string
-        if (parts.length === 1) {
-          entityIdToLookup = part
-        } else if (part === parts[0]) {
-          entityIdToLookup = part
+        if (hasFieldError) {
+          errorRanges.push(partRange)
+        } else if (seg.type === 'schema') {
+          schemaRanges.push(partRange)
+        } else if (seg.type === 'instance') {
+          instanceRanges.push(partRange)
+        } else if (inExamples) {
+          // Entity not found inside an examples block — neutral gray chip.
+          unresolvedRanges.push(partRange)
         } else {
-          entityIdToLookup = parts[0] + part
+          // Red chip only — the authoritative "GTS reference not found"
+          // diagnostic for this is published by the shared validator
+          // (registry.validateEntity, surfaced via validation.ts) so we
+          // don't publish a second, duplicate diagnostic for the same miss.
+          errorRanges.push(partRange)
         }
-
-        // Look up the entity in the registry
-        const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
-
-        if (entity) {
-          if (entity.isSchema) {
-            schemaRanges.push(partRange)
-          } else {
-            instanceRanges.push(partRange)
-          }
-        } else {
-          // Entity not found — if the reference is inside an "examples" field,
-          // show a neutral gray chip instead of a red error.
-          const inExamples = ref.sourcePath.split('.').some(seg => seg === 'examples')
-          if (inExamples) {
-            unresolvedRanges.push(partRange)
-          } else {
-            errorRanges.push(partRange)
-
-            // Create diagnostic for missing entity
-            const diagnostic = new vscode.Diagnostic(
-              partRange,
-              `GTS entity not found: "${entityIdToLookup}"`,
-              vscode.DiagnosticSeverity.Error
-            )
-            diagnostic.source = 'gts'
-            diagnostics.push(diagnostic)
-          }
-        }
-
-        currentOffset += part.length
       }
     }
 
@@ -414,9 +441,115 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
-   * Find all GTS ID references in the document using jsonc-parser
+   * Find all GTS ID references in the document, using the parser appropriate
+   * for its format (YAML vs JSON/JSONC), so YAML files get exactly the same
+   * blue/red/gray annotations, hovers and links as JSON files do.
    */
   private findGtsReferences(document: vscode.TextDocument): GtsIdReference[] {
+    if (document.languageId === 'yaml' || isYamlFileName(document.fileName)) {
+      return this.findGtsReferencesYaml(document)
+    }
+    return this.findGtsReferencesJson(document)
+  }
+
+  /**
+   * Build a GtsIdReference from a raw string value found at a known document
+   * offset range. Shared by both the JSON and YAML reference finders.
+   */
+  private buildGtsIdReference(rawValue: string, fieldName: string, sourcePath: string, range: vscode.Range): GtsIdReference {
+    const id = normalizeGtsId(rawValue)
+    const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
+    const isValid = isGtsId(id)
+    // Also accept wildcard patterns (e.g. "gts.*") using gts-ts validation
+    const isWildcardPattern = !isValid && isGtsPattern(id)
+    const urlPrefixIssue = checkGtsUriPrefix(fieldName, rawValue)
+
+    return {
+      id,
+      rawValue,
+      uriPrefixLength,
+      fieldName,
+      range,
+      sourcePath,
+      isValid: isValid || isWildcardPattern,
+      isPattern: isWildcardPattern,
+      urlPrefixIssue
+    }
+  }
+
+  /**
+   * Find all GTS ID references in a YAML document.
+   *
+   * YAML has no widely-used equivalent of jsonc-parser's offset-tracking
+   * visitor for JSON, so we use the `yaml` package's CST, which records a
+   * `range` (character offsets into the source text) on every scalar node.
+   * `range.start` here is normalized to point at the first character of the
+   * actual string content (skipping any opening quote), independent of the
+   * quote style used, so downstream consumers that were written for the JSON
+   * path (which skip a leading `"` themselves) work unchanged for YAML too.
+   */
+  private findGtsReferencesYaml(document: vscode.TextDocument): GtsIdReference[] {
+    const references: GtsIdReference[] = []
+    const text = document.getText()
+
+    let doc: YAML.Document.Parsed
+    try {
+      doc = YAML.parseDocument(text)
+    } catch (error) {
+      console.error('[GTS LinkProvider] Error parsing YAML document:', error)
+      return references
+    }
+    if (doc.contents == null) {
+      return references
+    }
+
+    try {
+      YAML.visit(doc, {
+        Scalar: (key, node, path) => {
+          const value = (node as YAML.Scalar).value
+          // Only interested in string values; never the YAML key tokens.
+          if (key === 'key' || typeof value !== 'string') return
+          if (!(value.startsWith('gts.') || value.startsWith(GTS_URI_PREFIX))) return
+
+          const nodeRange = node.range
+          if (!nodeRange) return
+          const [startOffset, valueEndOffset] = nodeRange
+
+          // Skip the opening quote (if any) so the range points directly at
+          // the string's content, matching what downstream code expects.
+          const raw = text.slice(startOffset, valueEndOffset)
+          const quoteLen = raw.startsWith('"') || raw.startsWith("'") ? 1 : 0
+          const valueStartOffset = startOffset + quoteLen
+
+          const startPos = document.positionAt(valueStartOffset)
+          const endPos = document.positionAt(valueStartOffset + value.length)
+          const range = new vscode.Range(startPos, endPos)
+
+          // Build the ancestor key path (used only to detect "examples"
+          // context, same as the JSON path) from the enclosing Map Pairs.
+          const pathKeys: string[] = []
+          for (const ancestor of path) {
+            if (YAML.isPair(ancestor) && YAML.isScalar(ancestor.key)) {
+              pathKeys.push(String((ancestor.key as YAML.Scalar).value))
+            }
+          }
+          const fieldName = pathKeys[pathKeys.length - 1] || ''
+          const sourcePath = pathKeys.join('.')
+
+          references.push(this.buildGtsIdReference(value, fieldName, sourcePath, range))
+        }
+      })
+    } catch (error) {
+      console.error('[GTS LinkProvider] Error visiting YAML document:', error)
+    }
+
+    return references
+  }
+
+  /**
+   * Find all GTS ID references in a JSON/JSONC document using jsonc-parser
+   */
+  private findGtsReferencesJson(document: vscode.TextDocument): GtsIdReference[] {
     const references: GtsIdReference[] = []
     const text = document.getText()
 
@@ -442,12 +575,11 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
             // Get the property path for this value
             const node = jsonc.findNodeAtOffset(root, offset)
-            const path = jsonc.getNodePath(node?.parent || node || root)
-            const sourcePath = path.join('.')
+            const valuePath = jsonc.getNodePath(node || root)
+            const sourcePath = valuePath.join('.')
 
             // Determine the leaf field name this value is assigned to. The value
             // node's own path ends with its property key (or an array index).
-            const valuePath = jsonc.getNodePath(node || root)
             let fieldName = ''
             for (let i = valuePath.length - 1; i >= 0; i--) {
               if (typeof valuePath[i] === 'string') {
@@ -523,26 +655,20 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       gtsStartOffset += ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
-      for (const part of parts) {
+      let hasMissingAncestor = false
+      for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+        const part = parts[partIndex]
         const partStartPos = document.positionAt(currentOffset)
         const partEndPos = document.positionAt(currentOffset + part.length)
         const partRange = new vscode.Range(partStartPos, partEndPos)
 
         // Determine the full entity ID to look up
-        let entityIdToLookup: string
-        if (parts.length === 1) {
-          // Only one part, use it as-is
-          entityIdToLookup = part
-        } else if (part === parts[0]) {
-          // First part (schema type)
-          entityIdToLookup = part
-        } else {
-          // Second part (instance), combine with first part
-          entityIdToLookup = parts[0] + part
-        }
+        const entityIdToLookup = parts.slice(0, partIndex + 1).join('')
 
         // Look up the entity in the registry
-        const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+        const entity = hasMissingAncestor
+          ? undefined
+          : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
         if (entity && entity.file) {
           // Create a document link
@@ -563,6 +689,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           // Don't set tooltip - we provide rich hover via HoverProvider instead
 
           links.push(link)
+        } else if (!entity) {
+          hasMissingAncestor = true
         }
 
         currentOffset += part.length
@@ -727,26 +855,63 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     let entityIdToLookup = gtsId
     let hoverRange = matchedRef.range
+    let hoveredSegmentIndex: number | undefined
 
-    if (parts.length > 1) {
-      const firstPartLength = parts[0].length
-      if (relativeOffset < firstPartLength) {
-        // Cursor is on the first part
-        entityIdToLookup = parts[0]
-        const startPos = document.positionAt(gtsBodyOffset)
-        const endPos = document.positionAt(gtsBodyOffset + firstPartLength)
+    let segmentStartOffset = 0
+    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+      const part = parts[partIndex]
+      const segmentEndOffset = segmentStartOffset + part.length
+      if (relativeOffset >= segmentStartOffset && relativeOffset < segmentEndOffset) {
+        hoveredSegmentIndex = partIndex
+        entityIdToLookup = parts.slice(0, partIndex + 1).join('')
+        const startPos = document.positionAt(gtsBodyOffset + segmentStartOffset)
+        const endPos = document.positionAt(gtsBodyOffset + segmentEndOffset)
         hoverRange = new vscode.Range(startPos, endPos)
-      } else {
-        // Cursor is on the second part
-        entityIdToLookup = parts[0] + parts[1]
-        const startPos = document.positionAt(gtsBodyOffset + firstPartLength)
-        const endPos = document.positionAt(gtsBodyOffset + gtsId.length)
-        hoverRange = new vscode.Range(startPos, endPos)
+        break
       }
+      segmentStartOffset = segmentEndOffset
     }
 
-    // Look up the entity in the registry
-    const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+    // Classify the hovered segment with the SAME analyzer that drives the
+    // colouring, so the hover verdict never contradicts the red/blue/green chip
+    // and we don't hand-roll a second, divergent notion of "missing".
+    const registry = this.registry
+    const analysis = analyzeGtsIdForStyling(gtsId, (id: string) => {
+      const schema = registry.jsonSchemas.get(id)
+      if (schema) return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
+      const obj = registry.jsonObjs.get(id)
+      if (obj) return { exists: true, isSchema: false }
+      return { exists: false }
+    })
+    const hoveredSeg = hoveredSegmentIndex !== undefined ? analysis.segments[hoveredSegmentIndex] : undefined
+
+    if (hoveredSeg && hoveredSeg.type === 'error') {
+      const firstErrorIdx = analysis.segments.findIndex(s => s.type === 'error')
+      // An earlier segment is the real cause; this one only cascades from it.
+      if (firstErrorIdx !== -1 && hoveredSegmentIndex !== undefined && firstErrorIdx < hoveredSegmentIndex) {
+        const culprit = analysis.segments[firstErrorIdx].entityId
+        markdown.appendMarkdown(`GTS Parent Type Not Found\n\n`)
+        markdown.appendMarkdown(`This segment derives from \`${escapeMarkdown(culprit)}\`, which is not a defined GTS type.`)
+        return new vscode.Hover(markdown, hoverRange)
+      }
+      // This segment itself is the cause. A "~"-terminated id that resolves only
+      // to an instance document (or nothing) names a TYPE that is not defined —
+      // it is NOT an ancestor/derivation problem.
+      const schemaHere = this.registry.jsonSchemas.get(entityIdToLookup)
+      const objHere = this.registry.jsonObjs.get(entityIdToLookup)
+      if (!schemaHere && objHere) {
+        markdown.appendMarkdown(`⚠️ GTS Type Not Found\n\n`)
+        markdown.appendMarkdown(`ID: ${escapeMarkdown(entityIdToLookup)}\n\n`)
+        markdown.appendMarkdown(`This is a GTS type identifier, but no type (schema) with this id is defined.`)
+        return new vscode.Hover(markdown, hoverRange)
+      }
+      // Not found at all → fall through to the "GTS Entity Not Found" + suggestions block.
+    }
+
+    // Look up the entity in the registry (only when the segment is not an error).
+    const entity = hoveredSeg && hoveredSeg.type === 'error'
+      ? undefined
+      : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
     if (!entity) {
       // Entity not found - show error with suggestions
@@ -808,7 +973,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     // Make the GTS ID itself clickable
     markdown.appendMarkdown(`GTS ID: [${escapeMarkdown(entityIdToLookup)}](${fileUri.toString()})\n\n`)
-    markdown.appendMarkdown(`Type: ${entityType}\n\n`)
+    markdown.appendMarkdown(`Kind: ${entityType}\n\n`)
     markdown.appendMarkdown(`Definition: [${escapeMarkdown(relativePath)}](${fileUri.toString()})`)
 
     // Add description if available (on a new line, no label)

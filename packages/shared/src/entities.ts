@@ -371,6 +371,55 @@ export interface ValidationResult {
     errors: ValidationError[]
 }
 
+/**
+ * Host-computed validation for a single entity, relayed to the VS Code webview.
+ *
+ * The webview runs under a strict Content-Security-Policy that forbids the
+ * code generation Ajv relies on (`new Function`), so it cannot run the
+ * JSON-Schema / gts-ts validation itself. The extension host computes it and
+ * ships these DTOs across the message channel; the webview merges the
+ * `validation` back onto its own registry entities (matched by `id`).
+ */
+export interface EntityValidationDto {
+    /** Entity id, used to match the webview's registry entity. */
+    id: string
+    /** Absolute path of the file the entity was parsed from. */
+    filePath?: string
+    /** The host-computed validation result to apply (absent if not validated). */
+    validation?: ValidationResult
+}
+
+/** {@link EntityValidationDto} plus the extra fields a JsonObj needs to re-key. */
+export interface ObjValidationDto extends EntityValidationDto {
+    /** Index of the object within a multi-document file (if applicable). */
+    listSequence?: number
+    /** Resolved schema id for the object (if any). */
+    schemaId?: string
+}
+
+/** A file that failed to parse/index, with the errors that explain why. */
+export interface InvalidFileValidationDto {
+    /** Absolute path of the invalid file. */
+    path: string
+    /** Base name of the invalid file. */
+    name: string
+    /** The parse/index errors for the file (absent if none). */
+    validation?: ValidationResult
+}
+
+/**
+ * Full validation payload relayed from the extension host to the webview
+ * (the `detail` of a `gts-validation-result` message).
+ */
+export interface ValidationRelayPayload {
+    /** Per-instance validation. */
+    objs: ObjValidationDto[]
+    /** Per-schema validation. */
+    schemas: EntityValidationDto[]
+    /** Files that couldn't be parsed/indexed. */
+    invalidFiles: InvalidFileValidationDto[]
+}
+
 export class JsonFile {
     path: string
     name: string

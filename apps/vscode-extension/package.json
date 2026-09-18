@@ -2,7 +2,7 @@
   "name": "gts-kit",
   "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "private": true,
   "publisher": "GlobalTypeSystem",
   "license": "Apache-2.0",
@@ -19,16 +19,21 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Visualization",
-    "Other"
+    "Formatters",
+    "Linters",
+    "Visualization"
   ],
-  "activationEvents": [
-    "onCommand:gts.openViewer",
-    "onLanguage:json",
-    "onLanguage:jsonc",
-    "onLanguage:gts"
+  "tags": [
+    "gts",
+    "json",
+    "jsonc",
+    "jsonchema",
+    "validation"
   ],
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "languages": [
       {
@@ -39,9 +44,15 @@
     ],
     "commands": [
       {
-        "command": "gts.openViewer",
+        "command": "gts-kit.openViewer",
         "title": "GTS: Open Viewer",
         "category": "GTS"
+      },
+      {
+        "command": "gts-kit.refreshFileExplorer",
+        "title": "GTS: Refresh Discovered Files",
+        "category": "GTS",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -56,40 +67,54 @@
     "views": {
       "gts-viewer": [
         {
-          "type": "webview",
-          "id": "gts.viewerPanel",
-          "name": "Schema Viewer"
+          "id": "gts-kit.fileExplorer",
+          "name": "Discovered GTS files",
+          "icon": "resources/icon.svg",
+          "contextualTitle": "GTS Files"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "gts-kit.fileExplorer",
+        "contents": "No [GTS](https://globaltypesystem.org/#vscode-plugins) files discovered yet.\n[GTS](https://globaltypesystem.org/#vscode-plugins) files (schemas and instances) found anywhere in the workspace will be listed here."
+      }
+    ],
     "menus": {
       "explorer/context": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
+      "view/title": [
+        {
+          "command": "gts-kit.refreshFileExplorer",
+          "group": "navigation@1",
+          "when": "view == gts-kit.fileExplorer"
+        }
+      ],
       "editor/title": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == json"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == jsonc"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == gts"
         }
       ],
       "menubar/file": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "2_open"
         }
       ]
@@ -116,6 +141,7 @@
     "esbuild": "^0.19.0",
     "ignore": "^5.3.2",
     "jsonc-parser": "^3.3.1",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "yaml": "^2.9.1"
   }
 }

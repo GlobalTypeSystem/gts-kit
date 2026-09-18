@@ -1,5 +1,6 @@
 import React from 'react'
 import { JsonRegistry } from '@gts/shared'
+import type { ValidationRelayPayload } from '@gts/shared'
 import { AppConfig } from '@/lib/config'
 import { ViewerModel } from './viewerModel'
 
@@ -17,6 +18,34 @@ export function useJsonObjsVscode() {
   const registryRef = React.useRef<JsonRegistry>(new JsonRegistry())
   const hasInitiallySelectedRef = React.useRef<boolean>(false)
   const pendingSelectFileRef = React.useRef<string | null>(null)
+  // The webview runs under a CSP that blocks Ajv's code generation, so the
+  // extension host computes validation and relays it via `gts-validation-result`.
+  // That message and the (async) `gts-scan-result` ingest race: if validation
+  // arrives while `ingestFiles` is still populating the registry, the entity
+  // lookups miss and the errors would be lost forever. Keep the latest payload
+  // so it can be (re)applied once ingest has finished.
+  const pendingValidationRef = React.useRef<ValidationRelayPayload | null>(null)
+
+  // Merge host-computed validation onto the current registry entities (matched
+  // by id / path). Safe to call repeatedly; missing entities are skipped.
+  const applyValidation = React.useCallback((payload: ValidationRelayPayload | null): boolean => {
+    if (!payload) return false
+    const reg = registryRef.current
+    let applied = false
+    for (const o of payload.objs || []) {
+      const ent = reg.jsonObjs.get(o.id) as any
+      if (ent && o.validation) { ent.validation = o.validation; applied = true }
+    }
+    for (const s of payload.schemas || []) {
+      const ent = reg.jsonSchemas.get(s.id) as any
+      if (ent && s.validation) { ent.validation = s.validation; applied = true }
+    }
+    for (const f of payload.invalidFiles || []) {
+      const ent = reg.invalidFiles.get(f.path) as any
+      if (ent && f.validation) { ent.validation = f.validation; applied = true }
+    }
+    return applied
+  }, [])
 
   // Helper function to find and select entity from a file path
   const selectEntityFromFile = React.useCallback((filePath: string) => {
@@ -34,6 +63,9 @@ export function useJsonObjsVscode() {
     registry.reset()
     await registry.ingestFiles(files, AppConfig.get().gts)
     try { (registry as any).setDefaultFile?.(defaultFilePath) } catch {}
+    // Registry is now populated: (re)apply any host validation that arrived
+    // before/while this ingest was running (see pendingValidationRef).
+    applyValidation(pendingValidationRef.current)
     setVersion(v => v + 1)
 
     const defaultPath = (registry as any).getDefaultFilePath?.()
@@ -48,7 +80,7 @@ export function useJsonObjsVscode() {
       pendingSelectFileRef.current = null
       setTimeout(() => selectEntityFromFile(target), 0)
     }
-  }, [selectEntityFromFile])
+  }, [selectEntityFromFile, applyValidation])
 
   // Listen for scan events and trigger scan on mount
   React.useEffect(() => {
@@ -66,6 +98,9 @@ export function useJsonObjsVscode() {
     async function onResult(e: any) {
       const files = e?.detail?.files || []
       const defaultFilePath = e?.detail?.defaultFilePath || null
+      // A fresh scan invalidates the previous scan's validation; the host always
+      // follows a scan-result with a matching validation-result for this set.
+      pendingValidationRef.current = null
       try {
         await buildEntities(files, defaultFilePath)
       } finally {
@@ -100,15 +135,11 @@ export function useJsonObjsVscode() {
     window.addEventListener('gts-select-file' as any, onSelectFile)
 
     function onValidationResult(e: any) {
-      const detail = e?.detail || {}
-      const objList: Array<{id: string; validation?: any}> = detail.objs || []
-      const schemaList: Array<{id: string; validation?: any}> = detail.schemas || []
-      const invalidList: Array<{path: string; validation?: any}> = detail.invalidFiles || []
-
-      const reg = registryRef.current
-      objList.forEach(o => { const ent = reg.jsonObjs.get(o.id) as any; if (ent && o.validation) ent.validation = o.validation })
-      schemaList.forEach(s => { const ent = reg.jsonSchemas.get(s.id) as any; if (ent && s.validation) ent.validation = s.validation })
-      invalidList.forEach(f => { const ent = reg.invalidFiles.get(f.path) as any; if (ent && f.validation) ent.validation = f.validation })
+      const payload = (e?.detail || null) as ValidationRelayPayload | null
+      // Buffer so it can be re-applied if the scan-result ingest is still in
+      // flight (the two messages race), then apply against whatever is ready now.
+      pendingValidationRef.current = payload
+      applyValidation(payload)
       setVersion(v => v + 1)
     }
 
@@ -137,7 +168,7 @@ export function useJsonObjsVscode() {
       window.removeEventListener('gts-validation-error' as any, onValidationError)
       window.removeEventListener('gts-select-file' as any, onSelectFile)
     }
-  }, [buildEntities])
+  }, [buildEntities, applyValidation])
 
   // Refresh from webview: ask the extension to rescan; SharedApp coordinates viewport/entity restoration
   const reload = React.useCallback(async () => {
