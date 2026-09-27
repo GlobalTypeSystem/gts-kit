@@ -6,7 +6,33 @@ All notable changes to the GTS Viewer extension will be documented in this file.
 
 ## [0.3.0] - 2026-09-18
 
+### Added
+- GTS activity-bar panel with a file explorer to browse discovered GTS files and see an at-a-glance problem count
+- Refresh button in the GTS panel to rescan the workspace file explorer
+- YAML annotation support, including inline GTS entity definitions declared in YAML config files
+- Drag-and-drop of discovered GTS files, including multi-file drag into chat
+- Automatic revalidation of dependent entities when a file changes, across all apps
+- File watching inside symlinked directories
 
+### Changed
+- Rebased validation on `gts-ts` v0.7.0 for additional checks, and updated to gts-spec v0.13.4
+- Renamed all `gts.*` commands to `gts-kit.*`
+- Updated the Marketplace category and tags
+- Enabled Node typings for the extension
+- Improved the default message shown while the GTS file scanner is running
+
+### Fixed
+- GTS scanner now starts on extension startup
+- Discovered GTS files stay synchronized, with reduced file-tree flicker and deduplicated symlinked scans
+- Explorer file scans are no longer synchronous, avoiding UI stalls on large repos
+- Invalid files stay marked red after a preview tab closes
+- Inherited schema validation failures are now surfaced
+- Invalid GTS chain segments cascade correctly, and reference errors resolve to their own array item
+- GTS ID segments are classified structurally via core gts-ts
+- Strict RFC 3339 enforcement for date/time formats
+- Schema-less `$id` instances are rejected; annotation-only GTS reference branches and ID-less YAML containers are skipped
+- Duplicate entity suggestions removed
+- Stale files invalidated after parse errors
 
 ## [0.2.6] - 2026-09-07
 
