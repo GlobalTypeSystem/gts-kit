@@ -233,12 +233,7 @@ export class GtsFileDecorationProvider implements vscode.FileDecorationProvider 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     if (!isDiscoveredGtsFile(uri.fsPath)) return undefined
 
-    if (hasGtsErrors(uri)) {
-      return new vscode.FileDecoration('!', 'GTS: file has validation errors', new vscode.ThemeColor('charts.red'))
-    }
-    if (hasGtsWarnings(uri)) {
-      return new vscode.FileDecoration('!', 'GTS: file has warnings', new vscode.ThemeColor('charts.yellow'))
-    }
+    if (hasGtsErrors(uri) || hasGtsWarnings(uri)) return undefined
     return new vscode.FileDecoration(undefined, 'GTS: file is valid', new vscode.ThemeColor('charts.green'))
   }
 }
