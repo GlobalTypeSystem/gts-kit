@@ -932,6 +932,25 @@ export class JsonRegistry {
         return validation
       }
 
+      // An instance of an invalid type is itself invalid (as gts-ts's
+      // store.validateInstance reports it). The type's own result already
+      // includes its ancestor chain ("Parent schema ... has GTS validation
+      // errors"), so a broken ancestor reaches the instance too. Validation
+      // results are memoized per registry generation, so this is a cache hit
+      // during a workspace pass.
+      await this.validateEntity(schema)
+      const typeErrors = schema.validation?.errors || []
+      if (typeErrors.length > 0) {
+        const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
+        validation.errors.push({
+          instancePath: '/' + String(idField),
+          schemaPath: '#',
+          keyword: 'x-gts-schema',
+          message: `Instance type '${entity.schemaId}' is invalid: ${typeErrors[0].message}`,
+          params: { schemaId: entity.schemaId }
+        })
+      }
+
       // §9.11.3 (OP#6): an instance's rightmost type must be instantiable. A
       // type marked `x-gts-abstract: true` is a template and MUST NOT be
       // instantiated directly. Ajv has no notion of this keyword, so enforce it
