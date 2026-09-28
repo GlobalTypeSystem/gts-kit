@@ -373,13 +373,15 @@ function keyRegex(name: string): RegExp {
  * Split an AJV-style instancePath ("/tokens/2/subject_type") into path segments,
  * converting numeric segments into numbers so array indices resolve to the
  * correct list item rather than being treated as a property key. Empty segments
- * (from the leading slash or a "/" root path) are dropped.
+ * (from the leading slash or a "/" root path) are dropped. Segments are
+ * unescaped per RFC 6901 (`~1` -> `/`, `~0` -> `~`), as Ajv and the shared
+ * path finders escape keys that contain those characters.
  */
 function instancePathSegments(instancePath: string): Array<string | number> {
   return instancePath
     .split('/')
     .filter(seg => seg.length > 0)
-    .map(seg => (/^\d+$/.test(seg) ? Number(seg) : seg))
+    .map(seg => (/^\d+$/.test(seg) ? Number(seg) : seg.replace(/~1/g, '/').replace(/~0/g, '~')))
 }
 
 /**

@@ -1,7 +1,7 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import { isYamlFileName } from './parse.js'
-import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, getInstanceFieldSubschema } from './schemaParser.js'
+import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, findRegexPatternPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
 import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity } from '@globaltypesystem/gts-ts'
@@ -843,6 +843,13 @@ export class JsonRegistry {
             // requirement (the specific `required` entry when we can name the
             // missing trait) instead of the schema's `$id`.
             const isTraitError = !propPath && !refMatch && msg.startsWith('trait validation:')
+            // A regex that can't be compiled (e.g. "failed to compile trait
+            // schema: Unsupported pattern /.../: ..."): anchor it to the
+            // offending `pattern` / `patternProperties` entry, when it is in
+            // this document, instead of the schema's `$id`.
+            const regexPath = !propPath && !refMatch && !isTraitError && /regular expression|Unsupported pattern/.test(msg)
+              ? findRegexPatternPath(entity.content, msg)
+              : null
             let instancePath: string | null = null
             let params: Record<string, any> = {}
             if (propPath) {
@@ -856,6 +863,8 @@ export class JsonRegistry {
               const traitName = traitMatch ? traitMatch[1] : undefined
               instancePath = findTraitRequiredPath(entity.content, traitName)
               params = traitName ? { trait: traitName } : {}
+            } else if (regexPath) {
+              instancePath = regexPath
             }
             validation.errors.push({
               instancePath: instancePath || '/$id',

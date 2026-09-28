@@ -435,6 +435,45 @@ export function findXGtsRefPath(content: any, refValue: string): string | null {
 }
 
 /**
+ * Locate the JSON Pointer instancePath of the regular expression a compile
+ * error is about, e.g. "failed to compile trait schema: Unsupported pattern
+ * /^(a+)+(?=b)/: ..." or "... Invalid regular expression: /x(/u: ...": the
+ * `pattern` value, or `patternProperties` key, whose source appears in
+ * `message` as `/<source>/`. Used to anchor such a diagnostic on the
+ * offending regex rather than the schema's `$id`. Keys are escaped per RFC
+ * 6901 (`patternProperties` keys often contain `/`). Returns null when no
+ * regex of this document is named (e.g. it belongs to an ancestor schema).
+ */
+export function findRegexPatternPath(content: any, message: string): string | null {
+  const escape = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~1')
+  const named = (source: string) => source !== '' && message.includes(`/${source}/`)
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const res = walk(node[i], `${currentPath}/${i}`)
+        if (res) return res
+      }
+      return null
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const childPath = `${currentPath}/${escape(key)}`
+      if (key === 'pattern' && typeof value === 'string' && named(value)) return childPath
+      if (key === 'patternProperties' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const regexKey = Object.keys(value).find(named)
+        if (regexKey !== undefined) return `${childPath}/${escape(regexKey)}`
+      }
+      const res = walk(value, childPath)
+      if (res) return res
+    }
+    return null
+  }
+
+  return walk(content, '')
+}
+
+/**
  * Locate the JSON Pointer instancePath to anchor a trait-completeness error
  * (OP#13) on. When `traitName` is a required trait declared in this document's
  * top-level `x-gts-traits-schema`, point at that specific `required` entry
