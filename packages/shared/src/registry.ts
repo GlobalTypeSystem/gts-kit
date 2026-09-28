@@ -1,7 +1,7 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import { isYamlFileName } from './parse.js'
-import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath } from './schemaParser.js'
+import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
 import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
@@ -103,6 +103,24 @@ function fieldPathToInstancePath(fieldPath: string): string {
  */
 function normalizeToArray(content: any): any[] {
   return Array.isArray(content) ? content : [content]
+}
+
+/**
+ * True when a resolved subschema describes a *scalar data value* rather than a
+ * GTS reference: it constrains the value with a scalar `type`, a `format`, an
+ * `enum`, or a `const`, and does NOT declare it as a reference via `x-gts-ref`
+ * or `$ref`. Used to suppress the syntactic "GTS reference not found" check for
+ * fields whose GTS-id-shaped value is just data (e.g. a `format: uuid` string).
+ */
+function isScalarDataField(sub: any): boolean {
+  if (!sub || typeof sub !== 'object') return false
+  if (sub['x-gts-ref'] !== undefined || sub['$ref'] !== undefined) return false
+  const scalarTypes = new Set(['string', 'number', 'integer', 'boolean', 'null'])
+  const t = sub.type
+  const hasScalarType = typeof t === 'string'
+    ? scalarTypes.has(t)
+    : Array.isArray(t) && t.length > 0 && t.every((x: any) => scalarTypes.has(x))
+  return hasScalarType || sub.format !== undefined || sub.enum !== undefined || sub.const !== undefined
 }
 
 /**
@@ -629,6 +647,23 @@ export class JsonRegistry {
 
     // Check if all GTS references exist in the registry
     if (entity.gtsRefs && entity.gtsRefs.length > 0) {
+      // For an instance, resolve its schema so we can tell a genuine GTS
+      // reference field apart from a scalar data value that merely *looks* like
+      // a GTS id (e.g. a `format: uuid` string). References are harvested
+      // syntactically (any GTS-id-shaped string, regardless of field), so
+      // without this a value like "gts.x…v1~<uuid>" in a plain typed field
+      // would be wrongly reported as a missing reference. Only instances carry
+      // a separate schema to consult; schema-shaped entities keep prior behaviour.
+      const instanceSchema = (entity instanceof JsonObj && entity.schemaId)
+        ? this.resolveSchema(entity.schemaId)?.content ?? null
+        : null
+      // Configured GTS id/schema fields (id, gtsIid, type, $schema, ...) are
+      // references by definition and must keep being checked even when a schema
+      // types them as a plain `string`; only *other* scalar-typed fields are
+      // exempted below.
+      const cfg = getGtsConfig(undefined)
+      const idFieldNames = new Set([...cfg.entity_id_fields, ...cfg.schema_id_fields])
+
       for (const ref of entity.gtsRefs) {
         // Skip reference validation for refs inside /examples field in schemas
         // Match 'examples' at root or after array indices (e.g., allOf[0].examples), but NOT after 'properties'
@@ -640,7 +675,21 @@ export class JsonRegistry {
         if (isInExamples) {
           continue
         }
-        
+
+        // Schema-aware skip: when the instance's schema types this field as a
+        // scalar data value (a `format`/scalar `type`/`enum`/`const`, and NOT a
+        // reference via `x-gts-ref`/`$ref`), its GTS-id-shaped value is data,
+        // not a reference, so its existence must not be checked. Configured
+        // id/schema fields are never exempted (they are references by design).
+        const lastSegment = ref.sourcePath.replace(/\[\d+\]/g, '').split('.').pop() || ''
+        if (
+          instanceSchema &&
+          !idFieldNames.has(lastSegment) &&
+          isScalarDataField(getInstanceFieldSubschema(instanceSchema, ref.sourcePath))
+        ) {
+          continue
+        }
+
         const refExists = this.jsonSchemas.has(ref.id) || this.jsonObjs.has(ref.id)
         if (!refExists) {
           this.absentGtsEntities.set(ref.id, createAbsentEntity(ref.id))

@@ -452,3 +452,53 @@ export function findTraitRequiredPath(content: any, traitName?: string): string 
   }
   return '/x-gts-traits-schema'
 }
+
+/**
+ * Navigate a JSON Schema to the subschema that governs the value at a given
+ * *instance* source path (dot/bracket notation as produced by the reference
+ * walker, e.g. "uuidValue", "contact.gtsIid", "items[0].sku"). Follows
+ * `properties`, array `items` (single-schema or tuple), and searches
+ * `allOf`/`anyOf`/`oneOf` branches.
+ *
+ * Returns the subschema, or null when it cannot be resolved locally (e.g. the
+ * field is an `additionalProperties` value or is inherited from an ancestor
+ * schema not present in this document) — callers should treat null
+ * conservatively rather than assuming the field is unconstrained.
+ */
+export function getInstanceFieldSubschema(schemaContent: any, sourcePath: string): any | null {
+  if (!schemaContent || typeof schemaContent !== 'object') return null
+  if (!sourcePath || sourcePath === 'root') return null
+
+  const segments = sourcePath
+    .replace(/\[(\d+)\]/g, '.$1') // arr[0] -> arr.0
+    .split('.')
+    .filter(s => s.length > 0)
+
+  function resolveKey(node: any, key: string, depth: number): any | null {
+    if (!node || typeof node !== 'object' || depth > 20) return null
+    const isIndex = /^\d+$/.test(key)
+    if (isIndex) {
+      if (node.items !== undefined) {
+        return Array.isArray(node.items) ? (node.items[Number(key)] ?? null) : node.items
+      }
+    } else if (node.properties && typeof node.properties === 'object' && node.properties[key] !== undefined) {
+      return node.properties[key]
+    }
+    for (const comb of ['allOf', 'anyOf', 'oneOf'] as const) {
+      if (Array.isArray(node[comb])) {
+        for (const branch of node[comb]) {
+          const res = resolveKey(branch, key, depth + 1)
+          if (res) return res
+        }
+      }
+    }
+    return null
+  }
+
+  let current: any = schemaContent
+  for (const seg of segments) {
+    current = resolveKey(current, seg, 0)
+    if (!current || typeof current !== 'object') return null
+  }
+  return current
+}
