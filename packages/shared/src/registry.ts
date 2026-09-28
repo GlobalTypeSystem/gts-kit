@@ -4,7 +4,7 @@ import { isYamlFileName } from './parse.js'
 import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
-import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
+import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity } from '@globaltypesystem/gts-ts'
 // XGtsRefValidator is not re-exported from the package index, so import it from
 // its published subpath module.
 import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
@@ -963,10 +963,16 @@ export class JsonRegistry {
         // (the value must be a GTS ID matching the declared prefix/pattern).
         // Ajv treats it as an unknown keyword and silently ignores it, so it is
         // enforced explicitly here (mirrors gts-ts store.validateInstance).
-        // No store is passed: referenced-entity existence is already covered by
-        // the gtsRefs registry check above, so this validator only enforces the
-        // GTS-ID format and the prefix/pattern constraint.
-        const xGtsRefErrors = new XGtsRefValidator().validateInstance(entity.content, schema.content)
+        // The validator gets the registry's gts-ts store so it can follow
+        // `gts://` `$ref`s (e.g. `allOf: [{ $ref: <parent type> }]`) into parent
+        // schemas: without one, every such `$ref` is unresolvable and gts-ts
+        // reports "Cannot resolve $ref ... for x-gts-ref traversal" (it fails
+        // closed rather than skip the parent's constraints). Existence checks
+        // stay off (mode None): referenced-entity existence is already reported
+        // by the gtsRefs registry check above, so this validator only enforces
+        // the GTS-ID format and the prefix/pattern constraint.
+        const xGtsRefErrors = new XGtsRefValidator(this.getGtsStore(), GtsRefValidationMode.None)
+          .validateInstance(entity.content, schema.content, '', undefined, entity.id)
         for (const err of xGtsRefErrors) {
           validation.errors.push({
             instancePath: fieldPathToInstancePath(err.fieldPath),
