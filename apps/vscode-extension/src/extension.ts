@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
-import { rebuildRegistry, rebuildRegistryIfUnchanged, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry, getRegistryRevision } from './registryStore'
+import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
 import { RepoLayoutStorage } from './storage'
 import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
@@ -116,24 +116,91 @@ let viewerPanel: vscode.WebviewPanel | null = null
 let layoutStorage: RepoLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
 let gtsLinkProvider: GtsLinkProvider | null = null
+// The GTS link-format diagnostic collection, kept at module scope so a full
+// store reset (resetGtsStore) can clear it from outside `activate`.
+let gtsLinkFormatDiagnostics: vscode.DiagnosticCollection | null = null
 // File the user explicitly requested (context menu / command palette) — consumed by the first scanAndPost
 let pendingOpenFile: string | null = null
 // Left-sidebar GTS file browser (tree view + red/green file decorations), shares the same registry as everything else.
 let gtsExplorer: GtsExplorer | null = null
-let workspaceMutationRevision = 0
 let fullScanQueue: Promise<void> = Promise.resolve()
 
-type StableScanOperation = (expectedMutationRevision: number) => Promise<boolean>
-
-function enqueueStableScan(operation: StableScanOperation): Promise<void> {
-  const execute = async () => {
-    while (!await operation(workspaceMutationRevision)) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-  }
-  const run = fullScanQueue.then(execute, execute)
+/** Run full scans one at a time, in request order. */
+function enqueueScan(operation: () => Promise<void>): Promise<void> {
+  const run = fullScanQueue.then(operation, operation)
   fullScanQueue = run.catch(() => {})
   return run
+}
+
+// Paths changed by live events (editor edits, on-disk changes, renames, closes)
+// while a full scan is in flight. The scan's snapshot may predate those events,
+// so instead of discarding the whole scan and starting over (which never
+// converges in a busy workspace), they are re-synced from their current source
+// right after the scan commits. null when no scan is running.
+let pathsTouchedDuringScan: Set<string> | null = null
+
+/** True if the text can hold a GTS id ("gts." canonical or "gts://" URI form). */
+function mayContainGts(text: string): boolean {
+  return text.includes('gts.') || text.includes('gts://')
+}
+
+/** Parse + index one file's text under `fsPath`, as the canonical path for its physical file. */
+function indexFileText(fsPath: string, text: string): void {
+  const name = path.basename(fsPath)
+  let content: any
+  try { content = parseGtsFileContent(name, text) } catch { content = text }
+  claimCanonicalPath(fsPath)
+  indexFileInRegistry(fsPath, name, content)
+}
+
+/** Drop a file's entities from the registry and the symlink-dedup index. */
+function dropFileFromRegistry(fsPath: string): void {
+  removeFileFromRegistry(fsPath)
+  forgetIndexedPath(fsPath)
+}
+
+/**
+ * Bring one file's registry entry in line with its current source of truth: the
+ * live buffer if it's open, otherwise the file on disk — or drop it if it's
+ * gone, ignored, or no longer mentions GTS.
+ */
+async function resyncFile(fsPath: string): Promise<void> {
+  const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fsPath && isGtsCandidateFile(d))
+  if (openDoc) {
+    indexFileText(fsPath, openDoc.getText())
+    return
+  }
+  const uri = vscode.Uri.file(fsPath)
+  if (!isGtsScanPath(fsPath) || isIgnoredGtsPath(fsPath) || isUriIgnored(uri) || !fs.existsSync(fsPath)) {
+    dropFileFromRegistry(fsPath)
+    return
+  }
+  const revision = fileMutationRevisions.get(fsPath)
+  let text: string
+  try {
+    text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')
+  } catch {
+    dropFileFromRegistry(fsPath)
+    return
+  }
+  // A live handler indexed a newer version while we were reading; it wins.
+  if (fileMutationRevisions.get(fsPath) !== revision) return
+  if (mayContainGts(text)) indexFileText(fsPath, text)
+  else dropFileFromRegistry(fsPath)
+}
+
+/**
+ * Re-apply every path touched since tracking (re)started on top of the freshly
+ * committed registry. With `keepTracking`, recording continues afterwards (used
+ * between the two scan phases). Returns how many paths were re-synced.
+ */
+async function resyncPathsTouchedDuringScan(keepTracking: boolean): Promise<number> {
+  const touched = pathsTouchedDuringScan
+  pathsTouchedDuringScan = keepTracking ? new Set() : null
+  if (!touched || touched.size === 0) return 0
+  console.log(`[GTS] Re-syncing ${touched.size} file(s) changed during the scan`)
+  for (const fsPath of touched) await resyncFile(fsPath)
+  return touched.size
 }
 
 function getNonce(): string {
@@ -145,13 +212,20 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null): Promise<void> {
-  await enqueueStableScan(expectedMutationRevision => scanAndPostPass(includeGlob, isInitialScan, refreshFilePath, expectedMutationRevision))
+async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null, reset: boolean = false): Promise<void> {
+  await enqueueScan(async () => {
+    if (reset) await resetGtsStore()
+    pathsTouchedDuringScan = new Set()
+    try {
+      await scanAndPostPass(includeGlob, isInitialScan, refreshFilePath)
+    } finally {
+      pathsTouchedDuringScan = null
+    }
+  })
 }
 
-async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refreshFilePath: string | null | undefined, expectedMutationRevision: number): Promise<boolean> {
+async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refreshFilePath: string | null | undefined): Promise<void> {
   const hasViewer = viewerPanel !== null
-  const expectedRegistryRevision = getRegistryRevision()
 
   try {
     let selectedFilePath: string | null = null
@@ -197,7 +271,7 @@ async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refr
         // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
         // Check for both "gts." (canonical form) and "gts://" (URI form) so that
         // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
-        if (!text.includes('gts.') && !text.includes('gts://')) {
+        if (!mayContainGts(text)) {
           continue
         }
         const name = path.basename(uri.fsPath)
@@ -223,9 +297,8 @@ async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refr
 
     // Update the shared, persistent, index-only registry (used by decorations,
     // links, hovers and as validation resolution context). This is cheap.
-    if (workspaceMutationRevision !== expectedMutationRevision) return false
-    const registry = await rebuildRegistryIfUnchanged(files, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
-    if (!registry) return false
+    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
+    await resyncPathsTouchedDuringScan(false)
     if (selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
@@ -280,12 +353,11 @@ async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refr
         void validateOpenDocument(doc)
       }
     })
-    return workspaceMutationRevision === expectedMutationRevision
   } catch (error: any) {
+    console.error('[GTS] Viewer scan failed:', error)
     if (hasViewer) {
       viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
     }
-    return true
   }
 }
 
@@ -296,6 +368,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Create diagnostic collection for GTS validation
   const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts-link-format')
+  gtsLinkFormatDiagnostics = gtsDiagnostics
   context.subscriptions.push(gtsDiagnostics)
 
   // Initialize and register GTS link provider for clickable GTS IDs
@@ -376,6 +449,11 @@ export async function activate(context: vscode.ExtensionContext) {
       for (const uri of event.files) {
         if (isGtsScanPath(uri.fsPath)) onDiskFileDeleted(uri)
       }
+    }),
+    // Closing a document discards unsaved edits (validation.ts reindexes it from
+    // disk). If a scan read the old buffer, re-sync the file after it commits.
+    vscode.workspace.onDidCloseTextDocument(doc => {
+      if (isGtsCandidateFile(doc)) pathsTouchedDuringScan?.add(doc.uri.fsPath)
     })
   )
 
@@ -407,7 +485,6 @@ export async function activate(context: vscode.ExtensionContext) {
   const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore')
   context.subscriptions.push(gitignoreWatcher)
   const onGitignoreChanged = () => {
-    workspaceMutationRevision++
     resetWorkspaceIgnore()
     void performInitialScan()
   }
@@ -546,7 +623,7 @@ async function readGtsCandidateFiles(
       // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
       // Check for both "gts." (canonical form) and "gts://" (URI form) so that
       // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
-      if (!text.includes('gts.') && !text.includes('gts://')) continue
+      if (!mayContainGts(text)) continue
       const name = path.basename(uri.fsPath)
       let content: any
       try { content = parseGtsFileContent(name, text) } catch { content = text }
@@ -565,32 +642,58 @@ function revalidateOpenDocs(): void {
   })
 }
 
-async function refreshGtsFileExplorer(linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
-  workspaceMutationRevision++
+/**
+ * Tear the GTS store all the way down to empty: drop every registry entity,
+ * the symlink-dedup index, the .gitignore cache, cached scan files, and all
+ * validation/link diagnostics, then repaint the (now empty) tree and
+ * decorations. A subsequent scan repopulates everything from a fresh
+ * enumeration, so entities for files/directories removed since the last scan
+ * cannot survive as stale ("ghost") entries. Does NOT itself scan.
+ */
+async function resetGtsStore(): Promise<void> {
   fileMutationRevisions.clear()
   if (changeTimer) clearTimeout(changeTimer)
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   changeTimer = null
   externalChangeTimer = null
   preEditIdsByPath.clear()
-  pendingOpenFile = null
   realPathIndex.clear()
   resetWorkspaceIgnore()
   setLastScanFiles([])
   await rebuildRegistry([], DEFAULT_GTS_CONFIG)
   resetValidationDiagnostics()
-  linkDiagnostics.clear()
+  gtsLinkFormatDiagnostics?.clear()
   gtsExplorer?.reset()
   await gtsLinkProvider?.refresh()
-  await performInitialScan()
 }
 
-async function performInitialScan(): Promise<void> {
-  await enqueueStableScan(performInitialScanPass)
+async function refreshGtsFileExplorer(_linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
+  pendingOpenFile = null
+  await performInitialScan(true)
 }
 
-async function performInitialScanPass(expectedMutationRevision: number): Promise<boolean> {
-  const expectedRegistryRevision = getRegistryRevision()
+/**
+ * Queue a full two-phase workspace scan (optionally from an emptied store, so
+ * nothing from before can survive). Shows progress on the GTS files view.
+ */
+async function performInitialScan(reset: boolean = false): Promise<void> {
+  await vscode.window.withProgress(
+    { location: { viewId: 'gts-kit.fileExplorer' }, title: 'Scanning GTS files' },
+    () => enqueueScan(async () => {
+      // Reset inside the queue so it can't interleave with a scan in flight.
+      if (reset) await resetGtsStore()
+      pathsTouchedDuringScan = new Set()
+      try {
+        await performInitialScanPass()
+      } finally {
+        pathsTouchedDuringScan = null
+      }
+    })
+  )
+}
+
+async function performInitialScanPass(): Promise<void> {
+  const startTime = Date.now()
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
     // files/folders (at enumeration time via globs, plus an authoritative
@@ -628,9 +731,9 @@ async function performInitialScanPass(expectedMutationRevision: number): Promise
     const phase1Deduped = dedupeUrisByRealPath(phase1Candidates)
     console.log(`[GTS] Phase 1: ${phase1Deduped.length} candidate files (of ${fastUris.length} enumerated, ${phase1Candidates.length} before real-path dedup)`)
     const files1 = await readGtsCandidateFiles(phase1Deduped)
-    if (workspaceMutationRevision !== expectedMutationRevision) return false
-    const registry = await rebuildRegistryIfUnchanged(files1, expectedRegistryRevision, DEFAULT_GTS_CONFIG)
-    if (!registry) return false
+    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
+    // Keep recording: phase 2 below may also race with live changes.
+    await resyncPathsTouchedDuringScan(true)
     setLastScanFiles(files1)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
     gtsExplorer?.refresh()
@@ -652,20 +755,19 @@ async function performInitialScanPass(expectedMutationRevision: number): Promise
     // physical file we've already taken (the realPathIndex still holds phase 1).
     const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
     const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
-    if (phase2Uris.length > 0) {
-      const files2 = await readGtsCandidateFiles(phase2Uris)
-      if (workspaceMutationRevision !== expectedMutationRevision) return false
-      if (files2.length > 0) {
-        for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
-        setLastScanFiles([...files1, ...files2])
-        gtsExplorer?.refresh()
-        await gtsLinkProvider?.refresh()
-        await validateWorkspaceInBackground()
-        revalidateOpenDocs()
-      }
-      console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
+    const files2 = phase2Uris.length > 0 ? await readGtsCandidateFiles(phase2Uris) : []
+    for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
+    if (files2.length > 0) setLastScanFiles([...files1, ...files2])
+    console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
+    const resynced = await resyncPathsTouchedDuringScan(false)
+    if (files2.length > 0 || resynced > 0) {
+      gtsExplorer?.refresh()
+      await gtsLinkProvider?.refresh()
+      await validateWorkspaceInBackground()
+      revalidateOpenDocs()
     }
-    return workspaceMutationRevision === expectedMutationRevision
+    const finalRegistry = getRegistry()
+    console.log(`[GTS] Scan complete in ${Date.now() - startTime}ms: ${finalRegistry?.jsonFiles.size ?? 0} GTS files, ${finalRegistry?.invalidFiles.size ?? 0} unparsable`)
   } catch (error) {
     console.error('[GTS] Initial scan error:', error)
     throw error
@@ -767,13 +869,16 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   try {
     const data = await vscode.workspace.fs.readFile(uri)
     const text = Buffer.from(data).toString('utf8')
-    const name = path.basename(fsPath)
-    let content: any
-    try { content = parseGtsFileContent(name, text) } catch { content = text }
     if (fileMutationRevisions.get(fsPath) !== mutationRevision || !fs.existsSync(fsPath)) return
-    // Keep one entry per physical file even when reached via a symlinked path.
-    claimCanonicalPath(fsPath)
-    indexFileInRegistry(fsPath, name, content)
+    // Same pre-filter as the full scan, so a changed non-GTS JSON file (e.g. a
+    // broken build artifact) never shows up in the tree, and a file whose GTS
+    // content was removed drops out of it.
+    if (mayContainGts(text)) {
+      // Keep one entry per physical file even when reached via a symlinked path.
+      indexFileText(fsPath, text)
+    } else {
+      dropFileFromRegistry(fsPath)
+    }
     gtsExplorer?.refresh()
   } catch (e) {
     console.error('[GTS] Failed to reindex changed file from disk:', fsPath, e)
@@ -798,7 +903,7 @@ let externalChangeTimer: NodeJS.Timeout | null = null
 const fileMutationRevisions = new Map<string, number>()
 
 function beginFileMutation(fsPath: string): number {
-  workspaceMutationRevision++
+  pathsTouchedDuringScan?.add(fsPath)
   const revision = (fileMutationRevisions.get(fsPath) || 0) + 1
   fileMutationRevisions.set(fsPath, revision)
   return revision
@@ -971,10 +1076,12 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
           try {
             const include: string = message.options?.include || GTS_SCAN_GLOB
             const isInitialScan = !hasPerformedInitialScan
-            if (isInitialScan) {
-              hasPerformedInitialScan = true
-            }
-            await scanAndPost(include, isInitialScan)
+            hasPerformedInitialScan = true
+            // A user-triggered rescan must rebuild the whole GTS store from
+            // scratch. Reset to empty first (inside the scan queue) so entities
+            // for files/directories removed since the last scan can't linger as
+            // stale entries; the scan then repopulates from a fresh enumeration.
+            await scanAndPost(include, isInitialScan, undefined, !isInitialScan)
           } catch (error: any) {
             viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
           }

@@ -46,20 +46,6 @@ export async function rebuildRegistry(
   return next
 }
 
-export async function rebuildRegistryIfUnchanged(
-  files: RegistryFileInput[],
-  expectedRevision: number,
-  cfg: GtsConfig = DEFAULT_GTS_CONFIG
-): Promise<JsonRegistry | null> {
-  const next = new JsonRegistry()
-  await next.ingestFiles(files, cfg, { skipValidation: true })
-  if (revision !== expectedRevision) return null
-  activeConfig = cfg
-  registry = next
-  revision++
-  return next
-}
-
 /** Incrementally upsert a single file's entities into the shared registry. */
 export function indexFile(path: string, name: string, content: any): void {
   if (!registry) return
