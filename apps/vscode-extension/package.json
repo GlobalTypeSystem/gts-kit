@@ -93,6 +93,13 @@
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
+      "view/item/context": [
+        {
+          "command": "gts-kit.openViewer",
+          "group": "navigation@100",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        }
+      ],
       "view/title": [
         {
           "command": "gts-kit.refreshFileExplorer",
