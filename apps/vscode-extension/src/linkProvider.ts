@@ -1,7 +1,8 @@
 import * as vscode from 'vscode'
 import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, analyzeGtsIdForStyling, findSimilarEntityIds, normalizeGtsId, checkGtsUriPrefix, isGtsId, isGtsIdOrPattern, isGtsPattern, isYamlFileName } from '@gts/shared'
-import type { GtsPrefixIssue } from '@gts/shared'
-import { getRegistry } from './registryStore'
+import type { GtsPrefixIssue, JsonEntity } from '@gts/shared'
+import * as fs from 'fs'
+import { getRegistry, getRegistryRevision } from './registryStore'
 import { getDocumentValidationErrors } from './validation'
 import * as jsonc from 'jsonc-parser'
 import * as YAML from 'yaml'
@@ -19,6 +20,8 @@ interface GtsIdReference {
   /** The JSON leaf field name this value is assigned to (e.g. "$id", "type"). */
   fieldName: string
   range: vscode.Range
+  /** Offset of the value's first character (after any opening quote). */
+  contentOffset: number
   sourcePath: string
   isValid: boolean // Whether the ID is a valid GTS identifier or pattern
   /** Whether the value is a valid GTS wildcard pattern (e.g. "gts.*"). */
@@ -58,67 +61,90 @@ function getRelativePath(absolutePath: string): string {
   return vscode.workspace.asRelativePath(absolutePath)
 }
 
+// Definition-line lookups, valid for one registry revision (any re-index
+// invalidates them, since the defining file may have changed).
+let definitionLineCache = { revision: -1, lines: new Map<string, number>() }
+
 /**
- * Find the line number where a JSON entity is defined in its file
+ * Zero-based line on which `entity` is defined: the line of its id field (or,
+ * failing that, of its list item). Reads the live buffer when the file is open,
+ * otherwise the file on disk (asynchronously), and caches the result. This used
+ * to be a synchronous disk read + line scan for every segment of every link on
+ * every link request, and matched the first line merely *containing* the id.
  */
-function findEntityLineInFile(filePath: string, entityId: string): number {
+async function findDefinitionLine(entity: JsonEntity): Promise<number> {
+  const filePath = entity.file?.path
+  if (!filePath) return 0
+  const revision = getRegistryRevision()
+  if (definitionLineCache.revision !== revision) definitionLineCache = { revision, lines: new Map() }
+  const key = `${filePath}\0${entity.id}\0${entity.listSequence ?? ''}`
+  const cached = definitionLineCache.lines.get(key)
+  if (cached !== undefined) return cached
+
+  let line = 0
   try {
-    const fs = require('fs')
-    const content = fs.readFileSync(filePath, 'utf8')
-    const lines = content.split('\n')
-
-    // Look for the entity ID in the file
-    // It could be in various fields like "$id", "id", "type", etc.
-    let foundLine = -1
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      if (line.includes(entityId)) {
-        foundLine = i
-        break
-      }
-    }
-
-    if (foundLine === -1) {
-      return 0 // Not found, default to first line
-    }
-
-    // Found the entity ID, now find the start of the JSON object
-    // Go backwards to find the opening brace
-    let braceCount = 0
-    let inString = false
-    let escapeNext = false
-
-    for (let j = foundLine; j >= 0; j--) {
-      const line = lines[j]
-
-      // Simple approach: look for a line that starts with { or ends with {
-      const trimmed = line.trim()
-      if (trimmed === '{' || trimmed.endsWith('{')) {
-        // Check if this is the outermost brace for this object
-        // by verifying we haven't seen any closing braces before this
-        return j
-      }
-
-      // Also check for array element start
-      if (trimmed.startsWith('{')) {
-        return j
-      }
-    }
-
-    // If we didn't find an opening brace, return the line where we found the ID
-    return foundLine
+    const openDoc = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && d.uri.fsPath === filePath)
+    const text = openDoc ? openDoc.getText() : await fs.promises.readFile(filePath, 'utf8')
+    line = lineOfOffset(text, locateDefinitionOffset(text, filePath, entity))
   } catch (error) {
-    console.error(`Error finding entity line in file ${filePath}:`, error)
+    console.error(`[GTS] Could not locate ${entity.id} in ${filePath}:`, error)
   }
+  if (definitionLineCache.revision === revision) definitionLineCache.lines.set(key, line)
+  return line
+}
 
-  return 0 // Default to first line
+/** Offset of the entity's id field value (or its list item) in the file's text. */
+function locateDefinitionOffset(text: string, filePath: string, entity: JsonEntity): number {
+  const seq = entity.listSequence
+  const idField = entity.selectedEntityIdField || entity.selectedSchemaIdField
+  const itemPath: Array<string | number> = seq !== undefined ? [seq] : []
+  const idPath = idField ? [...itemPath, idField] : itemPath
+
+  let offset: number | undefined
+  if (isYamlFileName(filePath)) {
+    const doc = YAML.parseDocument(text)
+    const rangeStart = (path: Array<string | number>) => {
+      const node = path.length > 0 ? doc.getIn(path, true) : doc.contents
+      return (node as { range?: [number, number, number] } | null | undefined)?.range?.[0]
+    }
+    offset = rangeStart(idPath) ?? (itemPath.length > 0 ? rangeStart(itemPath) : undefined)
+  } else {
+    const root = jsonc.parseTree(text, undefined, { allowTrailingComma: true })
+    if (root) {
+      offset = (idPath.length > 0 ? jsonc.findNodeAtLocation(root, idPath)?.offset : undefined)
+        ?? (itemPath.length > 0 ? jsonc.findNodeAtLocation(root, itemPath)?.offset : undefined)
+    }
+  }
+  // Last resort (e.g. YAML entities defined inline deep in a config file).
+  if (offset === undefined) {
+    const idx = text.indexOf(entity.id)
+    offset = idx >= 0 ? idx : 0
+  }
+  return offset
+}
+
+function lineOfOffset(text: string, offset: number): number {
+  let line = 0
+  for (let i = text.indexOf('\n'); i !== -1 && i < offset; i = text.indexOf('\n', i + 1)) line++
+  return line
+}
+
+/** A link to an entity's definition; its target is computed only when the link is used. */
+class GtsDefinitionLink extends vscode.DocumentLink {
+  constructor(range: vscode.Range, readonly entityId: string) {
+    super(range)
+  }
 }
 
 /**
  * DocumentLinkProvider for GTS IDs
  * Makes GTS IDs clickable and provides hover information
  */
-export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.HoverProvider {
+export class GtsLinkProvider implements vscode.DocumentLinkProvider<vscode.DocumentLink>, vscode.HoverProvider {
+  // Parsed GTS references per open document version. Decorations, links and
+  // every hover over the same unchanged document reuse one parse.
+  private referenceCache = new WeakMap<vscode.TextDocument, { version: number; references: GtsIdReference[] }>()
+
   /**
    * The registry is the shared, persistent, index-only registry maintained in
    * registryStore. We never build our own here — decorations/links/hovers just
@@ -290,12 +316,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       // elsewhere). Highlight the whole value in red; the authoritative diagnostic is
       // published by the shared validator (validation.ts) to avoid duplicate markers.
       if (ref.urlPrefixIssue) {
-        const text = document.getText()
-        const refOffset = document.offsetAt(ref.range.start)
-        let gtsStartOffset = refOffset
-        if (text[refOffset] === '"') {
-          gtsStartOffset = refOffset + 1
-        }
+        const gtsStartOffset = ref.contentOffset
         const startPos = document.positionAt(gtsStartOffset)
         const endPos = document.positionAt(gtsStartOffset + ref.rawValue.length)
         errorRanges.push(new vscode.Range(startPos, endPos))
@@ -307,12 +328,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       // closed files alike, so the file's status doesn't depend on whether it
       // happens to be open.
       if (!ref.isValid) {
-        const text = document.getText()
-        const refOffset = document.offsetAt(ref.range.start)
-        let gtsStartOffset = refOffset
-        if (text[refOffset] === '"') {
-          gtsStartOffset = refOffset + 1
-        }
+        const gtsStartOffset = ref.contentOffset
         const startPos = document.positionAt(gtsStartOffset)
         const endPos = document.positionAt(gtsStartOffset + ref.rawValue.length)
         errorRanges.push(new vscode.Range(startPos, endPos))
@@ -322,13 +338,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       // Wildcard patterns (e.g. "gts.*" in x-gts-ref) are valid GTS references
       // but don't resolve to specific entities — show as schema decoration
       if (ref.isPattern) {
-        const text = document.getText()
-        const refOffset = document.offsetAt(ref.range.start)
-        let gtsStartOffset = refOffset
-        if (text[refOffset] === '"') {
-          gtsStartOffset = refOffset + 1
-        }
-        gtsStartOffset += ref.uriPrefixLength
+        const gtsStartOffset = ref.contentOffset + ref.uriPrefixLength
         const startPos = document.positionAt(gtsStartOffset)
         const endPos = document.positionAt(gtsStartOffset + ref.id.length)
         schemaRanges.push(new vscode.Range(startPos, endPos))
@@ -366,16 +376,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       })
 
       // Calculate the offset of the string value (excluding quotes)
-      const text = document.getText()
-      const refOffset = document.offsetAt(ref.range.start)
-
-      // Find the actual start of the GTS ID (after the opening quote and any
-      // gts:// URI prefix, so the highlighted segments align with the canonical id).
-      let gtsStartOffset = refOffset
-      if (text[refOffset] === '"') {
-        gtsStartOffset = refOffset + 1
-      }
-      gtsStartOffset += ref.uriPrefixLength
+      const gtsStartOffset = ref.contentOffset + ref.uriPrefixLength
 
       // References inside an "examples" field show missing entities as a neutral
       // gray chip instead of a red error.
@@ -427,17 +428,20 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
    * blue/red/gray annotations, hovers and links as JSON files do.
    */
   private findGtsReferences(document: vscode.TextDocument): GtsIdReference[] {
-    if (document.languageId === 'yaml' || isYamlFileName(document.fileName)) {
-      return this.findGtsReferencesYaml(document)
-    }
-    return this.findGtsReferencesJson(document)
+    const cached = this.referenceCache.get(document)
+    if (cached && cached.version === document.version) return cached.references
+    const references = document.languageId === 'yaml' || isYamlFileName(document.fileName)
+      ? this.findGtsReferencesYaml(document)
+      : this.findGtsReferencesJson(document)
+    this.referenceCache.set(document, { version: document.version, references })
+    return references
   }
 
   /**
    * Build a GtsIdReference from a raw string value found at a known document
    * offset range. Shared by both the JSON and YAML reference finders.
    */
-  private buildGtsIdReference(rawValue: string, fieldName: string, sourcePath: string, range: vscode.Range): GtsIdReference {
+  private buildGtsIdReference(rawValue: string, fieldName: string, sourcePath: string, range: vscode.Range, contentOffset: number): GtsIdReference {
     const id = normalizeGtsId(rawValue)
     const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
     const isValid = isGtsId(id)
@@ -451,6 +455,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       uriPrefixLength,
       fieldName,
       range,
+      contentOffset,
       sourcePath,
       isValid: isValid || isWildcardPattern,
       isPattern: isWildcardPattern,
@@ -517,7 +522,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           const fieldName = pathKeys[pathKeys.length - 1] || ''
           const sourcePath = pathKeys.join('.')
 
-          references.push(this.buildGtsIdReference(value, fieldName, sourcePath, range))
+          references.push(this.buildGtsIdReference(value, fieldName, sourcePath, range, valueStartOffset))
         }
       })
     } catch (error) {
@@ -569,25 +574,8 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
               }
             }
 
-            const rawValue = value
-            const id = normalizeGtsId(rawValue)
-            const uriPrefixLength = rawValue.startsWith(GTS_URI_PREFIX) ? GTS_URI_PREFIX.length : 0
-            const isValid = isGtsId(id)
-            // Also accept wildcard patterns (e.g. "gts.*") using gts-ts validation
-            const isWildcardPattern = !isValid && isGtsPattern(id)
-            const urlPrefixIssue = checkGtsUriPrefix(fieldName, rawValue)
-
-            references.push({
-              id,
-              rawValue,
-              uriPrefixLength,
-              fieldName,
-              range,
-              sourcePath,
-              isValid: isValid || isWildcardPattern,
-              isPattern: isWildcardPattern,
-              urlPrefixIssue
-            })
+            // String literals are always double-quoted in JSON; content starts after the quote.
+            references.push(this.buildGtsIdReference(value, fieldName, sourcePath, range, offset + 1))
           }
         }
       })
@@ -624,16 +612,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       const parts = parseGtsIdParts(ref.id)
 
       // Calculate the offset of the string value (excluding quotes)
-      const text = document.getText()
-      const refOffset = document.offsetAt(ref.range.start)
-
-      // Find the actual start of the GTS ID (after the opening quote and any
-      // gts:// URI prefix).
-      let gtsStartOffset = refOffset
-      if (text[refOffset] === '"') {
-        gtsStartOffset = refOffset + 1
-      }
-      gtsStartOffset += ref.uriPrefixLength
+      const gtsStartOffset = ref.contentOffset + ref.uriPrefixLength
 
       let currentOffset = gtsStartOffset
       let hasMissingAncestor = false
@@ -652,24 +631,10 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
         if (entity && entity.file) {
-          // Create a document link
-          const link = new vscode.DocumentLink(partRange)
-
-          // Find the line number where the entity is defined
-          const lineNumber = findEntityLineInFile(entity.file.path, entityIdToLookup)
-
-          // Create a command URI that opens the file at the specific line
-          const uri = vscode.Uri.parse(
-            `command:vscode.open?${encodeURIComponent(JSON.stringify([
-              vscode.Uri.file(entity.file.path),
-              { selection: new vscode.Range(lineNumber, 0, lineNumber, 0) }
-            ]))}`
-          )
-
-          link.target = uri
-          // Don't set tooltip - we provide rich hover via HoverProvider instead
-
-          links.push(link)
+          // The target (which needs the definition line) is filled in by
+          // resolveDocumentLink, only for a link that is actually followed.
+          // No tooltip: the HoverProvider supplies a rich hover instead.
+          links.push(new GtsDefinitionLink(partRange, entityIdToLookup))
         } else if (!entity) {
           hasMissingAncestor = true
         }
@@ -679,6 +644,21 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     }
 
     return links
+  }
+
+  /** Fill in a definition link's target (file + line) when the link is used. */
+  async resolveDocumentLink(link: vscode.DocumentLink): Promise<vscode.DocumentLink> {
+    if (!(link instanceof GtsDefinitionLink) || !this.registry) return link
+    const entity = this.registry.jsonSchemas.get(link.entityId) || this.registry.jsonObjs.get(link.entityId)
+    if (!entity?.file) return link
+    const lineNumber = await findDefinitionLine(entity)
+    link.target = vscode.Uri.parse(
+      `command:vscode.open?${encodeURIComponent(JSON.stringify([
+        vscode.Uri.file(entity.file.path),
+        { selection: new vscode.Range(lineNumber, 0, lineNumber, 0) }
+      ]))}`
+    )
+    return link
   }
 
   /**
@@ -748,12 +728,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const gtsId = matchedRef.id
 
     // Calculate the offset within the string value (excluding quotes)
-    const text = document.getText()
-    const refOffset = document.offsetAt(matchedRef.range.start)
-    let gtsStartOffset = refOffset
-    if (text[refOffset] === '"') {
-      gtsStartOffset = refOffset + 1
-    }
+    const gtsStartOffset = matchedRef.contentOffset
 
     // Create hover content
     const markdown = new vscode.MarkdownString()
@@ -965,7 +940,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     }
 
     // Add file path as a clickable link
-    const lineNumber = findEntityLineInFile(entity.file.path, entityIdToLookup)
+    const lineNumber = await findDefinitionLine(entity)
     const fileUri = vscode.Uri.file(entity.file.path).with({
       fragment: `L${lineNumber + 1}`
     })

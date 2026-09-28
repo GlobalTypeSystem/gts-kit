@@ -185,6 +185,21 @@ export class JsonRegistry {
   // invalidateFile / reset). See buildDependencyGraph() for the edge model.
   private depGraph: DependencyGraph | null = null
 
+  // Bumped on every change to the indexed content (index/invalidate/reset).
+  // Validation results and compiled validators are only reused within one
+  // generation, because an entity's result depends on the rest of the registry
+  // ($ref targets, parent schemas, referenced ids).
+  private contentGeneration = 0
+  // Per-entity validation result for the current generation. Shared by
+  // concurrent callers, and lets a pass validate each entity once instead of
+  // re-validating the whole parent chain for every derived schema.
+  private validationMemo = new WeakMap<JsonEntity, { generation: number; result: Promise<ValidationResult> }>()
+  // Compiled Ajv validators for instance validation, keyed by the (winning)
+  // schema's content object. Each gets its own Ajv instance, exactly as before,
+  // but is compiled once per generation instead of once per instance.
+  private instanceValidators: { generation: number; byContent: Map<object, Promise<ValidateFunction>> } =
+    { generation: -1, byContent: new Map() }
+
   constructor() {
     this.jsonObjs = new Map<string, JsonObj>()
     this.jsonSchemas = new Map<string, JsonSchema>()
@@ -208,6 +223,7 @@ export class JsonRegistry {
     this.defaultFilePath = null
     this.invalidateGtsStore()
     this.depGraph = null
+    this.contentGeneration++
   }
 
   /** Drop the cached gts-ts store so it is rebuilt from current schemas on next use. */
@@ -257,6 +273,7 @@ export class JsonRegistry {
     // reverse-dependency graph (both are rebuilt lazily on next use).
     this.invalidateGtsStore()
     this.depGraph = null
+    this.contentGeneration++
     if (this.jsonFiles.has(path)) {
       this.jsonFiles.delete(path)
     }
@@ -628,7 +645,42 @@ export class JsonRegistry {
    * in interleaved order, duplicating or dropping errors.
    */
   async validateEntity(entity: JsonEntity): Promise<void> {
-    entity.validation = await this.computeEntityValidation(entity)
+    const generation = this.contentGeneration
+    let memo = this.validationMemo.get(entity)
+    if (!memo || memo.generation !== generation) {
+      const result = this.computeEntityValidation(entity)
+      memo = { generation, result }
+      this.validationMemo.set(entity, memo)
+      // Don't cache a failure: let the next call retry.
+      const current = memo
+      result.catch(() => { if (this.validationMemo.get(entity) === current) this.validationMemo.delete(entity) })
+    }
+    const validation = await memo.result
+    // A newer computation (registry changed meanwhile) owns the published result.
+    if (this.validationMemo.get(entity) === memo) entity.validation = validation
+  }
+
+  /**
+   * Compiled validator for instance validation against `schemaContent`, reused
+   * across instances within the current content generation.
+   */
+  private getInstanceValidator(schemaContent: object): Promise<ValidateFunction> {
+    if (this.instanceValidators.generation !== this.contentGeneration) {
+      this.instanceValidators = { generation: this.contentGeneration, byContent: new Map() }
+    }
+    const cache = this.instanceValidators.byContent
+    let validator = cache.get(schemaContent)
+    if (!validator) {
+      // Strip `x-gts-ref` first (mirroring gts-ts's normalizeSchema) so Ajv never
+      // sees the unknown keyword and, crucially, so `x-gts-ref`-only combinator
+      // branches don't collapse into always-true schemas and make e.g.
+      // `oneOf: [{x-gts-ref}, {x-gts-ref}]` fail. The `x-gts-ref` assertions
+      // themselves are enforced by XGtsRefValidator.
+      validator = this.createAjvInstance().compileAsync(stripXGtsRefForAjv(schemaContent))
+      cache.set(schemaContent, validator)
+      validator.catch(() => { if (cache.get(schemaContent) === validator) cache.delete(schemaContent) })
+    }
+    return validator
   }
 
   private async computeEntityValidation(entity: JsonEntity): Promise<ValidationResult> {
@@ -896,15 +948,8 @@ export class JsonRegistry {
       }
 
       try {
-        const ajv = this.createAjvInstance()
-
-        // Compile the schema with async $ref resolution. Strip `x-gts-ref`
-        // first (mirroring gts-ts's normalizeSchema) so Ajv never sees the
-        // unknown keyword and, crucially, so `x-gts-ref`-only combinator
-        // branches don't collapse into always-true schemas and make e.g.
-        // `oneOf: [{x-gts-ref}, {x-gts-ref}]` fail. The `x-gts-ref` assertions
-        // themselves are enforced by XGtsRefValidator below.
-        const validate = await ajv.compileAsync(stripXGtsRefForAjv(schema.content))
+        // Compiled with async $ref resolution, once per schema per generation.
+        const validate = await this.getInstanceValidator(schema.content)
 
         const valid = validate(entity.content) as boolean
 
@@ -1069,6 +1114,16 @@ export class JsonRegistry {
         type: 'string',
         validate: (value: string) => matchesFormat(fast, value) && matchesFormat(full, value),
       })
+    }
+
+    // GTS id formats emitted by schema generators (e.g. gts-rust) as annotations
+    // next to an `x-gts-ref` that does the actual checking. Registered as
+    // accept-all — exactly how Ajv treated them before (ignored as unknown) —
+    // so each compile no longer logs an "unknown format" warning.
+    // Same for the sized-integer formats Rust's schemars emits (int32/int64 are
+    // already provided by ajv-formats).
+    for (const name of ['gts-instance-id', 'gts-type-id', 'int8', 'int16', 'uint', 'uint8', 'uint16', 'uint32', 'uint64']) {
+      ajv.addFormat(name, true)
     }
 
     // Add custom schema loader that resolves GTS IDs from the registry

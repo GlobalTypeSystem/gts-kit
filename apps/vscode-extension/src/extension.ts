@@ -1,7 +1,7 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
 import * as fs from 'fs'
-import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
+import { parseGtsFileContent, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
@@ -282,7 +282,6 @@ async function postRegistryToViewer(refreshFilePath: string | null | undefined):
         ? activeDoc.uri.fsPath
         : null
     }
-    console.log('[GTS Extension] postRegistryToViewer: selectedFilePath=', selectedFilePath)
 
     const registry = getRegistry()
     // Every indexed file: files holding GTS entities, plus files that failed to
@@ -298,19 +297,16 @@ async function postRegistryToViewer(refreshFilePath: string | null | undefined):
     // Send scan result with default file path so the webview can compute initial selection
     panel.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
 
-    // The viewer needs full Ajv validation results for every entity. This is the
-    // only consumer that pays that cost, and only while the panel is open.
-    try {
-      const vreg = new JsonRegistry()
-      await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
-      const objs: ObjValidationDto[] = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-      const schemas: EntityValidationDto[] = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-      const invalidFiles: InvalidFileValidationDto[] = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
-      const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
-      panel.webview.postMessage({ type: 'gts-validation-result', detail: payload })
-    } catch (ve: any) {
-      panel.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
-    }
+    // Full validation results for the viewer, taken from the shared registry.
+    // They are already current: the scan's workspace pass validated everything,
+    // and edits re-validate the edited file and its dependents before the viewer
+    // is refreshed (see handleFileChange). The viewer used to build a second
+    // registry and re-run Ajv over the whole workspace on every debounced edit.
+    const objs: ObjValidationDto[] = registry ? Array.from(registry.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation })) : []
+    const schemas: EntityValidationDto[] = registry ? Array.from(registry.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation })) : []
+    const invalidFiles: InvalidFileValidationDto[] = registry ? Array.from(registry.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation })) : []
+    const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
+    panel.webview.postMessage({ type: 'gts-validation-result', detail: payload })
 
     // After scan + validation updates are delivered, instruct the webview to refresh diagrams for the updated file
     if (refreshFilePath) {
@@ -557,9 +553,6 @@ export async function activate(context: vscode.ExtensionContext) {
       handleFileChange(event.document, 500)
     })
   )
-
-  // Show welcome message
-  vscode.window.showInformationMessage('GTS Viewer is ready! Use "GTS: Open Viewer" to start.')
 }
 
 /** Paths of GTS-candidate files currently open in the editor (active first). */
@@ -590,30 +583,45 @@ function collectOpenGtsPaths(): string[] {
 async function readGtsCandidateFiles(
   uris: vscode.Uri[]
 ): Promise<Array<{ path: string; name: string; content: any }>> {
-  const files: Array<{ path: string; name: string; content: any }> = []
-  for (const uri of uris) {
+  // Only real files: a git:/ quick-diff document shares the fsPath but holds HEAD content.
+  const openDocs = new Map(vscode.workspace.textDocuments.filter(d => d.uri.scheme === 'file').map(d => [d.uri.fsPath, d]))
+  const results = await mapWithConcurrency(uris, FILE_READ_CONCURRENCY, async uri => {
     try {
-      const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === uri.fsPath)
-      let text: string
-      if (openDoc) {
-        text = openDoc.getText()
-      } else {
-        const data = await vscode.workspace.fs.readFile(uri)
-        text = Buffer.from(data).toString('utf8')
-      }
+      const openDoc = openDocs.get(uri.fsPath)
+      const text = openDoc ? openDoc.getText() : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')
       // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
       // Check for both "gts." (canonical form) and "gts://" (URI form) so that
       // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
-      if (!mayContainGts(text)) continue
+      if (!mayContainGts(text)) return null
       const name = path.basename(uri.fsPath)
       let content: any
       try { content = parseGtsFileContent(name, text) } catch { content = text }
-      files.push({ path: uri.fsPath, name, content })
-    } catch (e) {
-      // Unreadable file — skip.
+      return { path: uri.fsPath, name, content }
+    } catch {
+      return null // Unreadable file — skip.
+    }
+  })
+  // Results keep input order, so indexing order (and thus which definition of a
+  // duplicated id wins) is the same as with sequential reads.
+  return results.filter((f): f is { path: string; name: string; content: any } => f !== null)
+}
+
+// Files read concurrently during a scan. Sequential reads left most of the scan
+// waiting on I/O one file at a time.
+const FILE_READ_CONCURRENCY = 32
+
+/** Map over `items` with at most `limit` operations in flight; results keep input order. */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i])
     }
   }
-  return files
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
 }
 
 /** Re-validate all open GTS documents against the current registry. */
@@ -772,14 +780,10 @@ export async function deactivate() {
 // file B within the debounce window cancelled file A's pending validation and
 // dependents revalidation, leaving A's markers stale.
 const changeTimers = new Map<string, NodeJS.Timeout>()
-// Separate debounce for pushing the (whole) registry to an open viewer.
-let viewerRefreshTimer: NodeJS.Timeout | null = null
 
 function clearChangeTimers(): void {
   for (const timer of changeTimers.values()) clearTimeout(timer)
   changeTimers.clear()
-  if (viewerRefreshTimer) clearTimeout(viewerRefreshTimer)
-  viewerRefreshTimer = null
 }
 
 function isGtsScanPath(fsPath: string): boolean {
@@ -920,7 +924,7 @@ async function indexFolder(uri: vscode.Uri): Promise<void> {
   const ignoreGlobs = workspaceFolder ? (await getWorkspaceIgnore()).get(workspaceFolder.uri.fsPath)?.excludeGlobs || [] : []
   const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(uri, GTS_SCAN_GLOB), combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs))
   // onDiskFileChanged applies the ignore rules and skips files open in an editor.
-  for (const fileUri of uris) await onDiskFileChanged(fileUri)
+  await mapWithConcurrency(uris, FILE_READ_CONCURRENCY, fileUri => onDiskFileChanged(fileUri))
 }
 
 // Folders reported as created, batched so a burst (git checkout, unzip) scans
@@ -1007,8 +1011,9 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
     gtsLinkProvider.updateDecorations(editor)
   }
 
-  // Debounced + heavier: validate just this document and its dependents, and
-  // (only when the viewer panel is open) push the updated registry to it.
+  // Debounced + heavier: validate just this document and its dependents, then
+  // (only when the viewer panel is open) push the updated registry to it, so
+  // the viewer gets results that already reflect this edit.
   const pending = changeTimers.get(fsPath)
   if (pending) clearTimeout(pending)
   changeTimers.set(fsPath, setTimeout(() => {
@@ -1021,15 +1026,9 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
       // types, $ref/allOf composers, and GTS-id referrers) so their markers
       // reflect the edit, not just this doc.
       await revalidateDependents(fsPath, previousIds)
+      if (viewerPanel) await scanAndPost(fsPath)
     })()
   }, delayMsec))
-  if (viewerPanel) {
-    if (viewerRefreshTimer) clearTimeout(viewerRefreshTimer)
-    viewerRefreshTimer = setTimeout(() => {
-      viewerRefreshTimer = null
-      void scanAndPost(fsPath)
-    }, delayMsec)
-  }
 }
 
 /** Root of the workspace folder that holds the target entity's file (first folder if unknown). */

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
 import { getRegistry, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
+import { countPublishedProblems } from './validation'
 
 /**
  * Left-sidebar file browser for GTS: shows every discovered file that holds at
@@ -116,19 +117,6 @@ function hasGtsWarnings(uri: vscode.Uri): boolean {
   return gtsDiagnosticsOf(uri).some(d => d.severity === vscode.DiagnosticSeverity.Warning)
 }
 
-/** GTS errors and warnings currently reported across the workspace. */
-function countGtsProblems(): { errors: number; warnings: number } {
-  const counts = { errors: 0, warnings: 0 }
-  for (const [, diagnostics] of vscode.languages.getDiagnostics()) {
-    for (const d of diagnostics) {
-      if (d.source !== 'GTS') continue
-      if (d.severity === vscode.DiagnosticSeverity.Error) counts.errors++
-      else if (d.severity === vscode.DiagnosticSeverity.Warning) counts.warnings++
-    }
-  }
-  return counts
-}
-
 /** Collect every file path under an element (a single file, or all files under a folder subtree). */
 function collectFilePaths(element: GtsTreeElement, out: string[]): void {
   if (element.kind === 'file') {
@@ -162,6 +150,11 @@ export class GtsFileTreeProvider
    * content edit must not rebuild the tree. Returns the URIs that were added or
    * removed so the caller can refresh just those decorations.
    */
+  /** True if the tree currently lists this file. */
+  lists(fsPath: string): boolean {
+    return this.knownPaths.has(fsPath)
+  }
+
   refresh(): vscode.Uri[] {
     const paths = getDiscoveredFilePaths()
     const nextSet = new Set(paths)
@@ -260,7 +253,7 @@ export interface GtsExplorer {
 
 /** Update the small rounded problem-count badge shown next to the view title. */
 function updateBadge(treeView: vscode.TreeView<GtsTreeElement>): void {
-  const { errors, warnings } = countGtsProblems()
+  const { errors, warnings } = countPublishedProblems()
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
   treeView.badge = errors + warnings > 0
     ? { value: errors + warnings, tooltip: `GTS: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}` }
@@ -291,14 +284,31 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
       }
     }),
     // Diagnostics (and therefore per-file error state and the problem-count
-    // badge) change independently of the file list — repaint whenever a URI's
-    // diagnostics changed.
+    // badge) change independently of the file list. This event fires for every
+    // diagnostics change of every extension (e.g. the TypeScript server on each
+    // keystroke), so only GTS files are repainted, and the tree/badge work is
+    // debounced.
     vscode.languages.onDidChangeDiagnostics(event => {
-      const changed = treeProvider.refresh()
-      decorationProvider.refresh([...event.uris, ...changed] as vscode.Uri[])
-      updateBadge(treeView)
-    })
+      const relevant = event.uris.filter(uri =>
+        uri.scheme === 'file' && (isDiscoveredGtsFile(uri.fsPath) || treeProvider.lists(uri.fsPath)))
+      if (relevant.length === 0) return
+      decorationProvider.refresh(relevant)
+      scheduleTreeUpdate()
+    }),
+    new vscode.Disposable(() => { if (updateTimer) clearTimeout(updateTimer) })
   )
+
+  // Coalesces tree reconciliation + badge recount across bursts of changes.
+  let updateTimer: NodeJS.Timeout | null = null
+  function scheduleTreeUpdate(): void {
+    if (updateTimer) return
+    updateTimer = setTimeout(() => {
+      updateTimer = null
+      const changed = treeProvider.refresh()
+      if (changed.length > 0) decorationProvider.refresh(changed)
+      updateBadge(treeView)
+    }, 150)
+  }
 
   treeProvider.refresh()
   decorationProvider.refresh()
@@ -316,9 +326,10 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
       // Only the added/removed files need a decoration repaint; error-state
       // changes on existing files are repainted by the onDidChangeDiagnostics
       // handler above. A global decoration refresh here would flicker every file.
+      // Called on every keystroke in a GTS file, so the badge recount is debounced.
       const changed = treeProvider.refresh()
       if (changed.length > 0) decorationProvider.refresh(changed)
-      updateBadge(treeView)
+      scheduleTreeUpdate()
     }
   }
 }

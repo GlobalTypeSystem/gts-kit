@@ -32,7 +32,12 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "workspaceContains:**/gts.*.json",
+    "workspaceContains:**/gts.*.jsonc",
+    "workspaceContains:**/gts.*.yaml",
+    "workspaceContains:**/gts.*.yml",
+    "workspaceContains:**/*.gts",
+    "onLanguage:gts"
   ],
   "contributes": {
     "languages": [
