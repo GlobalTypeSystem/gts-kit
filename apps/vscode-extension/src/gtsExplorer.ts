@@ -100,9 +100,9 @@ function gtsDiagnosticsOf(uri: vscode.Uri): vscode.Diagnostic[] {
   return vscode.languages.getDiagnostics(uri).filter(d => d.source === 'GTS')
 }
 
-/** True if the given file currently has a GTS error (warnings such as duplicate ids don't count). */
+/** True if the given file currently has a GTS validation error. */
 export function hasGtsErrors(uri: vscode.Uri): boolean {
-  if (gtsDiagnosticsOf(uri).some(d => d.severity === vscode.DiagnosticSeverity.Error)) return true
+  if (gtsDiagnosticsOf(uri).length > 0) return true
   const registry = getRegistry()
   if (!registry) return false
   const fsPath = uri.fsPath
@@ -110,11 +110,6 @@ export function hasGtsErrors(uri: vscode.Uri): boolean {
   if (getMalformedIds(fsPath).length > 0) return true
   const entities = [...(registry.jsonFileSchemas.get(fsPath) || []), ...(registry.jsonFileObjs.get(fsPath) || [])]
   return entities.some(entity => Boolean(entity.validation?.errors.length))
-}
-
-/** True if the given file has GTS warnings (e.g. a duplicate id). */
-function hasGtsWarnings(uri: vscode.Uri): boolean {
-  return gtsDiagnosticsOf(uri).some(d => d.severity === vscode.DiagnosticSeverity.Warning)
 }
 
 /** Collect every file path under an element (a single file, or all files under a folder subtree). */
@@ -182,7 +177,7 @@ export class GtsFileTreeProvider
       }
       item.tooltip = hasGtsErrors(item.resourceUri)
         ? 'Has GTS validation errors'
-        : hasGtsWarnings(item.resourceUri) ? 'Has GTS warnings' : 'No GTS problems'
+        : 'No GTS validation errors'
       return item
     }
 
@@ -217,10 +212,10 @@ export class GtsFileTreeProvider
 }
 
 /**
- * Colors every GTS file (in the sidebar tree, the OS-style Explorer, and open
- * editor tabs) red when it has GTS errors, yellow when it only has warnings
- * (e.g. a duplicate id), and green otherwise. Driven by the same registry + diagnostics the rest of the extension
- * uses, so the color always matches the squiggles in the open document.
+ * Colors every valid GTS file green (in the sidebar tree, the OS-style Explorer
+ * and editor tabs). Files with GTS problems get no decoration of their own:
+ * VS Code's Problems decoration colors them with its standard error color and
+ * count, so every GTS problem looks the same everywhere.
  */
 export class GtsFileDecorationProvider implements vscode.FileDecorationProvider {
   private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>()
@@ -233,7 +228,7 @@ export class GtsFileDecorationProvider implements vscode.FileDecorationProvider 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     if (!isDiscoveredGtsFile(uri.fsPath)) return undefined
 
-    if (hasGtsErrors(uri) || hasGtsWarnings(uri)) return undefined
+    if (hasGtsErrors(uri)) return undefined
     return new vscode.FileDecoration(undefined, 'GTS: file is valid', new vscode.ThemeColor('charts.green'))
   }
 }
@@ -248,10 +243,9 @@ export interface GtsExplorer {
 
 /** Update the small rounded problem-count badge shown next to the view title. */
 function updateBadge(treeView: vscode.TreeView<GtsTreeElement>): void {
-  const { errors, warnings } = countPublishedProblems()
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-  treeView.badge = errors + warnings > 0
-    ? { value: errors + warnings, tooltip: `GTS: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}` }
+  const count = countPublishedProblems()
+  treeView.badge = count > 0
+    ? { value: count, tooltip: `${count} GTS problem${count === 1 ? '' : 's'}` }
     : undefined
 }
 

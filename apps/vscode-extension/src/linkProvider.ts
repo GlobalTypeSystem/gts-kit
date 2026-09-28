@@ -3,7 +3,7 @@ import { JsonRegistry, GTS_COLORS, GTS_URI_PREFIX, parseGtsIdParts, analyzeGtsId
 import type { GtsPrefixIssue, JsonEntity } from '@gts/shared'
 import * as fs from 'fs'
 import { getRegistry, getRegistryRevision } from './registryStore'
-import { getDocumentValidationErrors } from './validation'
+import { getDocumentValidationErrors, entityErrorsInDocument } from './validation'
 import * as jsonc from 'jsonc-parser'
 import * as YAML from 'yaml'
 
@@ -297,8 +297,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider<vscode.Docum
 
     const docErrors = [
       ...getDocumentValidationErrors(document.uri),
-      ...(this.registry.jsonFileSchemas.get(filePath) || []).flatMap(e => e.validation?.errors || []),
-      ...(this.registry.jsonFileObjs.get(filePath) || []).flatMap(e => e.validation?.errors || []),
+      // Document-relative paths, so list-file errors colour the right item's field.
+      ...(this.registry.jsonFileSchemas.get(filePath) || []).flatMap(entityErrorsInDocument),
+      ...(this.registry.jsonFileObjs.get(filePath) || []).flatMap(entityErrorsInDocument),
       ...(this.registry.invalidFiles.get(filePath)?.validation?.errors || [])
     ]
 
