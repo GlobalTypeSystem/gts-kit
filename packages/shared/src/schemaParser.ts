@@ -400,3 +400,36 @@ export function findSchemaPropertyPath(content: any, propPath: string): string |
 
   return walk(content, '')
 }
+
+/**
+ * Locate the JSON Pointer instancePath of the `x-gts-ref` keyword whose value
+ * equals `refValue` (any `gts://` prefix ignored), searching every position in
+ * the schema document. Used to anchor a "Referenced x-gts-ref entity '<id>' is
+ * invalid" diagnostic to the offending `x-gts-ref` node rather than the
+ * document root. Returns null when no matching `x-gts-ref` is present.
+ */
+export function findXGtsRefPath(content: any, refValue: string): string | null {
+  const target = normalizeGtsId(refValue)
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const res = walk(node[i], `${currentPath}/${i}`)
+        if (res) return res
+      }
+      return null
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const childPath = `${currentPath}/${key}`
+      if (key === 'x-gts-ref' && typeof value === 'string' && normalizeGtsId(value) === target) {
+        return childPath
+      }
+      const res = walk(value, childPath)
+      if (res) return res
+    }
+    return null
+  }
+
+  return walk(content, '')
+}

@@ -701,6 +701,42 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
+   * Turn a list of candidate suggestion ids into rendered markdown list items,
+   * skipping any that don't resolve to a real registry entity. Returning the
+   * concrete lines (rather than appending directly) lets callers decide whether
+   * to show the "Did you mean" header at all — it must never appear with no
+   * suggestions under it.
+   */
+  private buildSuggestionLines(
+    suggestions: string[],
+    document: vscode.TextDocument,
+    hoverRange: vscode.Range
+  ): string[] {
+    if (!this.registry) return []
+    const lines: string[] = []
+    for (const suggestion of suggestions) {
+      const suggestionEntity = this.registry.jsonSchemas.get(suggestion) || this.registry.jsonObjs.get(suggestion)
+      if (!suggestionEntity) continue
+      const entityType = suggestionEntity.isSchema ? '📘 Schema' : '📄 Instance'
+      // Serialize range as a plain object for the replace command.
+      const rangeData = {
+        start: { line: hoverRange.start.line, character: hoverRange.start.character },
+        end: { line: hoverRange.end.line, character: hoverRange.end.character }
+      }
+      const commandUri = vscode.Uri.parse(
+        `command:gts.replaceGtsId?${encodeURIComponent(JSON.stringify([
+          document.uri.toString(),
+          rangeData,
+          suggestion,
+          false  // includeQuotes - range already excludes quotes
+        ]))}`
+      )
+      lines.push(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
+    }
+    return lines
+  }
+
+  /**
    * Provide hover information for GTS IDs
    */
   async provideHover(
@@ -811,32 +847,15 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         ...Array.from(this.registry.jsonObjs.keys())
       ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
-      // Find similar entities
+      // Find similar entities that actually resolve to a registry entity, so
+      // the "Did you mean" header is only shown when there is at least one
+      // clickable suggestion to render underneath it.
       const suggestions = findSimilarEntityIds(gtsId, allEntityIds, 3)
+      const suggestionLines = this.buildSuggestionLines(suggestions, document, hoverRange)
 
-      if (suggestions.length > 0) {
+      if (suggestionLines.length > 0) {
         markdown.appendMarkdown(`**Did you mean:** (click to replace)\n\n`)
-        for (const suggestion of suggestions) {
-          const suggestionEntity = this.registry.jsonSchemas.get(suggestion) || this.registry.jsonObjs.get(suggestion)
-          if (suggestionEntity) {
-            const entityType = suggestionEntity.isSchema ? '📘 Schema' : '📄 Instance'
-            // Create command URI to replace the erroneous GTS ID
-            // Serialize range as plain object
-            const rangeData = {
-              start: { line: hoverRange.start.line, character: hoverRange.start.character },
-              end: { line: hoverRange.end.line, character: hoverRange.end.character }
-            }
-            const commandUri = vscode.Uri.parse(
-              `command:gts.replaceGtsId?${encodeURIComponent(JSON.stringify([
-                document.uri.toString(),
-                rangeData,
-                suggestion,
-                false  // includeQuotes - range already excludes quotes
-              ]))}`
-            )
-            markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
-          }
-        }
+        for (const line of suggestionLines) markdown.appendMarkdown(line)
       } else {
         markdown.appendMarkdown(`*No similar entities found in the registry.*`)
       }
@@ -908,10 +927,15 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       // Not found at all → fall through to the "GTS Entity Not Found" + suggestions block.
     }
 
-    // Look up the entity in the registry (only when the segment is not an error).
-    const entity = hoveredSeg && hoveredSeg.type === 'error'
-      ? undefined
-      : this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
+    // Look up the entity in the registry. A segment flagged 'error' by the
+    // analyzer can mean two different things: the entity is *absent*, or it
+    // *exists but failed GTS validation* (e.g. it references another invalid
+    // schema). We must not report an existing entity as "not found" — Cmd+Click
+    // resolves it via the same registry, so a "not found" hover would directly
+    // contradict the working link. Look it up unconditionally and let its
+    // *presence* (not its validity) decide between the "not found" block and the
+    // found hover; the invalid state is annotated on the found hover below.
+    const entity = this.registry.jsonSchemas.get(entityIdToLookup) || this.registry.jsonObjs.get(entityIdToLookup)
 
     if (!entity) {
       // Entity not found - show error with suggestions
@@ -924,32 +948,15 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         ...Array.from(this.registry.jsonObjs.keys())
       ].filter(id => isGtsId(id)) // Only suggest valid GTS IDs
 
-      // Find similar entities
+      // Find similar entities that actually resolve to a registry entity, so
+      // the "Did you mean" header is only shown when there is at least one
+      // clickable suggestion to render underneath it.
       const suggestions = findSimilarEntityIds(entityIdToLookup, allEntityIds, 3)
+      const suggestionLines = this.buildSuggestionLines(suggestions, document, hoverRange)
 
-      if (suggestions.length > 0) {
+      if (suggestionLines.length > 0) {
         markdown.appendMarkdown(`**Did you mean:** (click to replace)\n\n`)
-        for (const suggestion of suggestions) {
-          const suggestionEntity = this.registry.jsonSchemas.get(suggestion) || this.registry.jsonObjs.get(suggestion)
-          if (suggestionEntity) {
-            const entityType = suggestionEntity.isSchema ? '📘 Schema' : '📄 Instance'
-            // Create command URI to replace the erroneous GTS ID
-            // Serialize range as plain object
-            const rangeData = {
-              start: { line: hoverRange.start.line, character: hoverRange.start.character },
-              end: { line: hoverRange.end.line, character: hoverRange.end.character }
-            }
-            const commandUri = vscode.Uri.parse(
-              `command:gts.replaceGtsId?${encodeURIComponent(JSON.stringify([
-                document.uri.toString(),
-                rangeData,
-                suggestion,
-                false  // includeQuotes - range already excludes quotes
-              ]))}`
-            )
-            markdown.appendMarkdown(`- ${entityType}: [${escapeMarkdown(suggestion)}](${commandUri.toString()})\n`)
-          }
-        }
+        for (const line of suggestionLines) markdown.appendMarkdown(line)
       } else {
         markdown.appendMarkdown(`*No similar entities found in the registry.*`)
       }
@@ -963,6 +970,18 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     // Determine entity type
     const entityType = entity.isSchema ? 'Schema' : 'Instance'
+
+    // The analyzer flagged this segment as an error even though the entity
+    // exists → it is present but invalid. Surface that up front (with the
+    // underlying GTS validation error when known) instead of masquerading as
+    // "not found"; the definition link below still lets the user navigate to it.
+    if (hoveredSeg && hoveredSeg.type === 'error') {
+      markdown.appendMarkdown(`⚠️ GTS Entity Invalid\n\n`)
+      const firstError = entity.validation?.errors?.[0]
+      if (firstError?.message) {
+        markdown.appendMarkdown(`${escapeMarkdown(firstError.message)}\n\n`)
+      }
+    }
 
     // Add file path as a clickable link
     const lineNumber = findEntityLineInFile(entity.file.path, entityIdToLookup)

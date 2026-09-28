@@ -1,7 +1,7 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import { isYamlFileName } from './parse.js'
-import { findSchemaPropertyPath } from './schemaParser.js'
+import { findSchemaPropertyPath, findXGtsRefPath } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
 import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
@@ -722,13 +722,27 @@ export class JsonRegistry {
           for (const msg of rawMessages) {
             const propMatch = msg.match(/^Property '([^']+)'/)
             const propPath = propMatch ? propMatch[1] : null
-            const instancePath = propPath ? findSchemaPropertyPath(entity.content, propPath) : '/$id'
+            // A "Referenced x-gts-ref entity '<id>' is invalid: ..." message is
+            // caused by a specific `x-gts-ref` node, not by the schema's own
+            // `$id`; anchor it to that node so the squiggle lands on the ref
+            // (e.g. line with `"x-gts-ref": "<id>"`) rather than the document
+            // root. Everything else keeps the previous `$id` fallback.
+            const refMatch = propPath ? null : msg.match(/^Referenced x-gts-ref entity '([^']+)'/)
+            let instancePath: string | null = null
+            let params: Record<string, any> = {}
+            if (propPath) {
+              instancePath = findSchemaPropertyPath(entity.content, propPath)
+              params = { property: propPath }
+            } else if (refMatch) {
+              instancePath = findXGtsRefPath(entity.content, refMatch[1])
+              params = { refValue: refMatch[1] }
+            }
             entity.validation.errors.push({
               instancePath: instancePath || '/$id',
               schemaPath: '#',
               keyword: 'x-gts-schema',
               message: msg,
-              params: propPath ? { property: propPath } : {}
+              params
             })
           }
         }
