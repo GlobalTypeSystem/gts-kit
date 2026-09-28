@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as YAML from 'yaml'
 import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
+import type { JsonRegistry, JsonSchema, JsonObj } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
 import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
 import { isGtsCandidateFile } from './helpers'
@@ -673,6 +674,30 @@ async function drainWorkspaceValidation(): Promise<void> {
   }
 }
 
+type RegistryEntity = JsonSchema | JsonObj
+
+/**
+ * Every entity defined in every indexed file. Deliberately NOT the id-keyed
+ * `jsonSchemas`/`jsonObjs` maps: those hold one entity per id (last file
+ * indexed wins), so any entity whose id is also defined in another file (e.g.
+ * a copied test-examples folder) would never be validated and its file would
+ * show green until opened.
+ */
+function entitiesByFile(registry: JsonRegistry): RegistryEntity[] {
+  const entities: RegistryEntity[] = []
+  for (const list of registry.jsonFileSchemas.values()) entities.push(...list)
+  for (const list of registry.jsonFileObjs.values()) entities.push(...list)
+  return entities
+}
+
+/** False once the entity's file has been re-indexed (the entity object was replaced). */
+function isIndexedInItsFile(registry: JsonRegistry, entity: RegistryEntity): boolean {
+  const filePath = entity.file?.path
+  if (!filePath) return false
+  return (registry.jsonFileSchemas.get(filePath) || []).includes(entity as JsonSchema) ||
+    (registry.jsonFileObjs.get(filePath) || []).includes(entity as JsonObj)
+}
+
 /** One full validation pass. Returns false if it was superseded and must rerun. */
 async function runWorkspaceValidationPass(): Promise<boolean> {
   const registry = getRegistry()
@@ -689,13 +714,11 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
   const validated = new Set<object>()
   let sliceStart = Date.now()
   for (;;) {
-    const pending = [...registry.jsonSchemas.values(), ...registry.jsonObjs.values()]
-      .filter(entity => !validated.has(entity))
+    const pending = entitiesByFile(registry).filter(entity => !validated.has(entity))
     if (pending.length === 0) break
     for (const entity of pending) {
       validated.add(entity)
-      const isCurrent = registry.jsonSchemas.get(entity.id) === entity || registry.jsonObjs.get(entity.id) === entity
-      if (!isCurrent) continue
+      if (!isIndexedInItsFile(registry, entity)) continue
       await registry.validateEntity(entity)
       if (Date.now() - sliceStart >= WORKSPACE_VALIDATION_SLICE_MS) {
         await yieldToEventLoop()
@@ -734,7 +757,7 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
     for (const error of errors) addError(invalidFile.path, error)
   }
 
-  for (const entity of [...registry.jsonSchemas.values(), ...registry.jsonObjs.values()]) {
+  for (const entity of entitiesByFile(registry)) {
     if (!entity.file?.path) continue
     for (const error of entity.validation?.errors || []) addError(entity.file.path, error)
   }

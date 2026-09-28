@@ -212,20 +212,23 @@ function getNonce(): string {
   return text
 }
 
-async function scanAndPost(includeGlob: string = GTS_SCAN_GLOB, isInitialScan: boolean = false, refreshFilePath?: string | null, reset: boolean = false): Promise<void> {
-  await enqueueScan(async () => {
-    if (reset) await resetGtsStore()
-    pathsTouchedDuringScan = new Set()
-    try {
-      await scanAndPostPass(includeGlob, isInitialScan, refreshFilePath)
-    } finally {
-      pathsTouchedDuringScan = null
-    }
-  })
+/**
+ * Push the shared registry to the GTS Viewer webview. With `fullRescan` the
+ * workspace is first rescanned from disk (from an emptied store). Either way the
+ * viewer is fed from the same registry as the file tree, decorations and
+ * diagnostics, so they always show the same file set. (The viewer used to run
+ * its own fast-pass-only scan and then *replace* the shared registry with it,
+ * dropping every phase-2 file from the tree on each edit while it was open.)
+ */
+async function scanAndPost(refreshFilePath?: string | null, fullRescan: boolean = false): Promise<void> {
+  if (fullRescan) await performInitialScan(true)
+  // Queued behind any scan in flight, so the viewer never gets a partial registry.
+  await enqueueScan(() => postRegistryToViewer(refreshFilePath))
 }
 
-async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refreshFilePath: string | null | undefined): Promise<void> {
-  const hasViewer = viewerPanel !== null
+async function postRegistryToViewer(refreshFilePath: string | null | undefined): Promise<void> {
+  const panel = viewerPanel
+  if (!panel) return
 
   try {
     let selectedFilePath: string | null = null
@@ -239,125 +242,43 @@ async function scanAndPostPass(includeGlob: string, isInitialScan: boolean, refr
         ? activeDoc.uri.fsPath
         : null
     }
+    console.log('[GTS Extension] postRegistryToViewer: selectedFilePath=', selectedFilePath)
 
-    console.log('[GTS Extension] scanAndPost: selectedFilePath=', selectedFilePath)
-    const include = includeGlob
-    // Skip build-output/dependency dirs + gitignored paths; the substring filter
-    // below drops the remaining non-GTS files so we only parse files that mention
-    // GTS.
-    const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
-    const exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
-    const enumerated = await vscode.workspace.findFiles(include, exclude, 40000)
-    // A full (re)scan re-establishes the canonical physical-file set; collapse
-    // symlinked duplicates so the same GTS entity isn't scanned/listed twice.
-    realPathIndex.clear()
-    const uris = dedupeUrisByRealPath(enumerated)
-
-    const total = uris.length
-    const startTime = Date.now()
-    let progressShown = false
-
-    const files: Array<{ path: string; name: string; content: any }> = []
-    let processed = 0
-
-    for (const uri of uris) {
-      try {
-        // Belt-and-suspenders: skip anything gitignored the glob missed.
-        if (isUriIgnored(uri, ignoreMatcher)) {
-          continue
-        }
-        const data = await vscode.workspace.fs.readFile(uri)
-        const text = Buffer.from(data).toString('utf8')
-        // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
-        // Check for both "gts." (canonical form) and "gts://" (URI form) so that
-        // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
-        if (!mayContainGts(text)) {
-          continue
-        }
-        const name = path.basename(uri.fsPath)
-        try {
-          const content = parseGtsFileContent(name, text)
-          files.push({ path: uri.fsPath, name, content })
-        } catch (e) {
-          files.push({ path: uri.fsPath, name, content: text })
-        }
-      } catch (e) {
-      } finally {
-        processed++
-        const elapsed = Date.now() - startTime
-        if (hasViewer && !progressShown && elapsed > 500) {
-          progressShown = true
-          viewerPanel!.webview.postMessage({ type: 'gts-scan-started', detail: { total } })
-        }
-        if (hasViewer && progressShown && (processed % 50 === 0 || processed === total)) {
-          viewerPanel!.webview.postMessage({ type: 'gts-scan-progress', detail: { processed, total } })
-        }
-      }
-    }
-
-    // Update the shared, persistent, index-only registry (used by decorations,
-    // links, hovers and as validation resolution context). This is cheap.
-    const registry = await rebuildRegistry(files, DEFAULT_GTS_CONFIG)
-    await resyncPathsTouchedDuringScan(false)
-    if (selectedFilePath) {
+    const registry = getRegistry()
+    // Every indexed file: files holding GTS entities, plus files that failed to
+    // parse (their JsonFile keeps the raw text as content).
+    const files: Array<{ path: string; name: string; content: any }> = registry
+      ? [...registry.jsonFiles.values(), ...registry.invalidFiles.values()]
+          .map(f => ({ path: f.path, name: f.name, content: f.content }))
+      : []
+    if (registry && selectedFilePath) {
       (registry as any).setDefaultFile?.(selectedFilePath)
     }
-    gtsExplorer?.refresh()
 
     // Send scan result with default file path so the webview can compute initial selection
-    if (hasViewer) {
-      viewerPanel!.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
-    }
-    try { setLastScanFiles(files) } catch {}
-
-    // Refresh the link provider (repaint from the shared registry)
-    if (gtsLinkProvider) {
-      try {
-        await gtsLinkProvider.refresh()
-      } catch (e) {
-        console.error('[GTS] Error refreshing link provider:', e)
-      }
-    }
+    panel.webview.postMessage({ type: 'gts-scan-result', detail: { files, defaultFilePath: selectedFilePath } })
 
     // The viewer needs full Ajv validation results for every entity. This is the
     // only consumer that pays that cost, and only while the panel is open.
-    if (hasViewer) {
-      try {
-        const vreg = new JsonRegistry()
-        await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
-        const objs: ObjValidationDto[] = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
-        const schemas: EntityValidationDto[] = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
-        const invalidFiles: InvalidFileValidationDto[] = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
-        const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
-        viewerPanel!.webview.postMessage({ type: 'gts-validation-result', detail: payload })
-      } catch (ve: any) {
-        viewerPanel!.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
-      }
+    try {
+      const vreg = new JsonRegistry()
+      await vreg.ingestFiles(files, DEFAULT_GTS_CONFIG)
+      const objs: ObjValidationDto[] = Array.from(vreg.jsonObjs.values()).map(o => ({ id: o.id, listSequence: o.listSequence, filePath: o.file?.path, schemaId: o.schemaId, validation: o.validation }))
+      const schemas: EntityValidationDto[] = Array.from(vreg.jsonSchemas.values()).map(s => ({ id: s.id, filePath: s.file?.path, validation: s.validation }))
+      const invalidFiles: InvalidFileValidationDto[] = Array.from(vreg.invalidFiles.values()).map(f => ({ path: f.path, name: f.name, validation: f.validation }))
+      const payload: ValidationRelayPayload = { objs, schemas, invalidFiles }
+      panel.webview.postMessage({ type: 'gts-validation-result', detail: payload })
+    } catch (ve: any) {
+      panel.webview.postMessage({ type: 'gts-validation-error', detail: { error: ve?.message || String(ve) } })
     }
 
     // After scan + validation updates are delivered, instruct the webview to refresh diagrams for the updated file
-    if (hasViewer && refreshFilePath) {
-      try {
-        viewerPanel!.webview.postMessage({ type: 'gts-refresh-layout', detail: { filePath: refreshFilePath } })
-      } catch {}
+    if (refreshFilePath) {
+      panel.webview.postMessage({ type: 'gts-refresh-layout', detail: { filePath: refreshFilePath } })
     }
-
-    // Publish workspace-wide file diagnostics for unopened files, then refresh
-    // open-document diagnostics with precise ranges.
-    await validateWorkspaceInBackground()
-
-    // Re-validate all open documents now that we have the full registry
-    console.log('[GTS] Re-validating all open documents...')
-    vscode.workspace.textDocuments.forEach(doc => {
-      if (isGtsCandidateFile(doc)) {
-        void validateOpenDocument(doc)
-      }
-    })
   } catch (error: any) {
-    console.error('[GTS] Viewer scan failed:', error)
-    if (hasViewer) {
-      viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
-    }
+    console.error('[GTS] Posting registry to viewer failed:', error)
+    panel.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
   }
 }
 
@@ -420,7 +341,29 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     gtsWatcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
     gtsWatcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
-    gtsWatcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+    gtsWatcher.onDidDelete(uri => { onDiskPathRemoved(uri) })
+  )
+
+  // Folder-level on-disk changes (rm -rf, mv, git checkout of a directory).
+  // VS Code reports a folder delete/move as ONE event for the folder itself —
+  // never for the files inside — and the GTS glob above never matches a folder,
+  // so without this every file under a removed folder stays indexed (ghost
+  // entries in the tree and in reference resolution) until a full refresh.
+  const folderWatcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false)
+  context.subscriptions.push(
+    folderWatcher,
+    folderWatcher.onDidCreate(uri => {
+      if (isGtsScanPath(uri.fsPath)) return // file: handled by gtsWatcher
+      if (isIgnoredGtsPath(uri.fsPath + path.sep) || isUriIgnored(uri)) return
+      void (async () => {
+        if (await isDirectory(uri)) scheduleFolderScan(uri.fsPath)
+      })()
+    }),
+    folderWatcher.onDidDelete(uri => {
+      if (isGtsScanPath(uri.fsPath)) return // file: handled by gtsWatcher
+      if (isIgnoredGtsPath(uri.fsPath + path.sep)) return
+      onDiskPathRemoved(uri)
+    })
   )
 
   // The recursive workspace watcher above does NOT follow directory symlinks
@@ -445,30 +388,35 @@ export async function activate(context: vscode.ExtensionContext) {
         }
       }
     }),
+    // In-IDE deletes; a deleted folder arrives as a single folder URI.
     vscode.workspace.onDidDeleteFiles(event => {
-      for (const uri of event.files) {
-        if (isGtsScanPath(uri.fsPath)) onDiskFileDeleted(uri)
-      }
+      for (const uri of event.files) onDiskPathRemoved(uri)
     }),
     // Closing a document discards unsaved edits (validation.ts reindexes it from
     // disk). If a scan read the old buffer, re-sync the file after it commits.
     vscode.workspace.onDidCloseTextDocument(doc => {
-      if (isGtsCandidateFile(doc)) pathsTouchedDuringScan?.add(doc.uri.fsPath)
+      if (!isGtsCandidateFile(doc)) return
+      pathsTouchedDuringScan?.add(doc.uri.fsPath)
+      // Link-format markers are computed from the live buffer; drop them so a
+      // closed file doesn't keep stale ones.
+      gtsLinkProvider?.clearDocument(doc.uri)
     })
   )
 
   // Handle in-IDE renames explicitly: the watcher's create event is skipped for
   // files open in the editor, and no text-change event fires on rename, so the
-  // new path would otherwise stay unindexed. (External renames arrive as
-  // delete+create through the watcher and are handled above.)
+  // new path would otherwise stay unindexed. A renamed/moved folder arrives as a
+  // single folder URI pair, so everything under it is moved over. (External
+  // renames arrive as delete+create through the watchers and are handled above.)
   context.subscriptions.push(
     vscode.workspace.onDidRenameFiles(async event => {
       for (const { oldUri, newUri } of event.files) {
-        beginFileMutation(oldUri.fsPath)
-        removeFileFromRegistry(oldUri.fsPath)
-        forgetIndexedPath(oldUri.fsPath)
+        dropIndexedPath(oldUri.fsPath)
         if (isIgnoredGtsPath(newUri.fsPath)) continue
-        if (!isGtsScanPath(newUri.fsPath)) continue
+        if (!isGtsScanPath(newUri.fsPath)) {
+          if (await isDirectory(newUri)) await indexFolder(newUri)
+          continue
+        }
         const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === newUri.fsPath)
         if (openDoc) {
           handleFileChange(openDoc, 0)
@@ -476,6 +424,8 @@ export async function activate(context: vscode.ExtensionContext) {
           await onDiskFileChanged(newUri)
         }
       }
+      // Repaint even when nothing was re-indexed (e.g. renamed to a non-GTS name).
+      gtsExplorer?.refresh()
       scheduleExternalChangeSettle()
     })
   )
@@ -652,9 +602,8 @@ function revalidateOpenDocs(): void {
  */
 async function resetGtsStore(): Promise<void> {
   fileMutationRevisions.clear()
-  if (changeTimer) clearTimeout(changeTimer)
+  clearChangeTimers()
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
-  changeTimer = null
   externalChangeTimer = null
   preEditIdsByPath.clear()
   realPathIndex.clear()
@@ -791,8 +740,19 @@ export async function deactivate() {
   layoutStorage = null
 }
 
-// Debounced rescan on change to auto-refresh layout view while typing
-let changeTimer: NodeJS.Timeout | null = null
+// Per-file debounce timers for editor changes. One shared timer meant editing
+// file B within the debounce window cancelled file A's pending validation and
+// dependents revalidation, leaving A's markers stale.
+const changeTimers = new Map<string, NodeJS.Timeout>()
+// Separate debounce for pushing the (whole) registry to an open viewer.
+let viewerRefreshTimer: NodeJS.Timeout | null = null
+
+function clearChangeTimers(): void {
+  for (const timer of changeTimers.values()) clearTimeout(timer)
+  changeTimers.clear()
+  if (viewerRefreshTimer) clearTimeout(viewerRefreshTimer)
+  viewerRefreshTimer = null
+}
 
 function isGtsScanPath(fsPath: string): boolean {
   return /\.(json|jsonc|gts|ya?ml)$/i.test(fsPath)
@@ -838,7 +798,7 @@ async function watchSymlinkedDirs(context: vscode.ExtensionContext): Promise<voi
         watcher,
         watcher.onDidCreate(uri => { void onDiskFileChanged(uri) }),
         watcher.onDidChange(uri => { void onDiskFileChanged(uri) }),
-        watcher.onDidDelete(uri => { onDiskFileDeleted(uri) })
+        watcher.onDidDelete(uri => { onDiskPathRemoved(uri) })
       )
       console.log('[GTS] Watching symlinked directory:', linkUri.fsPath)
     }
@@ -887,14 +847,73 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   scheduleExternalChangeSettle()
 }
 
-/** A GTS file was deleted/renamed-away on disk. Drop its entities from the registry. */
-function onDiskFileDeleted(uri: vscode.Uri): void {
-  const fsPath = uri.fsPath
-  beginFileMutation(fsPath)
-  removeFileFromRegistry(fsPath)
-  forgetIndexedPath(fsPath)
+/** Indexed file paths (GTS files and unparsable ones) strictly under `dirPath`. */
+function indexedPathsUnder(dirPath: string): string[] {
+  const registry = getRegistry()
+  if (!registry) return []
+  const prefix = dirPath.endsWith(path.sep) ? dirPath : dirPath + path.sep
+  const out: string[] = []
+  for (const p of [...registry.jsonFiles.keys(), ...registry.invalidFiles.keys()]) {
+    if (p.startsWith(prefix)) out.push(p)
+  }
+  return out
+}
+
+/**
+ * Drop a removed path from the registry: the file itself, or — when it was a
+ * folder — every indexed file under it. Returns whether anything was indexed.
+ */
+function dropIndexedPath(fsPath: string): boolean {
+  // A GTS-named path is always marked, even if not indexed yet, so an in-flight
+  // onDiskFileChanged read for it can't resurrect it.
+  const targets = isGtsScanPath(fsPath) ? [fsPath, ...indexedPathsUnder(fsPath)] : indexedPathsUnder(fsPath)
+  for (const p of targets) {
+    beginFileMutation(p)
+    dropFileFromRegistry(p)
+  }
+  return targets.length > 0
+}
+
+/** A file or folder was deleted/renamed-away. Drop its entities from the registry. */
+function onDiskPathRemoved(uri: vscode.Uri): void {
+  if (!dropIndexedPath(uri.fsPath)) return
   gtsExplorer?.refresh()
   scheduleExternalChangeSettle()
+}
+
+async function isDirectory(uri: vscode.Uri): Promise<boolean> {
+  try {
+    return ((await vscode.workspace.fs.stat(uri)).type & vscode.FileType.Directory) !== 0
+  } catch {
+    return false
+  }
+}
+
+/** Index every GTS file under a folder that just appeared (created, moved in, renamed). */
+async function indexFolder(uri: vscode.Uri): Promise<void> {
+  if (isIgnoredGtsPath(uri.fsPath + path.sep) || isUriIgnored(uri)) return
+  const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(uri, GTS_SCAN_GLOB), ALWAYS_EXCLUDE_GLOB)
+  // onDiskFileChanged applies the ignore rules and skips files open in an editor.
+  for (const fileUri of uris) await onDiskFileChanged(fileUri)
+}
+
+// Folders reported as created, batched so a burst (git checkout, unzip) scans
+// each new top-level folder once instead of once per nested directory.
+const pendingNewFolders = new Set<string>()
+let newFolderTimer: NodeJS.Timeout | null = null
+
+function scheduleFolderScan(fsPath: string): void {
+  pendingNewFolders.add(fsPath)
+  if (newFolderTimer) clearTimeout(newFolderTimer)
+  newFolderTimer = setTimeout(() => {
+    newFolderTimer = null
+    const folders = [...pendingNewFolders].sort()
+    pendingNewFolders.clear()
+    const roots = folders.filter((f, i) => !folders.slice(0, i).some(r => f.startsWith(r + path.sep)))
+    void (async () => {
+      for (const folder of roots) await indexFolder(vscode.Uri.file(folder))
+    })()
+  }, 300)
 }
 
 // Debounce a burst of on-disk changes (e.g. a git checkout touching many files)
@@ -912,28 +931,22 @@ function beginFileMutation(fsPath: string): number {
 function scheduleExternalChangeSettle(): void {
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   externalChangeTimer = setTimeout(() => {
-    if (viewerPanel) {
-      // The viewer needs the full authoritative scan (also repaints + revalidates).
-      void scanAndPost(GTS_SCAN_GLOB, false)
-      return
-    }
-    // No viewer: repaint + refresh workspace diagnostics and then re-validate
-    // open docs with precise ranges. A burst of on-disk changes can touch files
-    // anywhere in the repo (git checkout, external tools), so validate the whole
-    // workspace rather than only the currently-focused folders.
+    // Repaint + refresh workspace diagnostics and then re-validate open docs with
+    // precise ranges. A burst of on-disk changes can touch files anywhere in the
+    // repo (git checkout, external tools), so validate the whole workspace rather
+    // than only the currently-focused folders.
     void (async () => {
       await gtsLinkProvider?.refresh()
       await validateWorkspaceInBackground()
-      vscode.workspace.textDocuments.forEach(doc => {
-        if (isGtsCandidateFile(doc)) void validateOpenDocument(doc)
-      })
+      revalidateOpenDocs()
+      if (viewerPanel) await scanAndPost()
     })()
   }, 300)
 }
 
 // Ids each file defined *before* the current burst of edits, captured prior to
 // the first reindex so a renamed/removed id still revalidates its old referrers.
-// Keyed by fsPath; cleared when the debounced revalidation fires.
+// Keyed by fsPath; an entry is removed when that file's debounced revalidation fires.
 const preEditIdsByPath = new Map<string, Set<string>>()
 
 function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
@@ -968,12 +981,14 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
     gtsLinkProvider.updateDecorations(editor)
   }
 
-  // Debounced + heavier: validate just this document, and (only when the viewer
-  // panel is open) run the full workspace rescan that feeds the webview.
-  if (changeTimer) clearTimeout(changeTimer)
-  changeTimer = setTimeout(() => {
+  // Debounced + heavier: validate just this document and its dependents, and
+  // (only when the viewer panel is open) push the updated registry to it.
+  const pending = changeTimers.get(fsPath)
+  if (pending) clearTimeout(pending)
+  changeTimers.set(fsPath, setTimeout(() => {
+    changeTimers.delete(fsPath)
     const previousIds = preEditIdsByPath.get(fsPath)
-    preEditIdsByPath.clear()
+    preEditIdsByPath.delete(fsPath)
     void (async () => {
       await validateOpenDocument(doc)
       // Re-check everything that depends on this file (derived/instantiated
@@ -981,10 +996,14 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
       // reflect the edit, not just this doc.
       await revalidateDependents(fsPath, previousIds)
     })()
-    if (viewerPanel) {
-      void scanAndPost(GTS_SCAN_GLOB, false, fsPath)
-    }
-  }, delayMsec)
+  }, delayMsec))
+  if (viewerPanel) {
+    if (viewerRefreshTimer) clearTimeout(viewerRefreshTimer)
+    viewerRefreshTimer = setTimeout(() => {
+      viewerRefreshTimer = null
+      void scanAndPost(fsPath)
+    }, delayMsec)
+  }
 }
 
 function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
@@ -1074,14 +1093,13 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
 
         case 'scanWorkspaceJson': {
           try {
-            const include: string = message.options?.include || GTS_SCAN_GLOB
             const isInitialScan = !hasPerformedInitialScan
             hasPerformedInitialScan = true
-            // A user-triggered rescan must rebuild the whole GTS store from
-            // scratch. Reset to empty first (inside the scan queue) so entities
-            // for files/directories removed since the last scan can't linger as
-            // stale entries; the scan then repopulates from a fresh enumeration.
-            await scanAndPost(include, isInitialScan, undefined, !isInitialScan)
+            // The first request (viewer just opened) is served from the registry
+            // the background scan already maintains. A later, user-triggered
+            // rescan rebuilds the whole GTS store from scratch, so entities for
+            // files/directories removed since the last scan can't linger.
+            await scanAndPost(undefined, !isInitialScan)
           } catch (error: any) {
             viewerPanel!.webview.postMessage({ type: 'gts-scan-error', detail: { error: error.message || String(error) } })
           }

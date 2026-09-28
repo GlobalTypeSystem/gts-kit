@@ -28,19 +28,27 @@ interface GtsIdReference {
 }
 
 /**
- * Escape markdown special characters, especially tildes
+ * Escape text taken from workspace files (ids, descriptions, error messages) so
+ * it renders literally in hover markdown. Every ASCII punctuation character that
+ * CommonMark lets you backslash-escape is escaped — including the backslash
+ * itself: escaping only `[`/`]` lets `\[x\](command:...)` collapse back into a
+ * live link, which in a command-enabled hover runs a VS Code command on click.
  */
 function escapeMarkdown(text: string): string {
-  // Escape tildes and other markdown special characters
-  return text
-    .replace(/~/g, '\\~')
-    .replace(/\*/g, '\\*')
-    .replace(/_/g, '\\_')
-    .replace(/\[/g, '\\[')
-    .replace(/\]/g, '\\]')
-    .replace(/</g, '\\<')
-    .replace(/>/g, '\\>')
+  return text.replace(/[\\`*_{}\[\]()<>#+\-.!|~"'&:=]/g, '\\$&')
 }
+
+/** Render text as an inline code span (backslash escapes don't apply inside one). */
+function codeSpan(text: string): string {
+  return '`' + text.replace(/`/g, "'") + '`'
+}
+
+/**
+ * Hovers may only run this extension's own replace command (used by the "Did
+ * you mean" / "Fix" links). Never `isTrusted = true`, which enables every
+ * command for any link that ends up in the markdown.
+ */
+const HOVER_TRUST = { enabledCommands: ['gts.replaceGtsId'] }
 
 /**
  * Get workspace-relative path from absolute path
@@ -229,6 +237,14 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
+   * Drop this document's link-format diagnostics. They are computed from the
+   * live buffer only while it is open; once closed they would go stale.
+   */
+  public clearDocument(uri: vscode.Uri): void {
+    this.diagnosticCollection.delete(uri)
+  }
+
+  /**
    * Repaint decorations from the current shared registry.
    *
    * The shared registry is kept up to date by the extension (full scans and
@@ -329,7 +345,9 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
           `Invalid GTS ID format: "${ref.rawValue}". Expected pattern: gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~...]]`,
           vscode.DiagnosticSeverity.Error
         )
-        diagnostic.source = 'gts'
+        // Same source as the validator's diagnostics: the file tree, badge and
+        // red/green decorations only count source 'GTS'.
+        diagnostic.source = 'GTS'
         diagnostics.push(diagnostic)
 
         continue
@@ -776,7 +794,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
 
     // Create hover content
     const markdown = new vscode.MarkdownString()
-    markdown.isTrusted = true
+    markdown.isTrusted = HOVER_TRUST
     markdown.supportHtml = false
 
     // Malformed gts:// prefix usage - explain the rule and offer a one-click fix.
@@ -910,7 +928,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
       if (firstErrorIdx !== -1 && hoveredSegmentIndex !== undefined && firstErrorIdx < hoveredSegmentIndex) {
         const culprit = analysis.segments[firstErrorIdx].entityId
         markdown.appendMarkdown(`GTS Parent Type Not Found\n\n`)
-        markdown.appendMarkdown(`This segment derives from \`${escapeMarkdown(culprit)}\`, which is not a defined GTS type.`)
+        markdown.appendMarkdown(`This segment derives from ${codeSpan(culprit)}, which is not a defined GTS type.`)
         return new vscode.Hover(markdown, hoverRange)
       }
       // This segment itself is the cause. A "~"-terminated id that resolves only
