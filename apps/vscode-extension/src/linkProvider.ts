@@ -51,20 +51,11 @@ function codeSpan(text: string): string {
 const HOVER_TRUST = { enabledCommands: ['gts.replaceGtsId'] }
 
 /**
- * Get workspace-relative path from absolute path
+ * Workspace-relative path for display. In a multi-root workspace this is
+ * prefixed with the owning folder's name; outside every folder it stays absolute.
  */
 function getRelativePath(absolutePath: string): string {
-  const workspaceFolders = require('vscode').workspace.workspaceFolders
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return absolutePath
-  }
-
-  const workspaceRoot = workspaceFolders[0].uri.fsPath
-  if (absolutePath.startsWith(workspaceRoot)) {
-    return absolutePath.substring(workspaceRoot.length + 1)
-  }
-
-  return absolutePath
+  return vscode.workspace.asRelativePath(absolutePath)
 }
 
 /**
@@ -128,8 +119,6 @@ function findEntityLineInFile(filePath: string, entityId: string): number {
  * Makes GTS IDs clickable and provides hover information
  */
 export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.HoverProvider {
-  private diagnosticCollection: vscode.DiagnosticCollection
-
   /**
    * The registry is the shared, persistent, index-only registry maintained in
    * registryStore. We never build our own here — decorations/links/hovers just
@@ -149,9 +138,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   // colour/style (schema/instance/error) of the following segment.
   private segmentGapDecorationType: vscode.TextEditorDecorationType
 
-  constructor(diagnosticCollection: vscode.DiagnosticCollection) {
-    this.diagnosticCollection = diagnosticCollection
-
+  constructor() {
     const schemaBackgroundColor = 'background-color: ' + GTS_COLORS.schema.background_transparent
     const instanceBackgroundColor = 'background-color: ' + GTS_COLORS.instance.background_transparent
 
@@ -225,7 +212,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
   }
 
   /**
-   * Dispose of decoration types and clear diagnostics
+   * Dispose of decoration types
    */
   dispose(): void {
     this.schemaDecorationType.dispose()
@@ -233,15 +220,6 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     this.errorDecorationType.dispose()
     this.unresolvedDecorationType.dispose()
     this.segmentGapDecorationType.dispose()
-    this.diagnosticCollection.clear()
-  }
-
-  /**
-   * Drop this document's link-format diagnostics. They are computed from the
-   * live buffer only while it is open; once closed they would go stale.
-   */
-  public clearDocument(uri: vscode.Uri): void {
-    this.diagnosticCollection.delete(uri)
   }
 
   /**
@@ -303,7 +281,6 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     const errorRanges: vscode.Range[] = []
     const unresolvedRanges: vscode.Range[] = []
     const gapRanges: vscode.Range[] = []
-    const diagnostics: vscode.Diagnostic[] = []
 
     // Find all GTS references
     const references = this.findGtsReferences(document)
@@ -325,9 +302,11 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         continue
       }
 
-      // Check if the GTS ID is valid using gts-ts validation
+      // Malformed GTS id: red chip only. The diagnostic itself is published by
+      // the validator (validation.ts, keyword 'gts-id-format') for open and
+      // closed files alike, so the file's status doesn't depend on whether it
+      // happens to be open.
       if (!ref.isValid) {
-        // Invalid GTS format - mark the entire string as error
         const text = document.getText()
         const refOffset = document.offsetAt(ref.range.start)
         let gtsStartOffset = refOffset
@@ -336,20 +315,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
         }
         const startPos = document.positionAt(gtsStartOffset)
         const endPos = document.positionAt(gtsStartOffset + ref.rawValue.length)
-        const errorRange = new vscode.Range(startPos, endPos)
-        errorRanges.push(errorRange)
-
-        // Create diagnostic for invalid GTS format
-        const diagnostic = new vscode.Diagnostic(
-          errorRange,
-          `Invalid GTS ID format: "${ref.rawValue}". Expected pattern: gts.<VENDOR>.<PACKAGE>.<NAMESPACE>.<TYPE>.v<MAJ>[.<MIN>[~...]]`,
-          vscode.DiagnosticSeverity.Error
-        )
-        // Same source as the validator's diagnostics: the file tree, badge and
-        // red/green decorations only count source 'GTS'.
-        diagnostic.source = 'GTS'
-        diagnostics.push(diagnostic)
-
+        errorRanges.push(new vscode.Range(startPos, endPos))
         continue
       }
 
@@ -453,9 +419,6 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider, vscode.Hove
     editor.setDecorations(this.errorDecorationType, errorRanges)
     editor.setDecorations(this.unresolvedDecorationType, unresolvedRanges)
     editor.setDecorations(this.segmentGapDecorationType, gapRanges)
-
-    // Update diagnostics for this document
-    this.diagnosticCollection.set(document.uri, diagnostics)
   }
 
   /**

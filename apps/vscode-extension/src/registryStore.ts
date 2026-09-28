@@ -1,5 +1,6 @@
 import { JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { GtsConfig } from '@gts/shared'
+import { findMalformedGtsIds, type MalformedGtsId } from './gtsIdFormat'
 
 /**
  * Long-lived, shared GTS registry for the extension host.
@@ -23,6 +24,29 @@ export interface RegistryFileInput {
 let registry: JsonRegistry | null = null
 let activeConfig: GtsConfig = DEFAULT_GTS_CONFIG
 let revision = 0
+// Malformed GTS ids per file, kept in lockstep with the registry so closed files
+// report them too (the registry itself only indexes *valid* GTS entities, so a
+// file whose only GTS content is malformed would otherwise not exist for us).
+const malformedIdsByPath = new Map<string, MalformedGtsId[]>()
+
+const GTS_VIEWER_DIR_RE = /(^|[\\/])\.gts-viewer[\\/]/
+
+function updateMalformedIds(path: string, content: any): void {
+  // Unparsable files (raw string content) are reported as parse errors instead.
+  const issues = typeof content === 'string' || GTS_VIEWER_DIR_RE.test(path) ? [] : findMalformedGtsIds(content)
+  if (issues.length > 0) malformedIdsByPath.set(path, issues)
+  else malformedIdsByPath.delete(path)
+}
+
+/** Malformed GTS ids found in a file's current indexed content. */
+export function getMalformedIds(path: string): readonly MalformedGtsId[] {
+  return malformedIdsByPath.get(path) || []
+}
+
+/** Every indexed file that contains at least one malformed GTS id. */
+export function getPathsWithMalformedIds(): string[] {
+  return [...malformedIdsByPath.keys()]
+}
 
 /** Get the shared registry, or null if it hasn't been built yet. */
 export function getRegistry(): JsonRegistry | null {
@@ -41,6 +65,8 @@ export async function rebuildRegistry(
   activeConfig = cfg
   const next = new JsonRegistry()
   await next.ingestFiles(files, cfg, { skipValidation: true })
+  malformedIdsByPath.clear()
+  for (const file of files) updateMalformedIds(file.path, file.content)
   registry = next
   revision++
   return next
@@ -50,6 +76,7 @@ export async function rebuildRegistry(
 export function indexFile(path: string, name: string, content: any): void {
   if (!registry) return
   registry.indexFile(path, name, content, activeConfig)
+  updateMalformedIds(path, content)
   revision++
 }
 
@@ -57,6 +84,7 @@ export function indexFile(path: string, name: string, content: any): void {
 export function removeFile(path: string): void {
   if (!registry) return
   registry.invalidateFile(path)
+  malformedIdsByPath.delete(path)
   revision++
 }
 

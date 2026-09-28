@@ -5,12 +5,12 @@ import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import type { JsonRegistry, JsonSchema, JsonObj } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
-import { getRegistry, rebuildRegistry, indexFile } from './registryStore'
+import { getRegistry, rebuildRegistry, indexFile, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
+import { malformedGtsIdMessage } from './gtsIdFormat'
 import { isGtsCandidateFile } from './helpers'
 
 let diagnosticCollection: vscode.DiagnosticCollection
 let workspaceDiagnosticCollection: vscode.DiagnosticCollection
-let isInitialScanComplete = false
 
 const documentValidationErrors = new Map<string, ValidationError[]>()
 const documentValidationGenerations = new Map<string, number>()
@@ -29,7 +29,7 @@ export function onValidationCompleted(listener: (uri: vscode.Uri) => void): vsco
 /**
  * Convert validation errors to VSCode diagnostics
  */
-function validationErrorsToDiagnostics(errors: ValidationError[], document: vscode.TextDocument): vscode.Diagnostic[] {
+function validationErrorsToDiagnostics(errors: FileProblem[], document: vscode.TextDocument): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = []
 
   for (const error of errors) {
@@ -55,11 +55,7 @@ function validationErrorsToDiagnostics(errors: ValidationError[], document: vsco
       range = new vscode.Range(0, 0, 0, 1)
     }
 
-    const diagnostic = new vscode.Diagnostic(
-      range,
-      error.message,
-      vscode.DiagnosticSeverity.Error
-    )
+    const diagnostic = new vscode.Diagnostic(range, error.message, problemSeverity(error))
 
     diagnostic.source = 'GTS'
     diagnostic.code = error.keyword
@@ -130,9 +126,10 @@ function findErrorPosition(document: vscode.TextDocument, instancePath: string, 
     }
   }
 
-  // 4. For gts:// prefix violations and x-gts-ref mismatches, highlight the
-  // offending string value precisely.
-  if ((error.keyword === 'gts-uri-prefix' || error.keyword === 'x-gts-ref') && error.params && 'value' in error.params) {
+  // 4. For gts:// prefix violations, x-gts-ref mismatches, malformed ids and
+  // duplicate ids without a resolvable path, highlight the offending string value.
+  const valueKeywords = ['gts-uri-prefix', 'x-gts-ref', 'gts-id-format', 'gts-duplicate-id']
+  if (valueKeywords.includes(error.keyword) && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
     // Quoted (JSON, or a quoted YAML scalar) first, then bare YAML scalar.
     let idx = text.indexOf(`"${value}"`)
@@ -557,9 +554,7 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     // any new invalid-file entry or updated entity list for this open buffer.
     registry = getRegistry() || registry
 
-    let errors: ValidationError[] = []
-
-    const invalid = registry.invalidFiles.get(filePath)
+    let errors: FileProblem[] = []
 
     if (parseErrorMessage) {
       errors = [{
@@ -569,21 +564,13 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
         message: `Invalid ${isYamlFileName(fileName) ? 'YAML' : 'JSON'}: ${parseErrorMessage}`,
         params: { error: parseErrorMessage }
       }]
-    } else if (invalid?.validation && invalid.validation.errors.length > 0) {
-      errors = invalid.validation.errors
     } else {
       // Only validate the entities defined in THIS document. Other files remain
       // indexed (for $ref / GTS-reference resolution) but are not re-validated.
-      const fileSchemas = registry.jsonFileSchemas.get(filePath) || []
-      const fileObjs = registry.jsonFileObjs.get(filePath) || []
-
-      console.log(`[GTS Validation] Validating ${fileSchemas.length + fileObjs.length} entities in ${fileName}...`)
-      for (const e of [...fileSchemas, ...fileObjs]) {
-        await registry.validateEntity(e)
-        if (e.validation && e.validation.errors.length > 0) {
-          errors.push(...e.validation.errors)
-        }
-      }
+      const entities = fileEntities(registry, filePath)
+      console.log(`[GTS Validation] Validating ${entities.length} entities in ${fileName}...`)
+      for (const e of entities) await registry.validateEntity(e)
+      errors = collectFileProblems(registry, filePath, buildDefinitionIndex(registry))
     }
 
     if (
@@ -596,7 +583,8 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
     workspaceDiagnosticCollection?.delete(document.uri)
 
     if (errors.length > 0) {
-      documentValidationErrors.set(document.uri.toString(), errors)
+      // Only errors colour GTS id chips red; a duplicate-id warning must not.
+      documentValidationErrors.set(document.uri.toString(), errors.filter(e => e.severity !== 'warning'))
       const diagnostics = validationErrorsToDiagnostics(errors, document)
       diagnosticCollection.set(document.uri, diagnostics)
       console.log(`[GTS Validation] ✗ Got ${diagnostics.length} GTS diagnostics errors for ${fileName} - Errors:`, diagnostics.map(d => ({ message: d.message, range: d.range })))
@@ -698,6 +686,108 @@ function isIndexedInItsFile(registry: JsonRegistry, entity: RegistryEntity): boo
     (registry.jsonFileObjs.get(filePath) || []).includes(entity as JsonObj)
 }
 
+/** A validation finding plus its severity (errors unless marked otherwise). */
+type FileProblem = ValidationError & { severity?: 'warning' }
+
+function problemSeverity(problem: FileProblem): vscode.DiagnosticSeverity {
+  return problem.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error
+}
+
+/** Coarse (line 0) diagnostic for a file that isn't open in an editor. */
+function coarseDiagnostic(problem: FileProblem): vscode.Diagnostic {
+  const diagnostic = new vscode.Diagnostic(new vscode.Range(0, 0, 0, 1), problem.message, problemSeverity(problem))
+  diagnostic.source = 'GTS'
+  diagnostic.code = problem.keyword
+  return diagnostic
+}
+
+function fileEntities(registry: JsonRegistry, filePath: string): RegistryEntity[] {
+  return [...(registry.jsonFileSchemas.get(filePath) || []), ...(registry.jsonFileObjs.get(filePath) || [])]
+}
+
+/** id -> path of every file defining it, one entry per definition. */
+type DefinitionIndex = Map<string, string[]>
+
+function buildDefinitionIndex(registry: JsonRegistry): DefinitionIndex {
+  const index: DefinitionIndex = new Map()
+  for (const entity of entitiesByFile(registry)) {
+    const filePath = entity.file?.path
+    if (!entity.id || !filePath) continue
+    const paths = index.get(entity.id)
+    if (paths) paths.push(filePath)
+    else index.set(entity.id, [filePath])
+  }
+  return index
+}
+
+/** Path to the field that holds the entity's id, e.g. "/2/$id" in a list file. */
+function idInstancePath(entity: RegistryEntity): string {
+  const field = entity.selectedEntityIdField || entity.selectedSchemaIdField
+  if (!field) return ''
+  const seq = (entity as { listSequence?: number }).listSequence
+  return (seq !== undefined ? `/${seq}` : '') + `/${field}`
+}
+
+const MAX_LISTED_DUPLICATE_FILES = 3
+
+/**
+ * A warning for every entity of the file whose id is also defined elsewhere (in
+ * another file, or again in this one). The registry resolves an id to a single
+ * definition — whichever was indexed last — so references to a duplicated id
+ * silently depend on scan order.
+ */
+function duplicateIdProblems(registry: JsonRegistry, filePath: string, index: DefinitionIndex): FileProblem[] {
+  const problems: FileProblem[] = []
+  for (const entity of fileEntities(registry, filePath)) {
+    const definitions = index.get(entity.id) || []
+    if (definitions.length < 2) continue
+    const otherFiles = [...new Set(definitions.filter(p => p !== filePath))]
+    const timesHere = definitions.length - definitions.filter(p => p !== filePath).length
+    const details: string[] = []
+    if (otherFiles.length > 0) {
+      const listed = otherFiles.slice(0, MAX_LISTED_DUPLICATE_FILES).map(p => vscode.workspace.asRelativePath(p))
+      const more = otherFiles.length - listed.length
+      details.push(`also defined in ${listed.join(', ')}${more > 0 ? ` and ${more} more` : ''}`)
+    }
+    if (timesHere > 1) details.push(`defined ${timesHere} times in this file`)
+    problems.push({
+      instancePath: idInstancePath(entity),
+      schemaPath: '#',
+      keyword: 'gts-duplicate-id',
+      message: `Duplicate GTS id "${entity.id}": ${details.join('; ')}. References resolve to only one of these definitions.`,
+      params: { value: entity.id, otherFiles },
+      severity: 'warning'
+    })
+  }
+  return problems
+}
+
+function malformedIdProblems(filePath: string): FileProblem[] {
+  return getMalformedIds(filePath).map(issue => ({
+    instancePath: issue.instancePath,
+    schemaPath: '#',
+    keyword: 'gts-id-format',
+    message: malformedGtsIdMessage(issue.value),
+    params: { value: issue.value }
+  }))
+}
+
+/**
+ * Everything to report for one file, read from the registry's current state
+ * (entities must already be validated): parse errors, entity validation errors,
+ * malformed GTS ids and duplicate-id warnings. The single source for open-file,
+ * closed-file and workspace-wide diagnostics, so all three always agree.
+ */
+function collectFileProblems(registry: JsonRegistry, filePath: string, index: DefinitionIndex): FileProblem[] {
+  const invalid = registry.invalidFiles.get(filePath)
+  if (invalid?.validation && invalid.validation.errors.length > 0) return [...invalid.validation.errors]
+  return [
+    ...fileEntities(registry, filePath).flatMap(entity => entity.validation?.errors || []),
+    ...malformedIdProblems(filePath),
+    ...duplicateIdProblems(registry, filePath, index)
+  ]
+}
+
 /** One full validation pass. Returns false if it was superseded and must rerun. */
 async function runWorkspaceValidationPass(): Promise<boolean> {
   const registry = getRegistry()
@@ -736,30 +826,18 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
     if (isGtsCandidateFile(doc)) openPaths.add(doc.uri.fsPath)
   }
 
+  const index = buildDefinitionIndex(registry)
+  const filePaths = new Set([
+    ...registry.jsonFileSchemas.keys(),
+    ...registry.jsonFileObjs.keys(),
+    ...registry.invalidFiles.keys(),
+    ...getPathsWithMalformedIds()
+  ])
   const diagnosticsByPath = new Map<string, vscode.Diagnostic[]>()
-  const addError = (filePath: string, error: ValidationError) => {
-    if (openPaths.has(filePath)) return
-    const diagnostics = diagnosticsByPath.get(filePath) || []
-    const diagnostic = new vscode.Diagnostic(
-      new vscode.Range(0, 0, 0, 1),
-      error.message,
-      vscode.DiagnosticSeverity.Error
-    )
-    diagnostic.source = 'GTS'
-    diagnostic.code = error.keyword
-    diagnostics.push(diagnostic)
-    diagnosticsByPath.set(filePath, diagnostics)
-  }
-
-  // Files that failed parsing/indexing.
-  for (const invalidFile of registry.invalidFiles.values()) {
-    const errors = invalidFile.validation?.errors || []
-    for (const error of errors) addError(invalidFile.path, error)
-  }
-
-  for (const entity of entitiesByFile(registry)) {
-    if (!entity.file?.path) continue
-    for (const error of entity.validation?.errors || []) addError(entity.file.path, error)
+  for (const filePath of filePaths) {
+    if (openPaths.has(filePath)) continue
+    const problems = collectFileProblems(registry, filePath, index)
+    if (problems.length > 0) diagnosticsByPath.set(filePath, problems.map(coarseDiagnostic))
   }
 
   // Replace the collection's full contents. `set(entries)` only touches the
@@ -773,7 +851,7 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
     entries.push([vscode.Uri.file(filePath), diagnostics])
   }
   workspaceDiagnosticCollection.set(entries)
-  console.log(`[GTS Validation] Workspace pass: ${validated.size} entities, ${diagnosticsByPath.size} file(s) with errors (${Date.now() - startTime}ms)`)
+  console.log(`[GTS Validation] Workspace pass: ${validated.size} entities, ${diagnosticsByPath.size} file(s) with problems (${Date.now() - startTime}ms)`)
   return true
 }
 
@@ -782,36 +860,14 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
  * (line-0) workspace diagnostics for it, using the shared registry as context.
  * Uses the single-URI overload of `set` so only this file's markers change.
  */
-async function validateClosedFile(filePath: string): Promise<void> {
+async function validateClosedFile(filePath: string, index?: DefinitionIndex): Promise<void> {
   const registry = getRegistry()
   if (!registry || !workspaceDiagnosticCollection) return
 
   // Entity validation itself is shared registry logic; here we only turn the
-  // resulting errors into coarse (line-0) workspace diagnostics.
+  // resulting problems into coarse (line-0) workspace diagnostics.
   await registry.validateFile(filePath)
-
-  const diagnostics: vscode.Diagnostic[] = []
-  const push = (error: ValidationError) => {
-    const diagnostic = new vscode.Diagnostic(
-      new vscode.Range(0, 0, 0, 1),
-      error.message,
-      vscode.DiagnosticSeverity.Error
-    )
-    diagnostic.source = 'GTS'
-    diagnostic.code = error.keyword
-    diagnostics.push(diagnostic)
-  }
-
-  const invalid = registry.invalidFiles.get(filePath)
-  if (invalid?.validation && invalid.validation.errors.length > 0) {
-    for (const error of invalid.validation.errors) push(error)
-  } else {
-    const fileSchemas = registry.jsonFileSchemas.get(filePath) || []
-    const fileObjs = registry.jsonFileObjs.get(filePath) || []
-    for (const entity of [...fileSchemas, ...fileObjs]) {
-      for (const error of entity.validation?.errors || []) push(error)
-    }
-  }
+  const diagnostics = collectFileProblems(registry, filePath, index ?? buildDefinitionIndex(registry)).map(coarseDiagnostic)
 
   const uri = vscode.Uri.file(filePath)
   workspaceDiagnosticCollection.set(uri, diagnostics.length > 0 ? diagnostics : undefined)
@@ -852,7 +908,16 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
 
   // `previousIds` carries the ids the file defined *before* the edit so that a
   // renamed/removed id still revalidates whatever referenced its old id.
-  const dependentPaths = registry.getDependentFilePaths(changedPath, previousIds)
+  const oldIds = previousIds ? [...previousIds] : []
+  const dependentPaths = new Set(registry.getDependentFilePaths(changedPath, oldIds))
+  // Other files defining any of this file's old or new ids gain or lose a
+  // duplicate-id warning when those ids change.
+  const index = buildDefinitionIndex(registry)
+  for (const id of new Set([...oldIds, ...registry.getEntityIdsForFile(changedPath)])) {
+    for (const definingPath of index.get(id) || []) {
+      if (definingPath !== changedPath) dependentPaths.add(definingPath)
+    }
+  }
   if (dependentPaths.size === 0) return
 
   const openByPath = new Map<string, vscode.TextDocument>()
@@ -868,7 +933,7 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
     if (openDoc) {
       await validateOpenDocument(openDoc)
     } else {
-      await validateClosedFile(dependentPath)
+      await validateClosedFile(dependentPath, index)
     }
   }
 }

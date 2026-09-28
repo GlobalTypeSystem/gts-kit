@@ -620,10 +620,19 @@ export class JsonRegistry {
 
   /**
    * Validate a single entity against its schema.
+   *
+   * The result is built locally and published with a single assignment. The
+   * computation awaits (Ajv compileAsync, parent validation), so two overlapping
+   * validations of the same entity (e.g. an open-document check racing a
+   * workspace pass) used to reset and append to the shared `entity.validation`
+   * in interleaved order, duplicating or dropping errors.
    */
   async validateEntity(entity: JsonEntity): Promise<void> {
-    // Initialize validation result
-    entity.validation = { errors: [] }
+    entity.validation = await this.computeEntityValidation(entity)
+  }
+
+  private async computeEntityValidation(entity: JsonEntity): Promise<ValidationResult> {
+    const validation: ValidationResult = { errors: [] }
 
     // Enforce gts:// URI-prefix rules: the prefix is required in JSON Schema URL
     // fields ($id, $ref, x-gts-traits-schema) and forbidden everywhere else.
@@ -631,7 +640,7 @@ export class JsonRegistry {
       const instancePath = violation.sourcePath === 'root'
         ? '/'
         : '/' + violation.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
-      entity.validation.errors.push({
+      validation.errors.push({
         instancePath,
         schemaPath: '#',
         keyword: 'gts-uri-prefix',
@@ -698,7 +707,7 @@ export class JsonRegistry {
           const instancePath = ref.sourcePath === 'root'
             ? '/'
             : '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath,
             schemaPath: '#',
             keyword: '',
@@ -712,7 +721,7 @@ export class JsonRegistry {
     // In VS Code webview environment, skip Ajv validation to comply with CSP
     const g: any = (typeof globalThis !== 'undefined') ? (globalThis as any) : {}
     if (g && (g.acquireVsCodeApi || (g.__GTS_APP_API__ && (g.__GTS_APP_API__.type === 'vscode' || g.__GTS_APP_API__.disableValidation === true)))) {
-      return
+      return validation
     }
 
     if (entity instanceof JsonSchema) {
@@ -730,13 +739,13 @@ export class JsonRegistry {
             e.keyword = e.keyword || 'schema'
             e.message = e.message || 'Invalid JSON Schema'
           })
-          entity.validation.errors.push(...detailed)
+          validation.errors.push(...detailed)
         } else {
           // Fallback: try to extract a path from error.message like "data/xxx ..."
           const msg: string = String(error?.message || 'Unknown schema error')
           const m = msg.match(/data(\/[A-Za-z0-9_\-\.\[\]\/]+)\b/)
           const instancePath = m ? m[1] : ''
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath,
             schemaPath: '#',
             keyword: 'schema',
@@ -757,7 +766,7 @@ export class JsonRegistry {
       if (declError) {
         // register() rejected this schema outright (§9.11.1); surface it and
         // skip chain validation (the schema isn't in the store).
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '',
           schemaPath: '#',
           keyword: 'x-gts-schema',
@@ -796,7 +805,7 @@ export class JsonRegistry {
               instancePath = findTraitRequiredPath(entity.content, traitName)
               params = traitName ? { trait: traitName } : {}
             }
-            entity.validation.errors.push({
+            validation.errors.push({
               instancePath: instancePath || '/$id',
               schemaPath: '#',
               keyword: 'x-gts-schema',
@@ -812,7 +821,7 @@ export class JsonRegistry {
       // JSON Pointer). This checks the schema authoring, not an instance value.
       const refDeclErrors = new XGtsRefValidator().validateSchema(entity.content)
       for (const err of refDeclErrors) {
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: fieldPathToInstancePath(err.fieldPath),
           schemaPath: '#',
           keyword: 'x-gts-ref',
@@ -821,14 +830,14 @@ export class JsonRegistry {
         })
       }
 
-      if (entity.validation.errors.length === 0) {
+      if (validation.errors.length === 0) {
         const ancestors = JsonRegistry.ancestorTypeIds(entity.id)
         const parentId = ancestors.length > 1 ? ancestors[ancestors.length - 2] : null
         const parent = parentId ? this.jsonSchemas.get(parentId) : undefined
         if (parent) {
           await this.validateEntity(parent)
           if (parent.validation?.errors.length) {
-            entity.validation.errors.push({
+            validation.errors.push({
               instancePath: '/$id',
               schemaPath: '#',
               keyword: 'x-gts-schema',
@@ -845,7 +854,7 @@ export class JsonRegistry {
         const result = store.validateInstance(entity.id)
         if (!result.ok) {
           const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath: '/' + String(idField),
             schemaPath: '#',
             keyword: 'schema',
@@ -853,7 +862,7 @@ export class JsonRegistry {
             params: { gtsId: entity.id }
           })
         }
-        return
+        return validation
       }
 
       const schema = this.resolveSchema(entity.schemaId)
@@ -861,14 +870,14 @@ export class JsonRegistry {
         // Prefer pointing to the field that produced schemaId
         const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
         const instancePath = '/' + String(idField)
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath,
           schemaPath: '#',
           keyword: 'schema',
           message: `Schema not found: ${entity.schemaId}`,
           params: { schemaId: entity.schemaId }
         })
-        return
+        return validation
       }
 
       // §9.11.3 (OP#6): an instance's rightmost type must be instantiable. A
@@ -877,7 +886,7 @@ export class JsonRegistry {
       // explicitly here (mirrors gts-ts store.validateInstance).
       if (GtsModifiers.isAbstract(schema.content)) {
         const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '/' + String(idField),
           schemaPath: '#',
           keyword: 'x-gts-abstract',
@@ -902,7 +911,7 @@ export class JsonRegistry {
         // Merge AJV errors with previously collected GTS reference errors
         if (!valid && validate.errors) {
           const formatted = this.formatValidationErrors(validate.errors)
-          entity.validation.errors.push(...formatted)
+          validation.errors.push(...formatted)
         }
 
         // §9.6: `x-gts-ref` is an assertion keyword on instance string values
@@ -914,7 +923,7 @@ export class JsonRegistry {
         // GTS-ID format and the prefix/pattern constraint.
         const xGtsRefErrors = new XGtsRefValidator().validateInstance(entity.content, schema.content)
         for (const err of xGtsRefErrors) {
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath: fieldPathToInstancePath(err.fieldPath),
             schemaPath: '#',
             keyword: 'x-gts-ref',
@@ -923,7 +932,7 @@ export class JsonRegistry {
           })
         }
       } catch (error: any) {
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '',
           schemaPath: '#',
           keyword: 'validation',
@@ -932,6 +941,7 @@ export class JsonRegistry {
         })
       }
     }
+    return validation
   }
 
   /**

@@ -5,8 +5,8 @@ import { parseGtsFileContent, JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shar
 import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
-import { getWorkspaceIgnore, resetWorkspaceIgnore, getCachedMatcher, isIgnoredRel } from './gitignore'
-import { RepoLayoutStorage } from './storage'
+import { getWorkspaceIgnore, resetWorkspaceIgnore, isGitIgnored, type FolderIgnore } from './gitignore'
+import { WorkspaceLayoutStorage } from './storage'
 import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
 import { isGtsCandidateFile } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
@@ -16,18 +16,32 @@ import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layou
 // Glob used for all GTS workspace scans and the on-disk file watcher.
 const GTS_SCAN_GLOB = '**/*.{json,jsonc,gts,yaml,yml}'
 
-// Directories that never contain user GTS entities and are huge/binary — excluded
-// from every scan (both phases).
-const ALWAYS_EXCLUDE_GLOB = '**/{.git,.gts-viewer}/**'
+// Directories that are never indexed by ANY code path: full scans, file
+// watchers, folder handling and re-syncs all use this one list. Everything else
+// is governed by .gitignore alone, so every path agrees on what belongs in the
+// index. (Build-output/dependency directories below are only *deferred* to the
+// second scan phase, not excluded: they are indexed unless gitignored.)
+const ALWAYS_EXCLUDED_DIRS = ['.git', '.gts-viewer']
+const ALWAYS_EXCLUDE_GLOB = `**/{${ALWAYS_EXCLUDED_DIRS.join(',')}}/**`
+const ALWAYS_EXCLUDED_RE = dirSegmentRegExp(ALWAYS_EXCLUDED_DIRS)
 
-// Fast-pass exclude: also drops build-output / dependency directories so their
-// (often enormous) trees aren't even enumerated on the first, latency-sensitive
-// pass. Applied at the findFiles level.
-const FAST_EXCLUDE_GLOB = '**/{.git,.gts-viewer,node_modules,target,build,out,dist,.next,.nuxt,.svelte-kit,coverage,vendor,bin,obj,__pycache__}/**'
+// Build-output / dependency directories. Their (often enormous) trees aren't
+// even enumerated on the fast, latency-sensitive first pass; the second
+// (background) pass indexes whatever in them isn't gitignored.
+const PHASE2_DIRS = ['node_modules', 'target', 'build', 'out', 'dist', '.next', '.nuxt', '.svelte-kit', 'coverage', 'vendor', 'bin', 'obj', '__pycache__']
+const FAST_EXCLUDE_GLOB = `**/{${[...ALWAYS_EXCLUDED_DIRS, ...PHASE2_DIRS].join(',')}}/**`
+const PHASE2_DIR_RE = dirSegmentRegExp(PHASE2_DIRS, 'i')
 
-// Build-output / dependency directories skipped on the fast first pass and only
-// looked at on the second (background) pass.
-const PHASE2_DIR_RE = /[\\/](node_modules|target|build|out|dist|\.next|\.nuxt|\.svelte-kit|coverage|vendor|bin|obj|__pycache__)[\\/]/i
+// Phase 1 enumerates at most this many files per workspace folder to bound its
+// latency. Nothing beyond the cap is lost: phase 2 enumerates without a cap and
+// indexes whatever phase 1 didn't.
+const PHASE1_FILE_CAP = 40000
+
+/** Regex matching a path that has one of `dirs` as a directory segment. */
+function dirSegmentRegExp(dirs: string[], flags = ''): RegExp {
+  const names = dirs.map(d => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  return new RegExp(`(^|[\\\\/])(${names})([\\\\/]|$)`, flags)
+}
 
 // Framework/runtime files that are valid JSON but essentially never hold GTS
 // entities. Deferred to the second pass so they don't slow the first one.
@@ -54,9 +68,38 @@ function combineExcludeGlobs(base: string, extra: string[]): string {
   return `{${base},${extra.join(',')}}`
 }
 
-/** True if the given file URI is gitignored (per the cached matcher). */
-function isUriIgnored(uri: vscode.Uri, matcher = getCachedMatcher()): boolean {
-  return isIgnoredRel(matcher, vscode.workspace.asRelativePath(uri, false))
+/** True if the path lies inside an always-excluded directory (see ALWAYS_EXCLUDED_DIRS). */
+function isAlwaysExcluded(fsPath: string): boolean {
+  return ALWAYS_EXCLUDED_RE.test(fsPath)
+}
+
+/** True if the file must never be indexed: always-excluded dir, or gitignored. */
+function isExcludedFile(uri: vscode.Uri, ignores?: Map<string, FolderIgnore>): boolean {
+  return isAlwaysExcluded(uri.fsPath) || isGitIgnored(uri, false, ignores)
+}
+
+/** Folder counterpart of isExcludedFile. */
+function isExcludedFolder(uri: vscode.Uri): boolean {
+  return isAlwaysExcluded(uri.fsPath) || isGitIgnored(uri, true)
+}
+
+/**
+ * Enumerate GTS-candidate files in every workspace folder. Each folder is
+ * searched separately with its own .gitignore-derived excludes, so one folder's
+ * rules never hide paths in another (exclude globs are matched relative to the
+ * folder). No cap unless `capPerFolder` is given; hitting it is logged.
+ */
+async function findGtsFiles(ignores: Map<string, FolderIgnore>, baseExclude: string, capPerFolder?: number): Promise<vscode.Uri[]> {
+  const uris: vscode.Uri[] = []
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    const exclude = combineExcludeGlobs(baseExclude, ignores.get(folder.uri.fsPath)?.excludeGlobs || [])
+    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, GTS_SCAN_GLOB), exclude, capPerFolder)
+    if (capPerFolder !== undefined && found.length >= capPerFolder) {
+      console.warn(`[GTS] Phase 1 hit its ${capPerFolder}-file cap in "${folder.name}"; the rest is indexed by phase 2`)
+    }
+    uris.push(...found)
+  }
+  return uris
 }
 
 // Maps a file's resolved *real* path -> the workspace path we index it under.
@@ -113,12 +156,9 @@ function claimCanonicalPath(fsPath: string): void {
 }
 
 let viewerPanel: vscode.WebviewPanel | null = null
-let layoutStorage: RepoLayoutStorage | null = null
+let layoutStorage: WorkspaceLayoutStorage | null = null
 let hasPerformedInitialScan: boolean = false // Track if initial scan with default file has been done
 let gtsLinkProvider: GtsLinkProvider | null = null
-// The GTS link-format diagnostic collection, kept at module scope so a full
-// store reset (resetGtsStore) can clear it from outside `activate`.
-let gtsLinkFormatDiagnostics: vscode.DiagnosticCollection | null = null
 // File the user explicitly requested (context menu / command palette) — consumed by the first scanAndPost
 let pendingOpenFile: string | null = null
 // Left-sidebar GTS file browser (tree view + red/green file decorations), shares the same registry as everything else.
@@ -171,7 +211,7 @@ async function resyncFile(fsPath: string): Promise<void> {
     return
   }
   const uri = vscode.Uri.file(fsPath)
-  if (!isGtsScanPath(fsPath) || isIgnoredGtsPath(fsPath) || isUriIgnored(uri) || !fs.existsSync(fsPath)) {
+  if (!isGtsScanPath(fsPath) || isExcludedFile(uri) || !fs.existsSync(fsPath)) {
     dropFileFromRegistry(fsPath)
     return
   }
@@ -287,13 +327,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   initValidation(context)
 
-  // Create diagnostic collection for GTS validation
-  const gtsDiagnostics = vscode.languages.createDiagnosticCollection('gts-link-format')
-  gtsLinkFormatDiagnostics = gtsDiagnostics
-  context.subscriptions.push(gtsDiagnostics)
-
   // Initialize and register GTS link provider for clickable GTS IDs
-  gtsLinkProvider = new GtsLinkProvider(gtsDiagnostics)
+  gtsLinkProvider = new GtsLinkProvider()
 
   // Repaint editor decorations whenever document validation completes
   context.subscriptions.push(
@@ -354,14 +389,14 @@ export async function activate(context: vscode.ExtensionContext) {
     folderWatcher,
     folderWatcher.onDidCreate(uri => {
       if (isGtsScanPath(uri.fsPath)) return // file: handled by gtsWatcher
-      if (isIgnoredGtsPath(uri.fsPath + path.sep) || isUriIgnored(uri)) return
+      if (isExcludedFolder(uri)) return
       void (async () => {
         if (await isDirectory(uri)) scheduleFolderScan(uri.fsPath)
       })()
     }),
     folderWatcher.onDidDelete(uri => {
       if (isGtsScanPath(uri.fsPath)) return // file: handled by gtsWatcher
-      if (isIgnoredGtsPath(uri.fsPath + path.sep)) return
+      if (isAlwaysExcluded(uri.fsPath)) return
       onDiskPathRemoved(uri)
     })
   )
@@ -395,11 +430,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Closing a document discards unsaved edits (validation.ts reindexes it from
     // disk). If a scan read the old buffer, re-sync the file after it commits.
     vscode.workspace.onDidCloseTextDocument(doc => {
-      if (!isGtsCandidateFile(doc)) return
-      pathsTouchedDuringScan?.add(doc.uri.fsPath)
-      // Link-format markers are computed from the live buffer; drop them so a
-      // closed file doesn't keep stale ones.
-      gtsLinkProvider?.clearDocument(doc.uri)
+      if (isGtsCandidateFile(doc)) pathsTouchedDuringScan?.add(doc.uri.fsPath)
     })
   )
 
@@ -412,7 +443,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidRenameFiles(async event => {
       for (const { oldUri, newUri } of event.files) {
         dropIndexedPath(oldUri.fsPath)
-        if (isIgnoredGtsPath(newUri.fsPath)) continue
+        if (isAlwaysExcluded(newUri.fsPath)) continue
         if (!isGtsScanPath(newUri.fsPath)) {
           if (await isDirectory(newUri)) await indexFolder(newUri)
           continue
@@ -466,7 +497,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('gts-kit.refreshFileExplorer', async () => {
       try {
-        await refreshGtsFileExplorer(gtsDiagnostics)
+        await refreshGtsFileExplorer()
       } catch (error: any) {
         console.error('[GTS] Full refresh failed:', error)
         vscode.window.showErrorMessage(`Failed to refresh GTS files: ${error?.message || String(error)}`)
@@ -611,12 +642,11 @@ async function resetGtsStore(): Promise<void> {
   setLastScanFiles([])
   await rebuildRegistry([], DEFAULT_GTS_CONFIG)
   resetValidationDiagnostics()
-  gtsLinkFormatDiagnostics?.clear()
   gtsExplorer?.reset()
   await gtsLinkProvider?.refresh()
 }
 
-async function refreshGtsFileExplorer(_linkDiagnostics: vscode.DiagnosticCollection): Promise<void> {
+async function refreshGtsFileExplorer(): Promise<void> {
   pendingOpenFile = null
   await performInitialScan(true)
 }
@@ -647,7 +677,7 @@ async function performInitialScanPass(): Promise<void> {
     // Load .gitignore rules first so both phases permanently exclude ignored
     // files/folders (at enumeration time via globs, plus an authoritative
     // matcher for edge cases such as negations and nested ignores).
-    const { matcher: ignoreMatcher, excludeGlobs: ignoreGlobs } = await getWorkspaceIgnore()
+    const ignores = await getWorkspaceIgnore()
     const openPaths = collectOpenGtsPaths()
 
     // A full scan re-establishes the canonical set of physical files.
@@ -659,8 +689,7 @@ async function performInitialScanPass(): Promise<void> {
     // Also skip known framework files by name. Currently-open files are always
     // included and go first so the file you are looking at colors ASAP (an open
     // file is an explicit user action, so it is coloured even if gitignored).
-    const phase1Exclude = combineExcludeGlobs(FAST_EXCLUDE_GLOB, ignoreGlobs)
-    const fastUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase1Exclude, 40000)
+    const fastUris = await findGtsFiles(ignores, FAST_EXCLUDE_GLOB, PHASE1_FILE_CAP)
     const phase1Candidates: vscode.Uri[] = []
     const phase1Paths = new Set<string>()
     for (const p of openPaths) {
@@ -670,7 +699,7 @@ async function performInitialScanPass(): Promise<void> {
     for (const uri of fastUris) {
       if (phase1Paths.has(uri.fsPath)) continue
       if (isDeferredToPhase2(uri.fsPath)) continue
-      if (isUriIgnored(uri, ignoreMatcher)) continue
+      if (isExcludedFile(uri, ignores)) continue
       phase1Candidates.push(uri)
       phase1Paths.add(uri.fsPath)
     }
@@ -698,11 +727,10 @@ async function performInitialScanPass(): Promise<void> {
     // Enumerate the full set (only .git / our cache + gitignore excluded) and
     // process whatever phase 1 didn't: non-ignored deferred dirs and framework
     // files. Runs after the UI is already coloured, so its cost is not visible.
-    const phase2Exclude = combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs)
-    const allUris = await vscode.workspace.findFiles(GTS_SCAN_GLOB, phase2Exclude, 100000)
+    const allUris = await findGtsFiles(ignores, ALWAYS_EXCLUDE_GLOB)
     // Skip anything already indexed in phase 1 and any symlinked duplicate of a
     // physical file we've already taken (the realPathIndex still holds phase 1).
-    const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isUriIgnored(uri, ignoreMatcher))
+    const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isExcludedFile(uri, ignores))
     const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
     const files2 = phase2Uris.length > 0 ? await readGtsCandidateFiles(phase2Uris) : []
     for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
@@ -790,7 +818,7 @@ async function watchSymlinkedDirs(context: vscode.ExtensionContext): Promise<voi
       } catch {
         continue
       }
-      if (isIgnoredGtsPath(linkUri.fsPath + path.sep)) continue
+      if (isExcludedFolder(linkUri)) continue
       watchedSymlinkDirs.add(linkUri.fsPath)
       const pattern = new vscode.RelativePattern(linkUri, `**/*.{json,jsonc,gts,yaml,yml}`)
       const watcher = vscode.workspace.createFileSystemWatcher(pattern)
@@ -805,11 +833,6 @@ async function watchSymlinkedDirs(context: vscode.ExtensionContext): Promise<voi
   }
 }
 
-/** Paths we never index (build output, VCS internals, our own cache). */
-function isIgnoredGtsPath(fsPath: string): boolean {
-  return /(^|[\\/])(node_modules|\.gts-viewer|dist|\.git)[\\/]/.test(fsPath)
-}
-
 /** True if the file is currently open as a text document (editor owns its content). */
 function isOpenInEditor(fsPath: string): boolean {
   return vscode.workspace.textDocuments.some(d => d.uri.fsPath === fsPath)
@@ -822,8 +845,7 @@ function isOpenInEditor(fsPath: string): boolean {
  */
 async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   const fsPath = uri.fsPath
-  if (isIgnoredGtsPath(fsPath)) return
-  if (isUriIgnored(uri)) return
+  if (isExcludedFile(uri)) return
   if (isOpenInEditor(fsPath)) return
   const mutationRevision = beginFileMutation(fsPath)
   try {
@@ -891,8 +913,12 @@ async function isDirectory(uri: vscode.Uri): Promise<boolean> {
 
 /** Index every GTS file under a folder that just appeared (created, moved in, renamed). */
 async function indexFolder(uri: vscode.Uri): Promise<void> {
-  if (isIgnoredGtsPath(uri.fsPath + path.sep) || isUriIgnored(uri)) return
-  const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(uri, GTS_SCAN_GLOB), ALWAYS_EXCLUDE_GLOB)
+  if (isExcludedFolder(uri)) return
+  // Exclude globs are matched relative to the containing workspace folder, so
+  // that folder's .gitignore globs apply here too.
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri)
+  const ignoreGlobs = workspaceFolder ? (await getWorkspaceIgnore()).get(workspaceFolder.uri.fsPath)?.excludeGlobs || [] : []
+  const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(uri, GTS_SCAN_GLOB), combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs))
   // onDiskFileChanged applies the ignore rules and skips files open in an editor.
   for (const fileUri of uris) await onDiskFileChanged(fileUri)
 }
@@ -1006,6 +1032,14 @@ function handleFileChange(doc: vscode.TextDocument, delayMsec: number = 500) {
   }
 }
 
+/** Root of the workspace folder that holds the target entity's file (first folder if unknown). */
+function layoutRootFor(target: Partial<LayoutTarget>): string {
+  const registry = getRegistry()
+  const entity = target.id ? (registry?.jsonSchemas.get(target.id) || registry?.jsonObjs.get(target.id)) : undefined
+  const folder = entity?.file?.path ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(entity.file.path)) : undefined
+  return (folder ?? vscode.workspace.workspaceFolders![0]).uri.fsPath
+}
+
 function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
   // If viewer already exists, just reveal it (do not change selection or default file)
   if (viewerPanel) {
@@ -1029,16 +1063,14 @@ function openViewer(context: vscode.ExtensionContext, resource?: vscode.Uri) {
   // Store so the first scanAndPost picks it up as defaultFilePath
   pendingOpenFile = selectedPath || null
 
-  // Initialize layout storage with workspace root
+  // Layouts live in the .gts-viewer/ folder of the workspace folder that holds
+  // the diagram's entity (multi-root), falling back to the first folder.
   const workspaceFolders = vscode.workspace.workspaceFolders
   if (!workspaceFolders || workspaceFolders.length === 0) {
     vscode.window.showErrorMessage('Please open a workspace folder to use GTS Viewer')
     return
   }
-
-  const workspaceRoot = workspaceFolders[0].uri.fsPath
-  layoutStorage = new RepoLayoutStorage(workspaceRoot)
-  console.log(`[GTS] Using layout storage at: ${workspaceRoot}/.gts-viewer`)
+  layoutStorage = new WorkspaceLayoutStorage(layoutRootFor)
 
   viewerPanel = vscode.window.createWebviewPanel(
     'gtsViewer',

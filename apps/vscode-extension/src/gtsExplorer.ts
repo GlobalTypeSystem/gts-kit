@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
-import { getRegistry } from './registryStore'
+import { getRegistry, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
 
 /**
  * Left-sidebar file browser for GTS: shows every discovered file that holds at
@@ -28,12 +28,24 @@ interface GtsFolderNode {
 
 type GtsTreeElement = GtsFileNode | GtsFolderNode
 
-/** Build a nested folder/file tree (relative to the workspace root) from a flat list of absolute paths. */
-function buildFileTree(filePaths: string[], workspaceRoot: string): GtsFolderNode {
+/**
+ * Tree path segments for a file: relative to its workspace folder, under a
+ * top-level node named after that folder when the workspace has several roots.
+ * Files outside every folder keep their absolute path.
+ */
+function treePathParts(fsPath: string, multiRoot: boolean): string[] {
+  const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))
+  if (!folder) return fsPath.split(path.sep).filter(Boolean)
+  const rel = path.relative(folder.uri.fsPath, fsPath).split(path.sep).filter(Boolean)
+  return multiRoot ? [folder.name, ...rel] : rel
+}
+
+/** Build a nested folder/file tree (per workspace folder) from a flat list of absolute paths. */
+function buildFileTree(filePaths: string[]): GtsFolderNode {
   const root: GtsFolderNode = { kind: 'folder', label: '', children: new Map() }
+  const multiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1
   for (const fsPath of filePaths) {
-    const rel = workspaceRoot ? path.relative(workspaceRoot, fsPath) : fsPath
-    const parts = rel.split(path.sep).filter(Boolean)
+    const parts = treePathParts(fsPath, multiRoot)
     let current = root
     parts.forEach((part, idx) => {
       const isLast = idx === parts.length - 1
@@ -62,34 +74,59 @@ function sortedChildren(folder: GtsFolderNode): GtsTreeElement[] {
   })
 }
 
-/** Every file path the registry currently knows about (parsed GTS files + files that failed to parse). */
+/**
+ * Every file the registry currently knows about: parsed GTS files, files that
+ * failed to parse, and files whose only GTS content is malformed ids (those
+ * hold no valid entity, so the registry itself doesn't list them).
+ */
 function getDiscoveredFilePaths(): string[] {
   const registry = getRegistry()
   if (!registry) return []
-  const paths = new Set<string>([...registry.jsonFiles.keys(), ...registry.invalidFiles.keys()])
-  return Array.from(paths)
+  return Array.from(new Set<string>([
+    ...registry.jsonFiles.keys(),
+    ...registry.invalidFiles.keys(),
+    ...getPathsWithMalformedIds()
+  ]))
 }
 
-/** True if the given file currently has a GTS validation error reported on it. */
+function isDiscoveredGtsFile(fsPath: string): boolean {
+  const registry = getRegistry()
+  if (!registry) return false
+  return registry.jsonFiles.has(fsPath) || registry.invalidFiles.has(fsPath) || getMalformedIds(fsPath).length > 0
+}
+
+function gtsDiagnosticsOf(uri: vscode.Uri): vscode.Diagnostic[] {
+  return vscode.languages.getDiagnostics(uri).filter(d => d.source === 'GTS')
+}
+
+/** True if the given file currently has a GTS error (warnings such as duplicate ids don't count). */
 export function hasGtsErrors(uri: vscode.Uri): boolean {
-  if (vscode.languages.getDiagnostics(uri).some(d => d.source === 'GTS')) return true
+  if (gtsDiagnosticsOf(uri).some(d => d.severity === vscode.DiagnosticSeverity.Error)) return true
   const registry = getRegistry()
   if (!registry) return false
   const fsPath = uri.fsPath
   if (registry.invalidFiles.get(fsPath)?.validation?.errors.length) return true
+  if (getMalformedIds(fsPath).length > 0) return true
   const entities = [...(registry.jsonFileSchemas.get(fsPath) || []), ...(registry.jsonFileObjs.get(fsPath) || [])]
   return entities.some(entity => Boolean(entity.validation?.errors.length))
 }
 
-/** Total number of GTS validation problems currently reported across the workspace. */
-function countGtsProblems(): number {
-  let count = 0
+/** True if the given file has GTS warnings (e.g. a duplicate id). */
+function hasGtsWarnings(uri: vscode.Uri): boolean {
+  return gtsDiagnosticsOf(uri).some(d => d.severity === vscode.DiagnosticSeverity.Warning)
+}
+
+/** GTS errors and warnings currently reported across the workspace. */
+function countGtsProblems(): { errors: number; warnings: number } {
+  const counts = { errors: 0, warnings: 0 }
   for (const [, diagnostics] of vscode.languages.getDiagnostics()) {
     for (const d of diagnostics) {
-      if (d.source === 'GTS') count++
+      if (d.source !== 'GTS') continue
+      if (d.severity === vscode.DiagnosticSeverity.Error) counts.errors++
+      else if (d.severity === vscode.DiagnosticSeverity.Warning) counts.warnings++
     }
   }
-  return count
+  return counts
 }
 
 /** Collect every file path under an element (a single file, or all files under a folder subtree). */
@@ -126,7 +163,6 @@ export class GtsFileTreeProvider
    * removed so the caller can refresh just those decorations.
    */
   refresh(): vscode.Uri[] {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
     const paths = getDiscoveredFilePaths()
     const nextSet = new Set(paths)
 
@@ -136,7 +172,7 @@ export class GtsFileTreeProvider
     if (changed.length === 0) return []
 
     this.knownPaths = nextSet
-    this.root = buildFileTree(paths, workspaceRoot)
+    this.root = buildFileTree(paths)
     this._onDidChangeTreeData.fire()
     return changed
   }
@@ -153,7 +189,7 @@ export class GtsFileTreeProvider
       }
       item.tooltip = hasGtsErrors(item.resourceUri)
         ? 'Has GTS validation errors'
-        : 'No GTS validation errors'
+        : hasGtsWarnings(item.resourceUri) ? 'Has GTS warnings' : 'No GTS problems'
       return item
     }
 
@@ -189,8 +225,8 @@ export class GtsFileTreeProvider
 
 /**
  * Colors every GTS file (in the sidebar tree, the OS-style Explorer, and open
- * editor tabs) light green when it has no GTS errors and light red when it
- * does. Driven by the same registry + diagnostics the rest of the extension
+ * editor tabs) red when it has GTS errors, yellow when it only has warnings
+ * (e.g. a duplicate id), and green otherwise. Driven by the same registry + diagnostics the rest of the extension
  * uses, so the color always matches the squiggles in the open document.
  */
 export class GtsFileDecorationProvider implements vscode.FileDecorationProvider {
@@ -202,14 +238,13 @@ export class GtsFileDecorationProvider implements vscode.FileDecorationProvider 
   }
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
-    const registry = getRegistry()
-    if (!registry) return undefined
-    const fsPath = uri.fsPath
-    const isDiscoveredGtsFile = registry.jsonFiles.has(fsPath) || registry.invalidFiles.has(fsPath)
-    if (!isDiscoveredGtsFile) return undefined
+    if (!isDiscoveredGtsFile(uri.fsPath)) return undefined
 
     if (hasGtsErrors(uri)) {
       return new vscode.FileDecoration('!', 'GTS: file has validation errors', new vscode.ThemeColor('charts.red'))
+    }
+    if (hasGtsWarnings(uri)) {
+      return new vscode.FileDecoration('!', 'GTS: file has warnings', new vscode.ThemeColor('charts.yellow'))
     }
     return new vscode.FileDecoration(undefined, 'GTS: file is valid', new vscode.ThemeColor('charts.green'))
   }
@@ -225,11 +260,11 @@ export interface GtsExplorer {
 
 /** Update the small rounded problem-count badge shown next to the view title. */
 function updateBadge(treeView: vscode.TreeView<GtsTreeElement>): void {
-  const count = countGtsProblems()
-  treeView.badge = count > 0
-    ? { value: count, tooltip: `${count} GTS problem${count === 1 ? '' : 's'}` }
+  const { errors, warnings } = countGtsProblems()
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+  treeView.badge = errors + warnings > 0
+    ? { value: errors + warnings, tooltip: `GTS: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}` }
     : undefined
-  console.log(`[GTS Explorer] badge updated: ${count} problem(s)`)
 }
 
 /** Wires up the tree view + file decorations and returns handles for the extension to drive refreshes with. */
