@@ -1,7 +1,7 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
 import { isYamlFileName } from './parse.js'
-import { findSchemaPropertyPath, findXGtsRefPath } from './schemaParser.js'
+import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
 import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
@@ -728,6 +728,11 @@ export class JsonRegistry {
             // (e.g. line with `"x-gts-ref": "<id>"`) rather than the document
             // root. Everything else keeps the previous `$id` fallback.
             const refMatch = propPath ? null : msg.match(/^Referenced x-gts-ref entity '([^']+)'/)
+            // A "trait validation: ..." message comes from the OP#13 trait
+            // completeness check; anchor it to the unmet `x-gts-traits-schema`
+            // requirement (the specific `required` entry when we can name the
+            // missing trait) instead of the schema's `$id`.
+            const isTraitError = !propPath && !refMatch && msg.startsWith('trait validation:')
             let instancePath: string | null = null
             let params: Record<string, any> = {}
             if (propPath) {
@@ -736,6 +741,11 @@ export class JsonRegistry {
             } else if (refMatch) {
               instancePath = findXGtsRefPath(entity.content, refMatch[1])
               params = { refValue: refMatch[1] }
+            } else if (isTraitError) {
+              const traitMatch = msg.match(/required (?:property|trait) '([^']+)'/)
+              const traitName = traitMatch ? traitMatch[1] : undefined
+              instancePath = findTraitRequiredPath(entity.content, traitName)
+              params = traitName ? { trait: traitName } : {}
             }
             entity.validation.errors.push({
               instancePath: instancePath || '/$id',

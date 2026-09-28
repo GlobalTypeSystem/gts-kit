@@ -433,3 +433,22 @@ export function findXGtsRefPath(content: any, refValue: string): string | null {
 
   return walk(content, '')
 }
+
+/**
+ * Locate the JSON Pointer instancePath to anchor a trait-completeness error
+ * (OP#13) on. When `traitName` is a required trait declared in this document's
+ * top-level `x-gts-traits-schema`, point at that specific `required` entry
+ * (e.g. `/x-gts-traits-schema/required/0`); otherwise fall back to the
+ * `x-gts-traits-schema` node. Returns null when the document has no local
+ * `x-gts-traits-schema` (the requirement came from an ancestor in the chain),
+ * so callers can fall back to `/$id`.
+ */
+export function findTraitRequiredPath(content: any, traitName?: string): string | null {
+  const traitSchema = content && typeof content === 'object' ? content['x-gts-traits-schema'] : undefined
+  if (!traitSchema || typeof traitSchema !== 'object' || Array.isArray(traitSchema)) return null
+  if (traitName && Array.isArray(traitSchema.required)) {
+    const idx = traitSchema.required.indexOf(traitName)
+    if (idx >= 0) return `/x-gts-traits-schema/required/${idx}`
+  }
+  return '/x-gts-traits-schema'
+}
