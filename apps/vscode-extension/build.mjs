@@ -1,6 +1,29 @@
 import * as esbuild from 'esbuild'
 import { promises as fs } from 'fs'
 import path from 'path'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+
+/**
+ * gts-ts compiles schema patterns with re2-wasm, which loads its `re2.wasm`
+ * binary from the directory of the running script. Bundled, that is `dist/`,
+ * so the binary must sit next to `dist/extension.js` or the extension throws
+ * on load. Resolved through gts-ts so it's the exact copy gts-ts depends on.
+ *
+ * @type {esbuild.Plugin}
+ */
+const copyRe2WasmPlugin = {
+  name: 'copy-re2-wasm',
+  setup(build) {
+    build.onEnd(async result => {
+      if (result.errors.length > 0) return
+      const gtsTsDir = path.dirname(require.resolve('@globaltypesystem/gts-ts/package.json', { paths: ['../../packages/shared'] }))
+      const re2Dir = path.dirname(require.resolve('re2-wasm/package.json', { paths: [gtsTsDir] }))
+      await fs.copyFile(path.join(re2Dir, 'build', 'wasm', 're2.wasm'), path.join('dist', 're2.wasm'))
+    })
+  },
+}
 
 const production = process.argv.includes('--production')
 const watch = process.argv.includes('--watch')
@@ -41,6 +64,7 @@ async function main() {
     mainFields: ['module', 'main'],
     plugins: [
       esbuildProblemMatcherPlugin,
+      copyRe2WasmPlugin,
     ],
   })
 
