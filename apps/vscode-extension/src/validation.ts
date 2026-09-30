@@ -5,9 +5,9 @@ import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import type { JsonRegistry, JsonSchema, JsonObj } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
-import { getRegistry, rebuildRegistry, indexFile, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
+import { getRegistry, rebuildRegistry, indexFile, removeFile, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
 import { malformedGtsIdMessage } from './gtsIdFormat'
-import { isGtsCandidateFile } from './helpers'
+import { isGtsCandidateFile, isIndexableGtsDocument } from './helpers'
 
 let diagnosticCollection: vscode.DiagnosticCollection
 let workspaceDiagnosticCollection: vscode.DiagnosticCollection
@@ -509,7 +509,7 @@ function findValueRangeJson(parsed: ParsedDocument, segments: Array<string | num
  * Validate a document and update diagnostics
  */
 export async function validateOpenDocument(document: vscode.TextDocument) {
-  if (!isGtsCandidateFile(document)) {
+  if (!isIndexableGtsDocument(document)) {
     return
   }
 
@@ -882,7 +882,7 @@ async function validateClosedFile(filePath: string, index?: DefinitionIndex): Pr
  * When an editor closes, any unsaved buffer edits are discarded, so the registry
  * may still hold the stale live content that `validateOpenDocument` indexed. Re-
  * indexing from disk makes the subsequent closed-file validation reflect what is
- * actually on disk. No-op for non-file schemes or unreadable/deleted files.
+ * actually on disk. Deleted or unreadable files are removed from the registry.
  */
 async function reindexClosedFileFromDisk(uri: vscode.Uri): Promise<void> {
   if (uri.scheme !== 'file') return
@@ -894,8 +894,7 @@ async function reindexClosedFileFromDisk(uri: vscode.Uri): Promise<void> {
     try { content = parseGtsFileContent(name, text) } catch { content = text }
     indexFile(uri.fsPath, name, content)
   } catch {
-    // File may have been deleted/renamed; leave the registry as-is so the
-    // watcher's delete handler can drop it.
+    removeFile(uri.fsPath)
   }
 }
 

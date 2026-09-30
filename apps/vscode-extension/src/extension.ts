@@ -8,7 +8,7 @@ import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as remove
 import { getWorkspaceIgnore, resetWorkspaceIgnore, isGitIgnored, type FolderIgnore } from './gitignore'
 import { WorkspaceLayoutStorage } from './storage'
 import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
-import { isGtsCandidateFile } from './helpers'
+import { isGtsCandidateFile, isIndexableGtsDocument } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
@@ -559,17 +559,15 @@ export async function activate(context: vscode.ExtensionContext) {
 function collectOpenGtsPaths(): string[] {
   const ordered: string[] = []
   const seen = new Set<string>()
-  const add = (fsPath: string) => {
+  const add = (doc: vscode.TextDocument) => {
+    if (!isIndexableGtsDocument(doc)) return
+    const fsPath = doc.uri.fsPath
     if (!seen.has(fsPath)) { seen.add(fsPath); ordered.push(fsPath) }
   }
   const active = vscode.window.activeTextEditor?.document
-  if (active && active.uri.scheme === 'file' && isGtsCandidateFile(active)) add(active.uri.fsPath)
-  for (const ed of vscode.window.visibleTextEditors) {
-    if (ed.document.uri.scheme === 'file' && isGtsCandidateFile(ed.document)) add(ed.document.uri.fsPath)
-  }
-  for (const d of vscode.workspace.textDocuments) {
-    if (d.uri.scheme === 'file' && isGtsCandidateFile(d)) add(d.uri.fsPath)
-  }
+  if (active) add(active)
+  for (const ed of vscode.window.visibleTextEditors) add(ed.document)
+  for (const d of vscode.workspace.textDocuments) add(d)
   return ordered
 }
 

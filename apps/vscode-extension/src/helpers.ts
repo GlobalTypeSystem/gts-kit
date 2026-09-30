@@ -1,4 +1,5 @@
 import * as vscode from 'vscode'
+import * as fs from 'fs'
 import { isGtsCandidateFileName } from '@gts/shared'
 
 export function isGtsCandidateFile(document: vscode.TextDocument): boolean {
@@ -10,4 +11,8 @@ export function isGtsCandidateFile(document: vscode.TextDocument): boolean {
     return document.languageId === 'json' ||
            document.languageId === 'jsonc' ||
            isGtsCandidateFileName(document.fileName)
+}
+
+export function isIndexableGtsDocument(document: vscode.TextDocument): boolean {
+    return isGtsCandidateFile(document) && (document.isDirty || fs.existsSync(document.uri.fsPath))
 }
