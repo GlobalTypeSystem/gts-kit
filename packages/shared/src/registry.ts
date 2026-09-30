@@ -193,7 +193,10 @@ export class JsonRegistry {
   // Per-entity validation result for the current generation. Shared by
   // concurrent callers, and lets a pass validate each entity once instead of
   // re-validating the whole parent chain for every derived schema.
-  private validationMemo = new WeakMap<JsonEntity, { generation: number; result: Promise<ValidationResult> }>()
+  private validationMemo = new WeakMap<
+    JsonEntity,
+    { generation: number; result: Promise<ValidationResult>; settled?: ValidationResult }
+  >()
   // Compiled Ajv validators for instance validation, keyed by the (winning)
   // schema's content object. Each gets its own Ajv instance, exactly as before,
   // but is compiled once per generation instead of once per instance.
@@ -657,7 +660,38 @@ export class JsonRegistry {
     }
     const validation = await memo.result
     // A newer computation (registry changed meanwhile) owns the published result.
-    if (this.validationMemo.get(entity) === memo) entity.validation = validation
+    if (this.validationMemo.get(entity) === memo) {
+      memo.settled = validation
+      entity.validation = validation
+    }
+  }
+
+  /**
+   * Validation result of an entity that an instance references through an
+   * `x-gts-ref` field, evaluated within the chain of instances being validated
+   * (`chain`). Returns null for a reference cycle, which is treated as valid
+   * (like gts-ts's visiting guard).
+   *
+   * Schemas are validated normally: a schema's result never depends on an
+   * instance, so waiting on it can't form a cycle. Instances can reference
+   * each other, so an instance is never waited on while its validation is in
+   * progress elsewhere (that could deadlock on a cycle); unless a finished
+   * result for the current generation exists it is recomputed within `chain`,
+   * and not cached, since a cut cycle can make that result differ from the
+   * entity's standalone one.
+   */
+  private async referencedEntityValidation(
+    dependency: JsonEntity,
+    chain: ReadonlySet<JsonEntity>
+  ): Promise<ValidationResult | null> {
+    if (dependency instanceof JsonSchema) {
+      await this.validateEntity(dependency)
+      return dependency.validation ?? null
+    }
+    if (chain.has(dependency)) return null
+    const memo = this.validationMemo.get(dependency)
+    if (memo && memo.generation === this.contentGeneration && memo.settled) return memo.settled
+    return this.computeEntityValidation(dependency, new Set(chain).add(dependency))
   }
 
   /**
@@ -683,7 +717,10 @@ export class JsonRegistry {
     return validator
   }
 
-  private async computeEntityValidation(entity: JsonEntity): Promise<ValidationResult> {
+  private async computeEntityValidation(
+    entity: JsonEntity,
+    chain: ReadonlySet<JsonEntity> = new Set([entity])
+  ): Promise<ValidationResult> {
     const validation: ValidationResult = { errors: [] }
 
     // Enforce gts:// URI-prefix rules: the prefix is required in JSON Schema URL
@@ -995,19 +1032,41 @@ export class JsonRegistry {
         // `gts://` `$ref`s (e.g. `allOf: [{ $ref: <parent type> }]`) into parent
         // schemas: without one, every such `$ref` is unresolvable and gts-ts
         // reports "Cannot resolve $ref ... for x-gts-ref traversal" (it fails
-        // closed rather than skip the parent's constraints). Existence checks
-        // stay off (mode None): referenced-entity existence is already reported
-        // by the gtsRefs registry check above, so this validator only enforces
-        // the GTS-ID format and the prefix/pattern constraint.
-        const xGtsRefErrors = new XGtsRefValidator(this.getGtsStore(), GtsRefValidationMode.None)
-          .validateInstance(entity.content, schema.content, '', undefined, entity.id)
+        // closed rather than skip the parent's constraints). It runs in
+        // any-present mode to collect the referenced ids for the any-valid
+        // check below; its own "not found" errors repeat the gtsRefs registry
+        // check above and are dropped.
+        const refValidator = new XGtsRefValidator(this.getGtsStore(), GtsRefValidationMode.AnyPresent)
+        const xGtsRefErrors = refValidator.validateInstance(entity.content, schema.content, '', undefined, entity.id)
         for (const err of xGtsRefErrors) {
+          if (/^Referenced entity '.+' not found in registry$/.test(err.reason)) continue
           validation.errors.push({
             instancePath: fieldPathToInstancePath(err.fieldPath),
             schemaPath: '#',
             keyword: 'x-gts-ref',
             message: err.reason,
             params: { value: err.value, refPattern: err.refPattern }
+          })
+        }
+
+        // §9.6 `gts-ref-validation=any-valid` (the spec's default policy): an
+        // entity referenced through an `x-gts-ref` field must itself be valid,
+        // transitively, or the referencing instance is invalid too.
+        for (const referencedId of refValidator.getReferencedIds()) {
+          const dependency = this.jsonObjs.get(referencedId) ?? this.jsonSchemas.get(referencedId)
+          if (!dependency || dependency === entity) continue
+          const dependencyValidation = await this.referencedEntityValidation(dependency, chain)
+          const firstError = dependencyValidation?.errors[0]
+          if (!firstError) continue
+          const sourcePath = entity.gtsRefs?.find(ref => ref.id === referencedId)?.sourcePath
+          validation.errors.push({
+            instancePath: sourcePath && sourcePath !== 'root'
+              ? '/' + sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+              : '/',
+            schemaPath: '#',
+            keyword: 'x-gts-ref',
+            message: `Referenced entity '${referencedId}' is invalid: ${firstError.message}`,
+            params: { value: referencedId }
           })
         }
       } catch (error: any) {
