@@ -17,7 +17,7 @@ interface ValidationError {
 /**
  * Render a GTS ID value with proper color-coding for each part
  */
-function renderGtsValue(value: string, registry: JsonRegistry | null) {
+function renderGtsValue(value: string, registry: JsonRegistry | null, hasError?: boolean) {
   // Remove quotes if present
   const raw = value.replace(/^"/, '').replace(/"$/, '')
 
@@ -26,12 +26,14 @@ function renderGtsValue(value: string, registry: JsonRegistry | null) {
     return <span>{value}</span>
   }
 
-  // Analyze the GTS ID for styling
+  // Analyze the GTS ID for styling. Correctness is driven by gts-ts validation
+  // results surfaced via `isValid` (per entity) and the `hasError` flag (a
+  // gts-ts validation error reported on this exact property).
   const analysis = analyzeGtsIdForStyling(raw, (entityId: string) => {
     if (!registry) return { exists: false }
     const schema = registry.jsonSchemas.get(entityId)
     const obj = registry.jsonObjs.get(entityId)
-    if (schema) return { exists: true, isSchema: true }
+    if (schema) return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
     if (obj) return { exists: true, isSchema: false }
     return { exists: false }
   })
@@ -62,15 +64,15 @@ function renderGtsValue(value: string, registry: JsonRegistry | null) {
         let bgColor: string
         let textColor: string
 
-        if (segment.type === 'schema') {
-          bgColor = '#dbeafe' // blue-100
-          textColor = '#1e40af' // blue-800
-        } else if (segment.type === 'instance') {
-          bgColor = '#dcfce7' // green-100
-          textColor = '#166534' // green-800
-        } else {
+        if (hasError || segment.type === 'error' || segment.type === 'invalid') {
           bgColor = '#fee2e2' // red-100
           textColor = '#991b1b' // red-800
+        } else if (segment.type === 'schema') {
+          bgColor = '#dbeafe' // blue-100
+          textColor = '#1e40af' // blue-800
+        } else {
+          bgColor = '#dcfce7' // green-100
+          textColor = '#166534' // green-800
         }
 
         return (
@@ -274,7 +276,7 @@ function PropertyItem({ property, level, pathKey, sectionStates, onToggleSection
                       } catch {}
                     }}
                   >
-                    {renderGtsValue(String(property.value), registry)}
+                    {renderGtsValue(String(property.value), registry, hasError)}
                   </span>
                 )}
 

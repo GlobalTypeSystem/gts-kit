@@ -3,17 +3,26 @@ import * as path from 'path'
 import ignore, { type Ignore } from 'ignore'
 
 /**
- * Loads every .gitignore in the workspace and exposes:
+ * Loads every .gitignore in the workspace and exposes, per workspace folder:
  *  - `matcher`: an authoritative gitignore matcher (correct semantics, including
  *    negations and nesting) for single-path checks.
  *  - `excludeGlobs`: VS Code exclude globs derived from the same rules, used to
  *    keep `findFiles` from even enumerating ignored (often huge) directories.
  *
- * Nested .gitignore files are rebased so their patterns are workspace-root
- * relative, letting one matcher/one glob set cover the whole workspace.
+ * Nested .gitignore files are rebased so their patterns are relative to their
+ * workspace folder's root, letting one matcher/one glob set cover the folder.
+ * Folders are kept apart: in a multi-root workspace one folder's rules must not
+ * hide same-named paths in another folder.
  */
 
-let cached: { matcher: Ignore; excludeGlobs: string[] } | null = null
+export interface FolderIgnore {
+  /** fsPath of the workspace folder these rules are relative to. */
+  root: string
+  matcher: Ignore
+  excludeGlobs: string[]
+}
+
+let cached: Map<string, FolderIgnore> | null = null
 
 interface RebasedPattern { pattern: string; negated: boolean }
 
@@ -60,33 +69,41 @@ function patternToGlobs(rootRelPattern: string): string[] {
     : [`**/${p}`, `**/${p}/**`]
 }
 
-/** Load (and cache) the workspace gitignore matcher + derived exclude globs. */
-export async function getWorkspaceIgnore(): Promise<{ matcher: Ignore; excludeGlobs: string[] }> {
+/** Load (and cache) the gitignore rules of every workspace folder, keyed by folder fsPath. */
+export async function getWorkspaceIgnore(): Promise<Map<string, FolderIgnore>> {
   if (cached) return cached
-  const matcher = ignore()
-  const globs = new Set<string>()
+  const byFolder = new Map<string, { matcher: Ignore; globs: Set<string> }>()
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    byFolder.set(folder.uri.fsPath, { matcher: ignore(), globs: new Set() })
+  }
   try {
-    const uris = await vscode.workspace.findFiles('**/.gitignore', '**/{.git,node_modules}/**', 500)
+    // No result cap: a missed .gitignore silently un-ignores whole trees.
+    const uris = await vscode.workspace.findFiles('**/.gitignore', '**/{.git,node_modules}/**')
     for (const uri of uris) {
+      const folder = vscode.workspace.getWorkspaceFolder(uri)
+      const entry = folder && byFolder.get(folder.uri.fsPath)
+      if (!folder || !entry) continue
       let text: string
       try {
         text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')
       } catch { continue }
-      const dirRel = path.dirname(vscode.workspace.asRelativePath(uri, false))
+      const dirRel = path.relative(folder.uri.fsPath, path.dirname(uri.fsPath))
       for (const line of text.split('\n')) {
         const r = rebasePattern(line, dirRel)
         if (!r) continue
-        matcher.add(r.pattern)
+        entry.matcher.add(r.pattern)
         // Negations can't be expressed as an exclude glob; the matcher remains
         // authoritative for those. Only non-negated rules feed the glob set.
-        if (!r.negated) for (const g of patternToGlobs(r.pattern)) globs.add(g)
+        if (!r.negated) for (const g of patternToGlobs(r.pattern)) entry.globs.add(g)
       }
     }
   } catch (e) {
     console.error('[GTS] Failed to load .gitignore rules:', e)
   }
-  cached = { matcher, excludeGlobs: [...globs] }
-  return cached
+  const result = new Map<string, FolderIgnore>()
+  for (const [root, { matcher, globs }] of byFolder) result.set(root, { root, matcher, excludeGlobs: [...globs] })
+  cached = result
+  return result
 }
 
 /** Drop the cache so the next call re-reads .gitignore files. */
@@ -94,12 +111,22 @@ export function resetWorkspaceIgnore(): void {
   cached = null
 }
 
-/** The cached matcher, or null if not loaded yet (sync accessor for hot paths). */
-export function getCachedMatcher(): Ignore | null {
-  return cached?.matcher ?? null
+/**
+ * True if the file (or, with `isDirectory`, the folder) is gitignored by the
+ * rules of the workspace folder that contains it. Uses the given rules, or the
+ * cached ones (sync, for hot paths); false before the rules have been loaded
+ * and for paths outside every workspace folder.
+ */
+export function isGitIgnored(uri: vscode.Uri, isDirectory = false, ignores = cached): boolean {
+  if (!ignores) return false
+  const folder = vscode.workspace.getWorkspaceFolder(uri)
+  const entry = folder && ignores.get(folder.uri.fsPath)
+  if (!folder || !entry) return false
+  const rel = path.relative(folder.uri.fsPath, uri.fsPath)
+  return isIgnoredRel(entry.matcher, isDirectory && rel ? rel + '/' : rel)
 }
 
-/** True if a workspace-relative path is gitignored per the given matcher. */
+/** True if a folder-relative path is gitignored per the given matcher. */
 export function isIgnoredRel(matcher: Ignore | null, relPath: string): boolean {
   if (!matcher || !relPath || relPath.startsWith('..')) return false
   const posix = relPath.replace(/\\/g, '/')

@@ -1,12 +1,92 @@
 import { JsonFile, JsonObj, JsonSchema, createEntity, getGtsConfig, decodeGtsId, createAbsentEntity, normalizeGtsId, findGtsPrefixViolations } from './entities.js'
 import type { GtsConfig, JsonEntity, ValidationResult, ValidationError } from './entities.js'
+import { isYamlFileName } from './parse.js'
+import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, findRegexPatternPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
-import { GtsModifiers, GtsStore, createJsonEntity } from '@globaltypesystem/gts-ts'
+import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity } from '@globaltypesystem/gts-ts'
 // XGtsRefValidator is not re-exported from the package index, so import it from
 // its published subpath module.
 import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
+import type { Format } from 'ajv'
 import * as path from 'path'
+
+const JSON_SCHEMA_ANNOTATION_KEYWORDS = new Set([
+  '$comment',
+  'title',
+  'description',
+  'default',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  'examples',
+  'contentEncoding',
+  'contentMediaType',
+  'contentSchema'
+])
+
+/**
+ * Prepare a schema for Ajv instance validation by removing the `x-gts-ref`
+ * keyword, mirroring gts-ts's own `GtsStore.normalizeSchema` (the reference
+ * implementation strips `x-gts-ref` "so Ajv never sees the unknown keyword"
+ * and then prunes combinator branches that were `x-gts-ref`-only).
+ *
+ * This matters for combinators: a branch like `{ "x-gts-ref": "…" }` becomes an
+ * empty schema once the keyword is dropped, i.e. always-true. Left in place, an
+ * `oneOf` of two such branches matches *both* and Ajv spuriously reports
+ * "must match exactly one schema in oneOf" for a value that is perfectly valid.
+ * The actual `x-gts-ref` assertions — including correct oneOf/anyOf branch
+ * counting — are enforced separately by `XGtsRefValidator` (§9.6).
+ *
+ * Unlike gts-ts's full `normalizeSchema`, this intentionally does NOT rewrite
+ * `$id`/`$ref` (it leaves any `gts://` prefixes untouched) because the
+ * registry's Ajv instance resolves those via its own `gts://`-aware loader.
+ */
+function stripXGtsRefForAjv(schema: any): any {
+  if (schema === null || typeof schema !== 'object') return schema
+  if (Array.isArray(schema)) return schema.map(stripXGtsRefForAjv)
+
+  const normalized: Record<string, any> = {}
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === 'x-gts-ref') continue
+    normalized[key] = value && typeof value === 'object' ? stripXGtsRefForAjv(value) : value
+  }
+
+  // Drop combinator subschemas whose only assertion was `x-gts-ref`, so Ajv
+  // doesn't treat their remaining annotations as always-true branches.
+  for (const combinator of ['oneOf', 'anyOf', 'allOf'] as const) {
+    if (!Array.isArray(normalized[combinator])) continue
+    normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
+      const original = (schema as any)[combinator]?.[idx]
+      const hasOnlyXGtsRefAssertion =
+        original &&
+        typeof original === 'object' &&
+        !Array.isArray(original) &&
+        original['x-gts-ref'] !== undefined &&
+        Object.keys(original).every(key => key === 'x-gts-ref' || JSON_SCHEMA_ANNOTATION_KEYWORDS.has(key))
+      return !hasOnlyXGtsRefAssertion
+    })
+    if (normalized[combinator].length === 0) delete normalized[combinator]
+  }
+
+  return normalized
+}
+
+/**
+ * Evaluate one of `ajv-formats`' standard `Format` definitions against a string.
+ * A `Format` may be a `RegExp`, a validator function, or a
+ * `{ validate }` object whose `validate` is again a regex or a function.
+ */
+function matchesFormat(format: Format, value: string): boolean {
+  if (format instanceof RegExp) return format.test(value)
+  // The `Format` union also covers async/number variants; the temporal string
+  // formats we compose here are synchronous, so narrow the callable/regex forms.
+  const def = format as { validate?: RegExp | ((v: string) => boolean) } | ((v: string) => boolean)
+  const validate = typeof def === 'function' ? def : def?.validate
+  if (validate instanceof RegExp) return validate.test(value)
+  if (typeof validate === 'function') return Boolean(validate(value))
+  return false
+}
 
 /**
  * Convert an XGtsRefValidator field path (dot/bracket notation, e.g.
@@ -23,6 +103,54 @@ function fieldPathToInstancePath(fieldPath: string): string {
  */
 function normalizeToArray(content: any): any[] {
   return Array.isArray(content) ? content : [content]
+}
+
+/**
+ * True when a resolved subschema describes a *scalar data value* rather than a
+ * GTS reference: it constrains the value with a scalar `type`, a `format`, an
+ * `enum`, or a `const`, and does NOT declare it as a reference via `x-gts-ref`
+ * or `$ref`. Used to suppress the syntactic "GTS reference not found" check for
+ * fields whose GTS-id-shaped value is just data (e.g. a `format: uuid` string).
+ */
+function isScalarDataField(sub: any): boolean {
+  if (!sub || typeof sub !== 'object') return false
+  if (sub['x-gts-ref'] !== undefined || sub['$ref'] !== undefined) return false
+  const scalarTypes = new Set(['string', 'number', 'integer', 'boolean', 'null'])
+  const t = sub.type
+  const hasScalarType = typeof t === 'string'
+    ? scalarTypes.has(t)
+    : Array.isArray(t) && t.length > 0 && t.every((x: any) => scalarTypes.has(x))
+  return hasScalarType || sub.format !== undefined || sub.enum !== undefined || sub.const !== undefined
+}
+
+/**
+ * Reverse-dependency graph, split by how a change propagates.
+ *
+ * `structural.get(id)` — entity ids whose *effective schema* incorporates `id`
+ *   (derivation, multi-level derivation, instantiation, `$ref`/`allOf`). A change
+ *   to `id` changes their meaning, so this relation is followed **transitively**.
+ *
+ * `references.get(id)` — entity ids that merely *point at* `id` by GTS id (any
+ *   GTS id field, `x-gts-ref`). They must be re-checked when `id` changes/renames,
+ *   but their own shape is unaffected, so this relation is applied **depth-1**.
+ */
+interface DependencyGraph {
+  structural: Map<string, Set<string>>
+  references: Map<string, Set<string>>
+}
+
+/**
+ * Outcome of handling a single file change (see JsonRegistry.applyFileChange /
+ * revalidateAfterChange). All paths are the entity file paths that were
+ * revalidated in the registry so callers can refresh exactly those.
+ */
+export interface RevalidationResult {
+  /** The file that changed. */
+  changedPath: string
+  /** Files whose entities depend on the changed file and were revalidated. */
+  dependentPaths: Set<string>
+  /** All revalidated paths (the changed file, if still present, plus dependents). */
+  revalidatedPaths: string[]
 }
 
 /**
@@ -52,6 +180,29 @@ export class JsonRegistry {
   // gts-ts store (register() throws these per §9.11.1), keyed by schema id.
   private gtsStoreDeclErrors: Map<string, string> = new Map()
 
+  // Cached reverse-dependency graph used by getDependentFilePaths(). Rebuilt
+  // lazily and invalidated whenever the entity set changes (any indexFile /
+  // invalidateFile / reset). See buildDependencyGraph() for the edge model.
+  private depGraph: DependencyGraph | null = null
+
+  // Bumped on every change to the indexed content (index/invalidate/reset).
+  // Validation results and compiled validators are only reused within one
+  // generation, because an entity's result depends on the rest of the registry
+  // ($ref targets, parent schemas, referenced ids).
+  private contentGeneration = 0
+  // Per-entity validation result for the current generation. Shared by
+  // concurrent callers, and lets a pass validate each entity once instead of
+  // re-validating the whole parent chain for every derived schema.
+  private validationMemo = new WeakMap<
+    JsonEntity,
+    { generation: number; result: Promise<ValidationResult>; settled?: ValidationResult }
+  >()
+  // Compiled Ajv validators for instance validation, keyed by the (winning)
+  // schema's content object. Each gets its own Ajv instance, exactly as before,
+  // but is compiled once per generation instead of once per instance.
+  private instanceValidators: { generation: number; byContent: Map<object, Promise<ValidateFunction>> } =
+    { generation: -1, byContent: new Map() }
+
   constructor() {
     this.jsonObjs = new Map<string, JsonObj>()
     this.jsonSchemas = new Map<string, JsonSchema>()
@@ -74,6 +225,8 @@ export class JsonRegistry {
     this.jsonFileSchemas.clear()
     this.defaultFilePath = null
     this.invalidateGtsStore()
+    this.depGraph = null
+    this.contentGeneration++
   }
 
   /** Drop the cached gts-ts store so it is rebuilt from current schemas on next use. */
@@ -83,11 +236,14 @@ export class JsonRegistry {
   }
 
   /**
-   * Build (once, then cache) a gts-ts GtsStore mirroring every schema currently
-   * in the registry, so ancestor-chain-dependent checks (derivation, traits,
-   * final/abstract guards) can be delegated to the reference implementation.
-   * Modifier-declaration errors that gts-ts throws at registration time are
-   * captured per schema id rather than aborting the whole build.
+   * Build (once, then cache) a gts-ts GtsStore mirroring every schema *and
+   * instance* currently in the registry, so both ancestor-chain-dependent
+   * schema checks (derivation, traits, final/abstract guards) and instance
+   * checks (`validateInstance`) can be delegated to the reference
+   * implementation instead of being re-derived here. Modifier-declaration
+   * errors that gts-ts throws when registering a schema are captured per id
+   * rather than aborting the whole build; instances that fail to register are
+   * skipped (they surface through the normal instance-validation path).
    */
   private getGtsStore(): GtsStore {
     if (this.gtsStore) return this.gtsStore
@@ -100,6 +256,14 @@ export class JsonRegistry {
         this.gtsStoreDeclErrors.set(schema.id, err instanceof Error ? err.message : String(err))
       }
     }
+    for (const obj of this.jsonObjs.values()) {
+      try {
+        store.register(createJsonEntity(obj.content))
+      } catch {
+        // Instance couldn't be registered (e.g. malformed/UUID-less id); it is
+        // reported through validateEntity's normal path, not via the store.
+      }
+    }
     this.gtsStore = store
     return store
   }
@@ -108,8 +272,11 @@ export class JsonRegistry {
    * Invalidate a file and remove its JsonFile and associated records from the registry.
    */
   invalidateFile(path: string): void {
-    // Any schema set change invalidates the derived gts-ts store.
+    // Any schema set change invalidates the derived gts-ts store and the
+    // reverse-dependency graph (both are rebuilt lazily on next use).
     this.invalidateGtsStore()
+    this.depGraph = null
+    this.contentGeneration++
     if (this.jsonFiles.has(path)) {
       this.jsonFiles.delete(path)
     }
@@ -130,6 +297,260 @@ export class JsonRegistry {
       this.jsonFileSchemas.delete(path)
       this.jsonFileSchemas.set(path, [])
     }
+  }
+
+  /**
+   * Cumulative `~`-terminated prefixes of a GTS id — its ancestor *type* chain.
+   *
+   * GTS encodes derivation directly in the id: a type id and every derived type
+   * appended after it are separated by `~`. So for
+   * `gts.a.b.c.d.v1~k.l.m.n.v1~` the ancestor type ids are
+   * `gts.a.b.c.d.v1~` (the base) and `gts.a.b.c.d.v1~k.l.m.n.v1~` (the full id).
+   * This is how single-level derivation, multi-level derivation and
+   * instantiation are all reduced to one relation: "does this id's type chain
+   * contain the changed type id?".
+   */
+  private static ancestorTypeIds(id: string): string[] {
+    const out: string[] = []
+    if (!id) return out
+    let idx = id.indexOf('~')
+    while (idx !== -1) {
+      out.push(id.slice(0, idx + 1))
+      idx = id.indexOf('~', idx + 1)
+    }
+    return out
+  }
+
+  /** All entity ids currently defined in the given file (schemas + instances). */
+  getEntityIdsForFile(path: string): string[] {
+    const ids: string[] = []
+    for (const s of this.jsonFileSchemas.get(path) || []) ids.push(s.id)
+    for (const o of this.jsonFileObjs.get(path) || []) ids.push(o.id)
+    return ids
+  }
+
+  /**
+   * Build (once, then cache) the reverse-dependency graph. See DependencyGraph
+   * for the two edge kinds and how each propagates. Edges recorded per entity:
+   *
+   *  structural (transitive — Type #1 schema dependency):
+   *    - derivation / multi-level derivation: a schema whose own id has the
+   *      target in its ancestor type chain (id prefix at `~` boundaries)
+   *    - instantiation: an instance whose `schemaId` chain contains the target
+   *      (its direct type and every base of that type)
+   *    - `$ref` / `allOf` / ...: a schema whose JSON-Schema refs point at target
+   *      (JsonSchema.schemaRefs)
+   *
+   *  references (depth-1 — Type #2 id reference):
+   *    - any GTS id used anywhere in the entity's content (JsonEntity.gtsRefs),
+   *      which already includes `x-gts-ref` targets (their concrete values are
+   *      valid GTS ids). Wildcard `x-gts-ref` *patterns* are authoring
+   *      constraints; the concrete instance value that matches carries the real
+   *      id edge via gtsRefs, so patterns need no separate reverse edge.
+   */
+  private buildDependencyGraph(): DependencyGraph {
+    if (this.depGraph) return this.depGraph
+
+    const structural = new Map<string, Set<string>>()
+    const references = new Map<string, Set<string>>()
+    const link = (map: Map<string, Set<string>>, target: string, dependent: string) => {
+      if (!target || !dependent || target === dependent) return
+      let set = map.get(target)
+      if (!set) { set = new Set<string>(); map.set(target, set) }
+      set.add(dependent)
+    }
+
+    const addEntity = (entity: JsonEntity, isSchema: boolean) => {
+      const eid = entity.id
+      if (!eid) return
+
+      // Structural: derivation & instantiation via the type chain. Schemas
+      // derive from their proper ancestors (exclude their own full id); an
+      // instance depends on every type in its schemaId chain (incl. direct type).
+      const chainSource = isSchema ? eid : (entity.schemaId || '')
+      for (const ancestor of JsonRegistry.ancestorTypeIds(chainSource)) {
+        if (isSchema && ancestor === eid) continue
+        link(structural, ancestor, eid)
+      }
+      // Structural: JSON-Schema $ref / allOf composition (schemas only).
+      if (isSchema) {
+        const schemaRefs = (entity as JsonSchema).schemaRefs
+        if (schemaRefs) for (const ref of schemaRefs) link(structural, ref.id, eid)
+      }
+
+      // References (depth-1): every GTS id the entity points at.
+      if (entity.gtsRefs) {
+        for (const ref of entity.gtsRefs) link(references, ref.id, eid)
+      }
+    }
+
+    for (const schema of this.jsonSchemas.values()) addEntity(schema, true)
+    for (const obj of this.jsonObjs.values()) addEntity(obj, false)
+
+    this.depGraph = { structural, references }
+    return this.depGraph
+  }
+
+  /**
+   * Return the set of file paths (excluding `changedPath`) whose entities must be
+   * revalidated when `changedPath` changes.
+   *
+   * Two relations are combined (see DependencyGraph):
+   *   1. structural dependents are followed **transitively** (a derived type's
+   *      own dependents are affected too);
+   *   2. plain id-reference dependents of the changed (seed) ids are added
+   *      **depth-1**. A structural descendant's *shape* may change, but a plain
+   *      id reference only checks its target's existence/id — which is unchanged
+   *      — so references are not propagated through the structural closure.
+   *
+   * The structural walk is breadth-first guarded by a `visited` set, so
+   * derivation can never cycle and reference cycles (schema A `$ref`s B and B
+   * `$ref`s A) terminate.
+   *
+   * `extraSeedIds` lets callers add ids that existed *before* an edit (captured
+   * prior to reindexing) so that renaming/removing an id still revalidates the
+   * files that referenced its old id.
+   */
+  getDependentFilePaths(changedPath: string, extraSeedIds?: Iterable<string>): Set<string> {
+    const paths = new Set<string>()
+
+    const seedIds = new Set<string>(this.getEntityIdsForFile(changedPath))
+    if (extraSeedIds) for (const id of extraSeedIds) if (id) seedIds.add(id)
+    if (seedIds.size === 0) return paths
+
+    const { structural, references } = this.buildDependencyGraph()
+
+    const addFile = (entityId: string) => {
+      const filePath = this.jsonSchemas.get(entityId)?.file?.path
+        || this.jsonObjs.get(entityId)?.file?.path
+      if (filePath && filePath !== changedPath) paths.add(filePath)
+    }
+
+    // 1. Transitive structural closure over the changed ids. `visited` guards
+    //    the BFS against cycles (reference-induced or otherwise).
+    const visited = new Set<string>(seedIds)
+    const queue = [...seedIds]
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      const dependents = structural.get(current)
+      if (!dependents) continue
+      for (const dependent of dependents) {
+        if (visited.has(dependent)) continue
+        visited.add(dependent)
+        queue.push(dependent)
+        addFile(dependent)
+      }
+    }
+
+    // 2. Depth-1 id-reference dependents of the changed (seed) ids only.
+    for (const id of seedIds) {
+      const referrers = references.get(id)
+      if (!referrers) continue
+      for (const referrer of referrers) addFile(referrer)
+    }
+
+    return paths
+  }
+
+  /**
+   * Validate every entity currently indexed for `path` (schemas first, then
+   * instances) against the current registry context. Files that failed to parse
+   * already carry their error on the JsonFile in `invalidFiles`, so they are
+   * skipped here.
+   */
+  async validateFile(path: string): Promise<void> {
+    if (this.invalidFiles.has(path)) return
+    for (const schema of this.jsonFileSchemas.get(path) || []) {
+      await this.validateEntity(schema)
+    }
+    for (const obj of this.jsonFileObjs.get(path) || []) {
+      await this.validateEntity(obj)
+    }
+  }
+
+  /**
+   * Revalidate `changedPath` and every file that (transitively/­referentially)
+   * depends on it. Assumes the changed file's new content is *already indexed*
+   * (via `indexFile`/`invalidateFile`). `previousIds` should carry the ids the
+   * file defined before the edit so a rename/removal still revalidates the files
+   * that referenced the old id.
+   *
+   * Returns the affected file paths (the changed file, when it still holds
+   * entities, plus all dependents) so callers can refresh their UI/markers.
+   */
+  async revalidateAfterChange(
+    changedPath: string,
+    previousIds?: Iterable<string>
+  ): Promise<RevalidationResult> {
+    const dependents = this.getDependentFilePaths(changedPath, previousIds)
+
+    const revalidatedPaths: string[] = []
+    const changedStillPresent = this.jsonFiles.has(changedPath) || this.invalidFiles.has(changedPath)
+    if (changedStillPresent) {
+      await this.validateFile(changedPath)
+      revalidatedPaths.push(changedPath)
+    }
+    for (const dependentPath of dependents) {
+      await this.validateFile(dependentPath)
+      revalidatedPaths.push(dependentPath)
+    }
+
+    return { changedPath, dependentPaths: dependents, revalidatedPaths }
+  }
+
+  /**
+   * End-to-end handler for a single file change, shared by every app (Web,
+   * Electron, VS Code) so revalidation behaves identically everywhere:
+   *   1. snapshot the file's previous entity ids (for rename/removal),
+   *   2. (re)index the new `content` — or drop the file when `content` is
+   *      null/undefined (deletion),
+   *   3. revalidate the changed file and all of its dependents.
+   */
+  async applyFileChange(
+    path: string,
+    name: string,
+    content: any,
+    cfg: GtsConfig = getGtsConfig(undefined)
+  ): Promise<RevalidationResult> {
+    const previousIds = this.getEntityIdsForFile(path)
+    if (content === null || content === undefined) {
+      this.invalidateFile(path)
+    } else {
+      this.indexFile(path, name, content, cfg)
+    }
+    return this.revalidateAfterChange(path, previousIds)
+  }
+
+  /**
+   * Recursively collect GTS entity definitions embedded inline under any nested
+   * `entities:` array within a parsed (YAML) document. This supports config
+   * files that seed GTS types/instances inline — e.g. a service's
+   * `types-registry.config.entities` block — where each array element is a full
+   * JSON Schema / instance keyed by its own `$id`.
+   *
+   * The returned contents are handed to the normal entity pipeline
+   * (`createEntity` + `isGtsEntity`), so non-GTS `entities` entries are filtered
+   * out naturally and only genuine definitions are registered.
+   */
+  private static collectInlineEntityDefinitions(root: any): any[] {
+    const out: any[] = []
+    const visit = (node: any): void => {
+      if (!node || typeof node !== 'object') return
+      if (Array.isArray(node)) {
+        node.forEach(visit)
+        return
+      }
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'entities' && Array.isArray(value)) {
+          for (const el of value) {
+            if (el && typeof el === 'object' && !Array.isArray(el)) out.push(el)
+          }
+        }
+        visit(value)
+      }
+    }
+    visit(root)
+    return out
   }
 
   /**
@@ -157,18 +578,11 @@ export class JsonRegistry {
     // when a raw string was passed in.
     const parsedContent = jsonFile.content
 
-    // Normalize content to array and process each entity
-    const entities = normalizeToArray(parsedContent)
-    entities.forEach((entityContent: any, idx: number) => {
-      const seq = Array.isArray(parsedContent) ? idx : undefined
-      const entity = createEntity({
-        file: jsonFile,
-        listSequence: seq,
-        content: entityContent,
-        cfg
-      })
-
-      if (entity && entity.isGtsEntity()) {
+    // Register one entity content as a schema/instance if it is a GTS entity.
+    const registerEntity = (entityContent: any, seq: number | undefined, requireSelectedId = false) => {
+      const entity = createEntity({ file: jsonFile, listSequence: seq, content: entityContent, cfg })
+      const hasSelectedId = entity?.selectedEntityIdField !== undefined || entity?.selectedSchemaIdField !== undefined
+      if (entity && (!requireSelectedId || hasSelectedId) && entity.isGtsEntity()) {
         hasGtsEntities = true
         if (entity instanceof JsonSchema) {
           this.jsonSchemas.set(entity.id, entity)
@@ -178,7 +592,26 @@ export class JsonRegistry {
           this.jsonFileObjs.set(path, [...this.jsonFileObjs.get(path) || [], entity as JsonObj])
         }
       }
+    }
+
+    // Top level: a single entity, or a top-level array of entities. This is the
+    // only shape recognized for JSON/JSONC/.gts files.
+    const entities = normalizeToArray(parsedContent)
+    entities.forEach((entityContent: any, idx: number) => {
+      registerEntity(entityContent, Array.isArray(parsedContent) ? idx : undefined, isYamlFileName(name))
     })
+
+    // YAML ONLY: config files may additionally *define* GTS types/instances
+    // inline under nested `entities:` arrays (e.g. a types-registry
+    // `config.entities` seed block), possibly buried several levels deep inside
+    // otherwise-non-GTS config. Register each such element as a real definition
+    // so its `$id` is treated as a definition instead of being harvested as a
+    // dangling reference. JSON files intentionally keep the strict shape above.
+    if (isYamlFileName(name)) {
+      for (const def of JsonRegistry.collectInlineEntityDefinitions(parsedContent)) {
+        registerEntity(def, undefined)
+      }
+    }
 
     // Only store the JsonFile once if it contains GTS entities
     if (hasGtsEntities && !this.jsonFiles.has(path)) {
@@ -207,10 +640,88 @@ export class JsonRegistry {
 
   /**
    * Validate a single entity against its schema.
+   *
+   * The result is built locally and published with a single assignment. The
+   * computation awaits (Ajv compileAsync, parent validation), so two overlapping
+   * validations of the same entity (e.g. an open-document check racing a
+   * workspace pass) used to reset and append to the shared `entity.validation`
+   * in interleaved order, duplicating or dropping errors.
    */
   async validateEntity(entity: JsonEntity): Promise<void> {
-    // Initialize validation result
-    entity.validation = { errors: [] }
+    const generation = this.contentGeneration
+    let memo = this.validationMemo.get(entity)
+    if (!memo || memo.generation !== generation) {
+      const result = this.computeEntityValidation(entity)
+      memo = { generation, result }
+      this.validationMemo.set(entity, memo)
+      // Don't cache a failure: let the next call retry.
+      const current = memo
+      result.catch(() => { if (this.validationMemo.get(entity) === current) this.validationMemo.delete(entity) })
+    }
+    const validation = await memo.result
+    // A newer computation (registry changed meanwhile) owns the published result.
+    if (this.validationMemo.get(entity) === memo) {
+      memo.settled = validation
+      entity.validation = validation
+    }
+  }
+
+  /**
+   * Validation result of an entity that an instance references through an
+   * `x-gts-ref` field, evaluated within the chain of instances being validated
+   * (`chain`). Returns null for a reference cycle, which is treated as valid
+   * (like gts-ts's visiting guard).
+   *
+   * Schemas are validated normally: a schema's result never depends on an
+   * instance, so waiting on it can't form a cycle. Instances can reference
+   * each other, so an instance is never waited on while its validation is in
+   * progress elsewhere (that could deadlock on a cycle); unless a finished
+   * result for the current generation exists it is recomputed within `chain`,
+   * and not cached, since a cut cycle can make that result differ from the
+   * entity's standalone one.
+   */
+  private async referencedEntityValidation(
+    dependency: JsonEntity,
+    chain: ReadonlySet<JsonEntity>
+  ): Promise<ValidationResult | null> {
+    if (dependency instanceof JsonSchema) {
+      await this.validateEntity(dependency)
+      return dependency.validation ?? null
+    }
+    if (chain.has(dependency)) return null
+    const memo = this.validationMemo.get(dependency)
+    if (memo && memo.generation === this.contentGeneration && memo.settled) return memo.settled
+    return this.computeEntityValidation(dependency, new Set(chain).add(dependency))
+  }
+
+  /**
+   * Compiled validator for instance validation against `schemaContent`, reused
+   * across instances within the current content generation.
+   */
+  private getInstanceValidator(schemaContent: object): Promise<ValidateFunction> {
+    if (this.instanceValidators.generation !== this.contentGeneration) {
+      this.instanceValidators = { generation: this.contentGeneration, byContent: new Map() }
+    }
+    const cache = this.instanceValidators.byContent
+    let validator = cache.get(schemaContent)
+    if (!validator) {
+      // Strip `x-gts-ref` first (mirroring gts-ts's normalizeSchema) so Ajv never
+      // sees the unknown keyword and, crucially, so `x-gts-ref`-only combinator
+      // branches don't collapse into always-true schemas and make e.g.
+      // `oneOf: [{x-gts-ref}, {x-gts-ref}]` fail. The `x-gts-ref` assertions
+      // themselves are enforced by XGtsRefValidator.
+      validator = this.createAjvInstance().compileAsync(stripXGtsRefForAjv(schemaContent))
+      cache.set(schemaContent, validator)
+      validator.catch(() => { if (cache.get(schemaContent) === validator) cache.delete(schemaContent) })
+    }
+    return validator
+  }
+
+  private async computeEntityValidation(
+    entity: JsonEntity,
+    chain: ReadonlySet<JsonEntity> = new Set([entity])
+  ): Promise<ValidationResult> {
+    const validation: ValidationResult = { errors: [] }
 
     // Enforce gts:// URI-prefix rules: the prefix is required in JSON Schema URL
     // fields ($id, $ref, x-gts-traits-schema) and forbidden everywhere else.
@@ -218,7 +729,7 @@ export class JsonRegistry {
       const instancePath = violation.sourcePath === 'root'
         ? '/'
         : '/' + violation.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
-      entity.validation.errors.push({
+      validation.errors.push({
         instancePath,
         schemaPath: '#',
         keyword: 'gts-uri-prefix',
@@ -234,6 +745,23 @@ export class JsonRegistry {
 
     // Check if all GTS references exist in the registry
     if (entity.gtsRefs && entity.gtsRefs.length > 0) {
+      // For an instance, resolve its schema so we can tell a genuine GTS
+      // reference field apart from a scalar data value that merely *looks* like
+      // a GTS id (e.g. a `format: uuid` string). References are harvested
+      // syntactically (any GTS-id-shaped string, regardless of field), so
+      // without this a value like "gts.x…v1~<uuid>" in a plain typed field
+      // would be wrongly reported as a missing reference. Only instances carry
+      // a separate schema to consult; schema-shaped entities keep prior behaviour.
+      const instanceSchema = (entity instanceof JsonObj && entity.schemaId)
+        ? this.resolveSchema(entity.schemaId)?.content ?? null
+        : null
+      // Configured GTS id/schema fields (id, gtsIid, type, $schema, ...) are
+      // references by definition and must keep being checked even when a schema
+      // types them as a plain `string`; only *other* scalar-typed fields are
+      // exempted below.
+      const cfg = getGtsConfig(undefined)
+      const idFieldNames = new Set([...cfg.entity_id_fields, ...cfg.schema_id_fields])
+
       for (const ref of entity.gtsRefs) {
         // Skip reference validation for refs inside /examples field in schemas
         // Match 'examples' at root or after array indices (e.g., allOf[0].examples), but NOT after 'properties'
@@ -245,7 +773,21 @@ export class JsonRegistry {
         if (isInExamples) {
           continue
         }
-        
+
+        // Schema-aware skip: when the instance's schema types this field as a
+        // scalar data value (a `format`/scalar `type`/`enum`/`const`, and NOT a
+        // reference via `x-gts-ref`/`$ref`), its GTS-id-shaped value is data,
+        // not a reference, so its existence must not be checked. Configured
+        // id/schema fields are never exempted (they are references by design).
+        const lastSegment = ref.sourcePath.replace(/\[\d+\]/g, '').split('.').pop() || ''
+        if (
+          instanceSchema &&
+          !idFieldNames.has(lastSegment) &&
+          isScalarDataField(getInstanceFieldSubschema(instanceSchema, ref.sourcePath))
+        ) {
+          continue
+        }
+
         const refExists = this.jsonSchemas.has(ref.id) || this.jsonObjs.has(ref.id)
         if (!refExists) {
           this.absentGtsEntities.set(ref.id, createAbsentEntity(ref.id))
@@ -254,7 +796,7 @@ export class JsonRegistry {
           const instancePath = ref.sourcePath === 'root'
             ? '/'
             : '/' + ref.sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath,
             schemaPath: '#',
             keyword: '',
@@ -268,7 +810,7 @@ export class JsonRegistry {
     // In VS Code webview environment, skip Ajv validation to comply with CSP
     const g: any = (typeof globalThis !== 'undefined') ? (globalThis as any) : {}
     if (g && (g.acquireVsCodeApi || (g.__GTS_APP_API__ && (g.__GTS_APP_API__.type === 'vscode' || g.__GTS_APP_API__.disableValidation === true)))) {
-      return
+      return validation
     }
 
     if (entity instanceof JsonSchema) {
@@ -286,13 +828,13 @@ export class JsonRegistry {
             e.keyword = e.keyword || 'schema'
             e.message = e.message || 'Invalid JSON Schema'
           })
-          entity.validation.errors.push(...detailed)
+          validation.errors.push(...detailed)
         } else {
           // Fallback: try to extract a path from error.message like "data/xxx ..."
           const msg: string = String(error?.message || 'Unknown schema error')
           const m = msg.match(/data(\/[A-Za-z0-9_\-\.\[\]\/]+)\b/)
           const instancePath = m ? m[1] : ''
-          entity.validation.errors.push({
+          validation.errors.push({
             instancePath,
             schemaPath: '#',
             keyword: 'schema',
@@ -313,7 +855,7 @@ export class JsonRegistry {
       if (declError) {
         // register() rejected this schema outright (§9.11.1); surface it and
         // skip chain validation (the schema isn't in the store).
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '',
           schemaPath: '#',
           keyword: 'x-gts-schema',
@@ -323,13 +865,52 @@ export class JsonRegistry {
       } else {
         const result = store.validateSchemaAgainstParent(entity.id)
         if (!result.ok && result.error) {
-          entity.validation.errors.push({
-            instancePath: '',
-            schemaPath: '#',
-            keyword: 'x-gts-schema',
-            message: result.error,
-            params: {}
-          })
+          const rawMessages = result.error.split('; ')
+          for (const msg of rawMessages) {
+            const propMatch = msg.match(/^Property '([^']+)'/)
+            const propPath = propMatch ? propMatch[1] : null
+            // A "Referenced x-gts-ref entity '<id>' is invalid: ..." message is
+            // caused by a specific `x-gts-ref` node, not by the schema's own
+            // `$id`; anchor it to that node so the squiggle lands on the ref
+            // (e.g. line with `"x-gts-ref": "<id>"`) rather than the document
+            // root. Everything else keeps the previous `$id` fallback.
+            const refMatch = propPath ? null : msg.match(/^Referenced x-gts-ref entity '([^']+)'/)
+            // A "trait validation: ..." message comes from the OP#13 trait
+            // completeness check; anchor it to the unmet `x-gts-traits-schema`
+            // requirement (the specific `required` entry when we can name the
+            // missing trait) instead of the schema's `$id`.
+            const isTraitError = !propPath && !refMatch && msg.startsWith('trait validation:')
+            // A regex that can't be compiled (e.g. "failed to compile trait
+            // schema: Unsupported pattern /.../: ..."): anchor it to the
+            // offending `pattern` / `patternProperties` entry, when it is in
+            // this document, instead of the schema's `$id`.
+            const regexPath = !propPath && !refMatch && !isTraitError && /regular expression|Unsupported pattern/.test(msg)
+              ? findRegexPatternPath(entity.content, msg)
+              : null
+            let instancePath: string | null = null
+            let params: Record<string, any> = {}
+            if (propPath) {
+              instancePath = findSchemaPropertyPath(entity.content, propPath)
+              params = { property: propPath }
+            } else if (refMatch) {
+              instancePath = findXGtsRefPath(entity.content, refMatch[1])
+              params = { refValue: refMatch[1] }
+            } else if (isTraitError) {
+              const traitMatch = msg.match(/required (?:property|trait) '([^']+)'/)
+              const traitName = traitMatch ? traitMatch[1] : undefined
+              instancePath = findTraitRequiredPath(entity.content, traitName)
+              params = traitName ? { trait: traitName } : {}
+            } else if (regexPath) {
+              instancePath = regexPath
+            }
+            validation.errors.push({
+              instancePath: instancePath || '/$id',
+              schemaPath: '#',
+              keyword: 'x-gts-schema',
+              message: msg,
+              params
+            })
+          }
         }
       }
 
@@ -338,7 +919,7 @@ export class JsonRegistry {
       // JSON Pointer). This checks the schema authoring, not an instance value.
       const refDeclErrors = new XGtsRefValidator().validateSchema(entity.content)
       for (const err of refDeclErrors) {
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: fieldPathToInstancePath(err.fieldPath),
           schemaPath: '#',
           keyword: 'x-gts-ref',
@@ -346,11 +927,40 @@ export class JsonRegistry {
           params: { value: err.value, refPattern: err.refPattern }
         })
       }
+
+      if (validation.errors.length === 0) {
+        const ancestors = JsonRegistry.ancestorTypeIds(entity.id)
+        const parentId = ancestors.length > 1 ? ancestors[ancestors.length - 2] : null
+        const parent = parentId ? this.jsonSchemas.get(parentId) : undefined
+        if (parent) {
+          await this.validateEntity(parent)
+          if (parent.validation?.errors.length) {
+            validation.errors.push({
+              instancePath: '/$id',
+              schemaPath: '#',
+              keyword: 'x-gts-schema',
+              message: `Parent schema '${parentId}' has GTS validation errors`,
+              params: { schemaId: parentId }
+            })
+          }
+        }
+      }
     } else if (entity instanceof JsonObj) {
       // Validate the object against its schema
       if (!entity.schemaId) {
-        // No schema to validate against
-        return
+        const store = this.getGtsStore()
+        const result = store.validateInstance(entity.id)
+        if (!result.ok) {
+          const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
+          validation.errors.push({
+            instancePath: '/' + String(idField),
+            schemaPath: '#',
+            keyword: 'schema',
+            message: result.error,
+            params: { gtsId: entity.id }
+          })
+        }
+        return validation
       }
 
       const schema = this.resolveSchema(entity.schemaId)
@@ -358,14 +968,33 @@ export class JsonRegistry {
         // Prefer pointing to the field that produced schemaId
         const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
         const instancePath = '/' + String(idField)
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath,
           schemaPath: '#',
           keyword: 'schema',
           message: `Schema not found: ${entity.schemaId}`,
           params: { schemaId: entity.schemaId }
         })
-        return
+        return validation
+      }
+
+      // An instance of an invalid type is itself invalid (as gts-ts's
+      // store.validateInstance reports it). The type's own result already
+      // includes its ancestor chain ("Parent schema ... has GTS validation
+      // errors"), so a broken ancestor reaches the instance too. Validation
+      // results are memoized per registry generation, so this is a cache hit
+      // during a workspace pass.
+      await this.validateEntity(schema)
+      const typeErrors = schema.validation?.errors || []
+      if (typeErrors.length > 0) {
+        const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
+        validation.errors.push({
+          instancePath: '/' + String(idField),
+          schemaPath: '#',
+          keyword: 'x-gts-schema',
+          message: `Instance type '${entity.schemaId}' is invalid: ${typeErrors[0].message}`,
+          params: { schemaId: entity.schemaId }
+        })
       }
 
       // §9.11.3 (OP#6): an instance's rightmost type must be instantiable. A
@@ -374,7 +1003,7 @@ export class JsonRegistry {
       // explicitly here (mirrors gts-ts store.validateInstance).
       if (GtsModifiers.isAbstract(schema.content)) {
         const idField = (entity as any).selectedSchemaIdField || (entity as any).selectedEntityIdField || 'id'
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '/' + String(idField),
           schemaPath: '#',
           keyword: 'x-gts-abstract',
@@ -384,29 +1013,34 @@ export class JsonRegistry {
       }
 
       try {
-        const ajv = this.createAjvInstance()
-
-        // Compile the schema with async $ref resolution
-        const validate = await ajv.compileAsync(schema.content)
+        // Compiled with async $ref resolution, once per schema per generation.
+        const validate = await this.getInstanceValidator(schema.content)
 
         const valid = validate(entity.content) as boolean
 
         // Merge AJV errors with previously collected GTS reference errors
         if (!valid && validate.errors) {
           const formatted = this.formatValidationErrors(validate.errors)
-          entity.validation.errors.push(...formatted)
+          validation.errors.push(...formatted)
         }
 
         // §9.6: `x-gts-ref` is an assertion keyword on instance string values
         // (the value must be a GTS ID matching the declared prefix/pattern).
         // Ajv treats it as an unknown keyword and silently ignores it, so it is
         // enforced explicitly here (mirrors gts-ts store.validateInstance).
-        // No store is passed: referenced-entity existence is already covered by
-        // the gtsRefs registry check above, so this validator only enforces the
-        // GTS-ID format and the prefix/pattern constraint.
-        const xGtsRefErrors = new XGtsRefValidator().validateInstance(entity.content, schema.content)
+        // The validator gets the registry's gts-ts store so it can follow
+        // `gts://` `$ref`s (e.g. `allOf: [{ $ref: <parent type> }]`) into parent
+        // schemas: without one, every such `$ref` is unresolvable and gts-ts
+        // reports "Cannot resolve $ref ... for x-gts-ref traversal" (it fails
+        // closed rather than skip the parent's constraints). It runs in
+        // any-present mode to collect the referenced ids for the any-valid
+        // check below; its own "not found" errors repeat the gtsRefs registry
+        // check above and are dropped.
+        const refValidator = new XGtsRefValidator(this.getGtsStore(), GtsRefValidationMode.AnyPresent)
+        const xGtsRefErrors = refValidator.validateInstance(entity.content, schema.content, '', undefined, entity.id)
         for (const err of xGtsRefErrors) {
-          entity.validation.errors.push({
+          if (/^Referenced entity '.+' not found in registry$/.test(err.reason)) continue
+          validation.errors.push({
             instancePath: fieldPathToInstancePath(err.fieldPath),
             schemaPath: '#',
             keyword: 'x-gts-ref',
@@ -414,8 +1048,29 @@ export class JsonRegistry {
             params: { value: err.value, refPattern: err.refPattern }
           })
         }
+
+        // §9.6 `gts-ref-validation=any-valid` (the spec's default policy): an
+        // entity referenced through an `x-gts-ref` field must itself be valid,
+        // transitively, or the referencing instance is invalid too.
+        for (const referencedId of refValidator.getReferencedIds()) {
+          const dependency = this.jsonObjs.get(referencedId) ?? this.jsonSchemas.get(referencedId)
+          if (!dependency || dependency === entity) continue
+          const dependencyValidation = await this.referencedEntityValidation(dependency, chain)
+          const firstError = dependencyValidation?.errors[0]
+          if (!firstError) continue
+          const sourcePath = entity.gtsRefs?.find(ref => ref.id === referencedId)?.sourcePath
+          validation.errors.push({
+            instancePath: sourcePath && sourcePath !== 'root'
+              ? '/' + sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
+              : '/',
+            schemaPath: '#',
+            keyword: 'x-gts-ref',
+            message: `Referenced entity '${referencedId}' is invalid: ${firstError.message}`,
+            params: { value: referencedId }
+          })
+        }
       } catch (error: any) {
-        entity.validation.errors.push({
+        validation.errors.push({
           instancePath: '',
           schemaPath: '#',
           keyword: 'validation',
@@ -424,6 +1079,7 @@ export class JsonRegistry {
         })
       }
     }
+    return validation
   }
 
   /**
@@ -534,8 +1190,34 @@ export class JsonRegistry {
       }
     })
 
-    // Add format validation (email, uri, date-time, etc.)
+    // Add format validation (email, uri, date-time, etc.). Default "full" mode
+    // validates real value ranges (e.g. rejects month 13, offset +25:00).
     addFormats(ajv)
+
+    // Tighten the temporal formats to strict RFC 3339. ajv-formats' full-mode
+    // date/time splits on `/t|\s/i`, so it accepts a space instead of `T`
+    // (permitted by RFC 3339 §5.6's NOTE, but not by the ABNF grammar GTS
+    // requires). Compose the two *standard* ajv-formats validators so a value
+    // must satisfy BOTH: the "fast" grammar (strict `T` separator + mandatory
+    // time-offset) AND the "full" validator (real calendar/clock ranges).
+    for (const name of ['date', 'time', 'date-time'] as const) {
+      const fast = addFormats.get(name, 'fast')
+      const full = addFormats.get(name, 'full')
+      ajv.addFormat(name, {
+        type: 'string',
+        validate: (value: string) => matchesFormat(fast, value) && matchesFormat(full, value),
+      })
+    }
+
+    // GTS id formats emitted by schema generators (e.g. gts-rust) as annotations
+    // next to an `x-gts-ref` that does the actual checking. Registered as
+    // accept-all — exactly how Ajv treated them before (ignored as unknown) —
+    // so each compile no longer logs an "unknown format" warning.
+    // Same for the sized-integer formats Rust's schemars emits (int32/int64 are
+    // already provided by ajv-formats).
+    for (const name of ['gts-instance-id', 'gts-type-id', 'int8', 'int16', 'uint', 'uint8', 'uint16', 'uint32', 'uint64']) {
+      ajv.addFormat(name, true)
+    }
 
     // Add custom schema loader that resolves GTS IDs from the registry
     ajv.addKeyword({

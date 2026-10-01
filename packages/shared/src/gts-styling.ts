@@ -1,4 +1,4 @@
-import { isGtsId, normalizeGtsId } from './entities.js'
+import { isGtsId, isGtsType, normalizeGtsId } from './entities.js'
 
 /**
  * Parse a GTS ID string and extract its parts
@@ -14,25 +14,20 @@ export function parseGtsIdParts(gtsId: string): string[] {
   const normalizedId = normalizeGtsId(gtsId)
   const parts: string[] = []
 
-  // Find the first tilde
-  const firstTildeIndex = normalizedId.indexOf('~')
-  if (firstTildeIndex === -1) {
-    // No tilde found, return the whole ID
-    return [normalizedId]
+  let segmentStart = 0
+  let separatorIndex = normalizedId.indexOf('~')
+
+  while (separatorIndex !== -1) {
+    parts.push(normalizedId.substring(segmentStart, separatorIndex + 1))
+    segmentStart = separatorIndex + 1
+    separatorIndex = normalizedId.indexOf('~', segmentStart)
   }
 
-  // First part: from start to first tilde (inclusive)
-  const firstPart = normalizedId.substring(0, firstTildeIndex + 1)
-  parts.push(firstPart)
-
-  // Check if there's a second part after the first tilde
-  const remainingPart = normalizedId.substring(firstTildeIndex + 1)
-  if (remainingPart.length > 0) {
-    // Second part exists
-    parts.push(remainingPart)
+  if (segmentStart < normalizedId.length) {
+    parts.push(normalizedId.substring(segmentStart))
   }
 
-  return parts
+  return parts.length > 0 ? parts : [normalizedId]
 }
 
 /**
@@ -64,10 +59,20 @@ export interface GtsStyleAnalysis {
 }
 
 /**
- * Analyze a GTS ID and determine how each part should be styled
+ * Analyze a GTS ID and determine how each part should be styled.
+ *
+ * Schema-vs-instance classification is derived STRUCTURALLY from the GTS ID via
+ * gts-ts (`isGtsType`). Correctness (blue/green vs red) is derived from the
+ * authoritative gts-ts validation results surfaced through `entityLookup`:
+ * a segment whose cumulative entity failed gts-ts validation (`isValid: false`)
+ * is rendered as an error. GTS *rule* violations (abstract instantiation,
+ * derivation incompatibility, x-gts-ref, ...) are therefore not re-derived here;
+ * they are read back from `entityLookup`/the caller's validation errors, keeping
+ * gts-ts the single source of truth.
  *
  * @param gtsId - The GTS ID to analyze (may have gts:// prefix which is stripped)
- * @param entityLookup - Function to look up whether an entity exists and its type
+ * @param entityLookup - Function to look up whether an entity exists, its kind,
+ *   and whether gts-ts validation found it valid
  * @returns Analysis result with styled segments
  *
  * @example
@@ -83,7 +88,7 @@ export interface GtsStyleAnalysis {
  */
 export function analyzeGtsIdForStyling(
   gtsId: string,
-  entityLookup: (entityId: string) => { exists: boolean; isSchema?: boolean }
+  entityLookup: (entityId: string) => { exists: boolean; isSchema?: boolean; isValid?: boolean }
 ): GtsStyleAnalysis {
   // Normalize to strip gts:// prefix per GTS spec
   const normalizedId = normalizeGtsId(gtsId)
@@ -106,25 +111,40 @@ export function analyzeGtsIdForStyling(
   const parts = parseGtsIdParts(normalizedId)
 
   let currentOffset = 0
-  for (const part of parts) {
-    // Determine the full entity ID to look up
-    let entityIdToLookup: string
-    if (parts.length === 1) {
-      entityIdToLookup = part
-    } else if (part === parts[0]) {
-      entityIdToLookup = part
-    } else {
-      entityIdToLookup = parts[0] + part
-    }
+  let hasMissingAncestor = false
+  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+    const part = parts[partIndex]
+    const entityIdToLookup = parts.slice(0, partIndex + 1).join('')
 
-    // Look up the entity
-    const lookupResult = entityLookup(entityIdToLookup)
+    // A cumulative id ending in "~" names a TYPE (schema); otherwise it names
+    // an INSTANCE. This shape is derived structurally from the GTS ID itself.
+    const structuralIsType = isGtsType(entityIdToLookup)
+
+    // Existence + validity lookup (skipped once an ancestor is already
+    // missing/invalid, so the error cascades to the rest of the chain).
+    const lookupResult = hasMissingAncestor ? { exists: false } : entityLookup(entityIdToLookup)
 
     let segmentType: 'schema' | 'instance' | 'error'
-    if (lookupResult.exists) {
-      segmentType = lookupResult.isSchema ? 'schema' : 'instance'
-    } else {
+    if (!lookupResult.exists || lookupResult.isValid === false) {
+      // Missing entity, or an entity gts-ts validation rejected → error.
       segmentType = 'error'
+      hasMissingAncestor = true
+    } else if (structuralIsType) {
+      // A "~"-terminated (type) segment is valid only when a *schema* with that
+      // id actually exists. A type-shaped id backed only by an instance document
+      // (or nothing) is an error — e.g. an instance whose own id ends in "~"
+      // has no backing schema.
+      if (lookupResult.isSchema === true) {
+        segmentType = 'schema'
+      } else {
+        segmentType = 'error'
+        hasMissingAncestor = true
+      }
+    } else if (lookupResult.isSchema === true) {
+      // Instance-shaped id backed by a schema document → malformed.
+      segmentType = 'error'
+    } else {
+      segmentType = 'instance'
     }
 
     segments.push({
@@ -236,7 +256,14 @@ export function levenshteinDistance(a: string, b: string): number {
  * ```
  */
 export function findSimilarEntityIds(targetId: string, allIds: string[], maxResults: number = 3): string[] {
-  const similarities = allIds.map(id => ({
+  // Deduplicate the candidate list and never suggest the queried id itself.
+  // Callers typically build `allIds` by concatenating several registry maps
+  // (e.g. schemas + instances), so the same id can appear more than once; and a
+  // "Did you mean...?" that echoes the exact id the user hovered is noise that
+  // renders as a confusing self-reference / duplicated row.
+  const candidates = Array.from(new Set(allIds)).filter(id => id !== targetId)
+
+  const similarities = candidates.map(id => ({
     id,
     distance: levenshteinDistance(targetId, id)
   }))

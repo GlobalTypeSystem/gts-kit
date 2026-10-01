@@ -108,3 +108,36 @@ export class RepoLayoutStorage implements ILayoutStorage {
     }]
   }
 }
+
+/**
+ * Layout storage for a (possibly multi-root) workspace: each layout goes to the
+ * `.gts-viewer/` folder of the workspace folder chosen by `resolveRoot` for its
+ * target, so a diagram's layout is stored next to the files it depicts.
+ */
+export class WorkspaceLayoutStorage implements ILayoutStorage {
+  private readonly stores = new Map<string, RepoLayoutStorage>()
+
+  constructor(private readonly resolveRoot: (target: Partial<LayoutTarget>) => string) {}
+
+  private storeFor(target: Partial<LayoutTarget>): RepoLayoutStorage {
+    const root = this.resolveRoot(target)
+    let store = this.stores.get(root)
+    if (!store) {
+      store = new RepoLayoutStorage(root)
+      this.stores.set(root, store)
+    }
+    return store
+  }
+
+  getLatestLayout(target: Partial<LayoutTarget>): Promise<LayoutSnapshot | null> {
+    return this.storeFor(target).getLatestLayout(target)
+  }
+
+  saveLayout(request: LayoutSaveRequest): Promise<LayoutSnapshot> {
+    return this.storeFor(request.target).saveLayout(request)
+  }
+
+  listVersions(target: Partial<LayoutTarget>): Promise<Array<{ layoutId: string; version: string; createdAt: string }>> {
+    return this.storeFor(target).listVersions(target)
+  }
+}

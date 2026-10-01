@@ -151,7 +151,7 @@ export function fieldRequiresGtsUriPrefix(fieldName: string | undefined | null):
 }
 
 /** Kind of gts:// prefix problem detected for a GTS identifier in a specific field. */
-export type GtsPrefixIssueKind = 'missing-uri-prefix' | 'unexpected-uri-prefix' | 'invalid-gts-uri'
+export type GtsPrefixIssueKind = 'missing-uri-prefix' | 'invalid-gts-uri'
 
 /** A detected gts:// prefix problem, with a human-readable explanation. */
 export interface GtsPrefixIssue {
@@ -166,11 +166,13 @@ export interface GtsPrefixIssue {
  * Validate gts:// prefix usage of a GTS identifier value against the field it lives
  * in. Returns a {@link GtsPrefixIssue} when the prefix usage is wrong, otherwise null.
  *
- * Rules (per GTS spec):
+ * Rules (per GTS spec, matching gts-ts):
  * - In JSON Schema URL fields ({@link GTS_URI_PREFIX_FIELDS}) a GTS identifier MUST
  *   start with "gts://gts." — a bare "gts." value is malformed.
- * - In every other field a GTS identifier MUST start with "gts." — a "gts://" value
- *   is malformed.
+ * - Anywhere, a "gts://" value must be followed by a valid GTS identifier.
+ * - A "gts://" prefix in any other field is NOT an error: neither the spec nor
+ *   gts-ts forbids it (implementations strip the prefix), and the spec's own
+ *   test fixtures use it, e.g. under a non-keyword `$$ref`.
  *
  * Only actual GTS identifiers are considered; non-GTS strings return null so that
  * malformed-format handling stays a separate concern.
@@ -206,14 +208,6 @@ export function checkGtsUriPrefix(fieldName: string | undefined | null, rawValue
       kind: 'missing-uri-prefix',
       suggestion: GTS_URI_PREFIX + canonical,
       message: `Malformed GTS identifier in "${fieldName}": JSON Schema treats this value as a URL, so it must start with "${GTS_URI_PREFIX}gts.". Use "${GTS_URI_PREFIX}${canonical}".`
-    }
-  }
-  if (!requiresPrefix && hasPrefix) {
-    const where = fieldName ? ` in "${fieldName}"` : ''
-    return {
-      kind: 'unexpected-uri-prefix',
-      suggestion: canonical,
-      message: `Malformed GTS identifier${where}: the "${GTS_URI_PREFIX}" URI prefix is only allowed in JSON Schema URL fields (${GTS_URI_PREFIX_FIELDS.join(', ')}). Use "${canonical}".`
     }
   }
   return null
@@ -369,6 +363,55 @@ export interface ValidationError {
 export interface ValidationResult {
     /** Detailed errors for each validation failure */
     errors: ValidationError[]
+}
+
+/**
+ * Host-computed validation for a single entity, relayed to the VS Code webview.
+ *
+ * The webview runs under a strict Content-Security-Policy that forbids the
+ * code generation Ajv relies on (`new Function`), so it cannot run the
+ * JSON-Schema / gts-ts validation itself. The extension host computes it and
+ * ships these DTOs across the message channel; the webview merges the
+ * `validation` back onto its own registry entities (matched by `id`).
+ */
+export interface EntityValidationDto {
+    /** Entity id, used to match the webview's registry entity. */
+    id: string
+    /** Absolute path of the file the entity was parsed from. */
+    filePath?: string
+    /** The host-computed validation result to apply (absent if not validated). */
+    validation?: ValidationResult
+}
+
+/** {@link EntityValidationDto} plus the extra fields a JsonObj needs to re-key. */
+export interface ObjValidationDto extends EntityValidationDto {
+    /** Index of the object within a multi-document file (if applicable). */
+    listSequence?: number
+    /** Resolved schema id for the object (if any). */
+    schemaId?: string
+}
+
+/** A file that failed to parse/index, with the errors that explain why. */
+export interface InvalidFileValidationDto {
+    /** Absolute path of the invalid file. */
+    path: string
+    /** Base name of the invalid file. */
+    name: string
+    /** The parse/index errors for the file (absent if none). */
+    validation?: ValidationResult
+}
+
+/**
+ * Full validation payload relayed from the extension host to the webview
+ * (the `detail` of a `gts-validation-result` message).
+ */
+export interface ValidationRelayPayload {
+    /** Per-instance validation. */
+    objs: ObjValidationDto[]
+    /** Per-schema validation. */
+    schemas: EntityValidationDto[]
+    /** Files that couldn't be parsed/indexed. */
+    invalidFiles: InvalidFileValidationDto[]
 }
 
 export class JsonFile {

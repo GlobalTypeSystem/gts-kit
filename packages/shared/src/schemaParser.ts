@@ -352,3 +352,192 @@ function getSchemaChildren(schema: any): PropertyInfo[] | undefined {
 
   return undefined
 }
+
+/**
+ * Locate the JSON Pointer instancePath of a property within a schema document
+ * (including inside allOf branches or top-level properties).
+ */
+export function findSchemaPropertyPath(content: any, propPath: string): string | null {
+  if (!content || typeof content !== 'object') return null
+  const parts = propPath.split('.')
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+
+    if (node.properties && typeof node.properties === 'object') {
+      let cur = node.properties
+      let curPath = currentPath ? `${currentPath}/properties` : '/properties'
+      let found = true
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]
+        if (cur && cur[p] !== undefined) {
+          curPath += `/${p}`
+          cur = cur[p]
+        } else if (cur && cur.properties && cur.properties[p] !== undefined) {
+          curPath += `/properties/${p}`
+          cur = cur.properties[p]
+        } else if (cur && cur.items && p === 'items') {
+          curPath += '/items'
+          cur = cur.items
+        } else {
+          found = false
+          break
+        }
+      }
+      if (found) return curPath
+    }
+
+    if (Array.isArray(node.allOf)) {
+      for (let i = 0; i < node.allOf.length; i++) {
+        const branchPath = currentPath ? `${currentPath}/allOf/${i}` : `/allOf/${i}`
+        const res = walk(node.allOf[i], branchPath)
+        if (res) return res
+      }
+    }
+
+    return null
+  }
+
+  return walk(content, '')
+}
+
+/**
+ * Locate the JSON Pointer instancePath of the `x-gts-ref` keyword whose value
+ * equals `refValue` (any `gts://` prefix ignored), searching every position in
+ * the schema document. Used to anchor a "Referenced x-gts-ref entity '<id>' is
+ * invalid" diagnostic to the offending `x-gts-ref` node rather than the
+ * document root. Returns null when no matching `x-gts-ref` is present.
+ */
+export function findXGtsRefPath(content: any, refValue: string): string | null {
+  const target = normalizeGtsId(refValue)
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const res = walk(node[i], `${currentPath}/${i}`)
+        if (res) return res
+      }
+      return null
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const childPath = `${currentPath}/${key}`
+      if (key === 'x-gts-ref' && typeof value === 'string' && normalizeGtsId(value) === target) {
+        return childPath
+      }
+      const res = walk(value, childPath)
+      if (res) return res
+    }
+    return null
+  }
+
+  return walk(content, '')
+}
+
+/**
+ * Locate the JSON Pointer instancePath of the regular expression a compile
+ * error is about, e.g. "failed to compile trait schema: Unsupported pattern
+ * /^(a+)+(?=b)/: ..." or "... Invalid regular expression: /x(/u: ...": the
+ * `pattern` value, or `patternProperties` key, whose source appears in
+ * `message` as `/<source>/`. Used to anchor such a diagnostic on the
+ * offending regex rather than the schema's `$id`. Keys are escaped per RFC
+ * 6901 (`patternProperties` keys often contain `/`). Returns null when no
+ * regex of this document is named (e.g. it belongs to an ancestor schema).
+ */
+export function findRegexPatternPath(content: any, message: string): string | null {
+  const escape = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~1')
+  const named = (source: string) => source !== '' && message.includes(`/${source}/`)
+
+  function walk(node: any, currentPath: string): string | null {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const res = walk(node[i], `${currentPath}/${i}`)
+        if (res) return res
+      }
+      return null
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const childPath = `${currentPath}/${escape(key)}`
+      if (key === 'pattern' && typeof value === 'string' && named(value)) return childPath
+      if (key === 'patternProperties' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const regexKey = Object.keys(value).find(named)
+        if (regexKey !== undefined) return `${childPath}/${escape(regexKey)}`
+      }
+      const res = walk(value, childPath)
+      if (res) return res
+    }
+    return null
+  }
+
+  return walk(content, '')
+}
+
+/**
+ * Locate the JSON Pointer instancePath to anchor a trait-completeness error
+ * (OP#13) on. When `traitName` is a required trait declared in this document's
+ * top-level `x-gts-traits-schema`, point at that specific `required` entry
+ * (e.g. `/x-gts-traits-schema/required/0`); otherwise fall back to the
+ * `x-gts-traits-schema` node. Returns null when the document has no local
+ * `x-gts-traits-schema` (the requirement came from an ancestor in the chain),
+ * so callers can fall back to `/$id`.
+ */
+export function findTraitRequiredPath(content: any, traitName?: string): string | null {
+  const traitSchema = content && typeof content === 'object' ? content['x-gts-traits-schema'] : undefined
+  if (!traitSchema || typeof traitSchema !== 'object' || Array.isArray(traitSchema)) return null
+  if (traitName && Array.isArray(traitSchema.required)) {
+    const idx = traitSchema.required.indexOf(traitName)
+    if (idx >= 0) return `/x-gts-traits-schema/required/${idx}`
+  }
+  return '/x-gts-traits-schema'
+}
+
+/**
+ * Navigate a JSON Schema to the subschema that governs the value at a given
+ * *instance* source path (dot/bracket notation as produced by the reference
+ * walker, e.g. "uuidValue", "contact.gtsIid", "items[0].sku"). Follows
+ * `properties`, array `items` (single-schema or tuple), and searches
+ * `allOf`/`anyOf`/`oneOf` branches.
+ *
+ * Returns the subschema, or null when it cannot be resolved locally (e.g. the
+ * field is an `additionalProperties` value or is inherited from an ancestor
+ * schema not present in this document) — callers should treat null
+ * conservatively rather than assuming the field is unconstrained.
+ */
+export function getInstanceFieldSubschema(schemaContent: any, sourcePath: string): any | null {
+  if (!schemaContent || typeof schemaContent !== 'object') return null
+  if (!sourcePath || sourcePath === 'root') return null
+
+  const segments = sourcePath
+    .replace(/\[(\d+)\]/g, '.$1') // arr[0] -> arr.0
+    .split('.')
+    .filter(s => s.length > 0)
+
+  function resolveKey(node: any, key: string, depth: number): any | null {
+    if (!node || typeof node !== 'object' || depth > 20) return null
+    const isIndex = /^\d+$/.test(key)
+    if (isIndex) {
+      if (node.items !== undefined) {
+        return Array.isArray(node.items) ? (node.items[Number(key)] ?? null) : node.items
+      }
+    } else if (node.properties && typeof node.properties === 'object' && node.properties[key] !== undefined) {
+      return node.properties[key]
+    }
+    for (const comb of ['allOf', 'anyOf', 'oneOf'] as const) {
+      if (Array.isArray(node[comb])) {
+        for (const branch of node[comb]) {
+          const res = resolveKey(branch, key, depth + 1)
+          if (res) return res
+        }
+      }
+    }
+    return null
+  }
+
+  let current: any = schemaContent
+  for (const seg of segments) {
+    current = resolveKey(current, seg, 0)
+    if (!current || typeof current !== 'object') return null
+  }
+  return current
+}

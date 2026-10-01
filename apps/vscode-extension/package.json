@@ -2,7 +2,7 @@
   "name": "gts-kit",
   "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "private": true,
   "publisher": "GlobalTypeSystem",
   "license": "Apache-2.0",
@@ -19,16 +19,26 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Visualization",
-    "Other"
+    "Formatters",
+    "Linters",
+    "Visualization"
   ],
-  "activationEvents": [
-    "onCommand:gts.openViewer",
-    "onLanguage:json",
-    "onLanguage:jsonc",
-    "onLanguage:gts"
+  "tags": [
+    "gts",
+    "json",
+    "jsonc",
+    "jsonchema",
+    "validation"
   ],
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/gts.*.json",
+    "workspaceContains:**/gts.*.jsonc",
+    "workspaceContains:**/gts.*.yaml",
+    "workspaceContains:**/gts.*.yml",
+    "workspaceContains:**/*.gts",
+    "onLanguage:gts"
+  ],
   "contributes": {
     "languages": [
       {
@@ -39,9 +49,59 @@
     ],
     "commands": [
       {
-        "command": "gts.openViewer",
+        "command": "gts-kit.openViewer",
         "title": "GTS: Open Viewer",
         "category": "GTS"
+      },
+      {
+        "command": "gts-kit.refreshFileExplorer",
+        "title": "GTS: Refresh Discovered Files",
+        "category": "GTS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gts-kit.openToSide",
+        "title": "Open to the Side"
+      },
+      {
+        "command": "gts-kit.openWith",
+        "title": "Open With..."
+      },
+      {
+        "command": "gts-kit.revealInFinder",
+        "title": "Reveal in Finder"
+      },
+      {
+        "command": "gts-kit.revealInFileExplorer",
+        "title": "Reveal in File Explorer"
+      },
+      {
+        "command": "gts-kit.openContainingFolder",
+        "title": "Open Containing Folder"
+      },
+      {
+        "command": "gts-kit.openInIntegratedTerminal",
+        "title": "Open in Integrated Terminal"
+      },
+      {
+        "command": "gts-kit.selectForCompare",
+        "title": "Select for Compare"
+      },
+      {
+        "command": "gts-kit.compareWithSelected",
+        "title": "Compare with Selected"
+      },
+      {
+        "command": "gts-kit.openTimeline",
+        "title": "Open Timeline"
+      },
+      {
+        "command": "gts-kit.copyPath",
+        "title": "Copy Path"
+      },
+      {
+        "command": "gts-kit.copyRelativePath",
+        "title": "Copy Relative Path"
       }
     ],
     "viewsContainers": {
@@ -56,40 +116,116 @@
     "views": {
       "gts-viewer": [
         {
-          "type": "webview",
-          "id": "gts.viewerPanel",
-          "name": "Schema Viewer"
+          "id": "gts-kit.fileExplorer",
+          "name": "Discovered GTS files",
+          "icon": "resources/icon.svg",
+          "contextualTitle": "GTS Files"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "gts-kit.fileExplorer",
+        "contents": "No [GTS](https://globaltypesystem.org/#vscode-plugins) files discovered yet.\n[GTS](https://globaltypesystem.org/#vscode-plugins) files (schemas and instances) found anywhere in the workspace will be listed here."
+      }
+    ],
     "menus": {
       "explorer/context": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
+      "view/item/context": [
+        {
+          "command": "gts-kit.openToSide",
+          "group": "navigation@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.openWith",
+          "group": "navigation@20",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.revealInFinder",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isMac"
+        },
+        {
+          "command": "gts-kit.revealInFileExplorer",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isWindows"
+        },
+        {
+          "command": "gts-kit.openContainingFolder",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isLinux"
+        },
+        {
+          "command": "gts-kit.openInIntegratedTerminal",
+          "group": "navigation@40",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.openViewer",
+          "group": "navigation@100",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.compareWithSelected",
+          "group": "3_compare@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && resourceSelectedForCompare"
+        },
+        {
+          "command": "gts-kit.selectForCompare",
+          "group": "3_compare@20",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.openTimeline",
+          "group": "4_timeline@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && timelineHasProvider"
+        },
+        {
+          "command": "gts-kit.copyPath",
+          "group": "6_copypath@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.copyRelativePath",
+          "group": "6_copypath@20",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "gts-kit.refreshFileExplorer",
+          "group": "navigation@1",
+          "when": "view == gts-kit.fileExplorer"
+        }
+      ],
       "editor/title": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == json"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == jsonc"
         },
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "navigation@100",
           "when": "editorLangId == gts"
         }
       ],
       "menubar/file": [
         {
-          "command": "gts.openViewer",
+          "command": "gts-kit.openViewer",
           "group": "2_open"
         }
       ]
@@ -116,6 +252,7 @@
     "esbuild": "^0.19.0",
     "ignore": "^5.3.2",
     "jsonc-parser": "^3.3.1",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "yaml": "^2.9.1"
   }
 }

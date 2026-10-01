@@ -32,7 +32,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
   }
 
   // Define GTS highlighting function - returns JSX for GTS IDs, null for non-GTS
-  const renderGtsOverlay = (text: string): React.ReactNode => {
+  const renderGtsOverlay = (text: string, hasLineError?: boolean): React.ReactNode => {
     // Remove surrounding quotes if present to test the raw value
     const raw = text.replace(/^"/, '').replace(/"$/, '')
 
@@ -41,12 +41,13 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
       return null // Not a GTS ID, no overlay needed
     }
 
-    // Analyze the GTS ID for styling
+    // Analyze the GTS ID for styling. Correctness is driven by gts-ts validation
+    // results surfaced via `isValid` (per entity) and the line's `hasLineError`.
     const analysis = analyzeGtsIdForStyling(raw, (entityId: string) => {
       if (!registry) return { exists: false }
       const schema = registry.jsonSchemas.get(entityId)
       const obj = registry.jsonObjs.get(entityId)
-      if (schema) return { exists: true, isSchema: true }
+      if (schema) return { exists: true, isSchema: true, isValid: !schema.validation?.errors?.length }
       if (obj) return { exists: true, isSchema: false }
       return { exists: false }
     })
@@ -120,23 +121,24 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
           let style: CSSProperties
           let tooltip: string | undefined
 
-          if (segment.type === 'schema') {
-            style = {
-              color: GTS_COLORS.schema.foreground,
-              backgroundColor: GTS_COLORS.schema.background
-            }
-          } else if (segment.type === 'instance') {
-            style = {
-              color: GTS_COLORS.instance.foreground,
-              backgroundColor: GTS_COLORS.instance.background
-            }
-          } else {
-            // Invalid segment - entity not found
+          if (hasLineError || segment.type === 'error' || segment.type === 'invalid') {
             style = {
               color: GTS_COLORS.invalid.foreground,
               backgroundColor: GTS_COLORS.invalid.background
             }
+          } else if (segment.type === 'schema') {
+            style = {
+              color: GTS_COLORS.schema.foreground,
+              backgroundColor: GTS_COLORS.schema.background
+            }
+          } else {
+            style = {
+              color: GTS_COLORS.instance.foreground,
+              backgroundColor: GTS_COLORS.instance.background
+            }
+          }
 
+          if (segment.type === 'error' || segment.type === 'invalid') {
             // Build detailed error message for missing entity
             let errorMessage = `⚠️ GTS Entity Not Found!\n\nID: ${segment.text}\n\n`
 
@@ -222,7 +224,7 @@ export function JsonCode({ code, language = 'json', className, registry = null, 
 
                   // For string values (not property names), check if GTS overlay exists
                   if (isString && !isProperty && typeof token.content === 'string') {
-                    const gtsOverlay = renderGtsOverlay(token.content)
+                    const gtsOverlay = renderGtsOverlay(token.content, hasError)
 
                     if (gtsOverlay) {
                       // GTS ID detected - render overlay INSTEAD of Prism styling
