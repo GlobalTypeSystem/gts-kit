@@ -249,6 +249,13 @@ function updateBadge(treeView: vscode.TreeView<GtsTreeElement>): void {
     : undefined
 }
 
+function registerNativeFileCommand(command: string, nativeCommand: string): vscode.Disposable {
+  return vscode.commands.registerCommand(command, async (element: GtsTreeElement) => {
+    if (element?.kind !== 'file') return
+    await vscode.commands.executeCommand(nativeCommand, vscode.Uri.file(element.fsPath))
+  })
+}
+
 /** Wires up the tree view + file decorations and returns handles for the extension to drive refreshes with. */
 export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplorer {
   const treeProvider = new GtsFileTreeProvider()
@@ -264,6 +271,17 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
   context.subscriptions.push(
     treeView,
     vscode.window.registerFileDecorationProvider(decorationProvider),
+    registerNativeFileCommand('gts-kit.openToSide', 'explorer.openToSide'),
+    registerNativeFileCommand('gts-kit.openWith', 'explorer.openWith'),
+    registerNativeFileCommand('gts-kit.revealInFinder', 'revealFileInOS'),
+    registerNativeFileCommand('gts-kit.revealInFileExplorer', 'revealFileInOS'),
+    registerNativeFileCommand('gts-kit.openContainingFolder', 'revealFileInOS'),
+    registerNativeFileCommand('gts-kit.openInIntegratedTerminal', 'openInIntegratedTerminal'),
+    registerNativeFileCommand('gts-kit.selectForCompare', 'selectForCompare'),
+    registerNativeFileCommand('gts-kit.compareWithSelected', 'compareFiles'),
+    registerNativeFileCommand('gts-kit.openTimeline', 'files.openTimeline'),
+    registerNativeFileCommand('gts-kit.copyPath', 'copyFilePath'),
+    registerNativeFileCommand('gts-kit.copyRelativePath', 'copyRelativeFilePath'),
     vscode.commands.registerCommand('gts-kit.openFileFromTree', async (fsPath: string) => {
       try {
         const uri = vscode.Uri.file(fsPath)

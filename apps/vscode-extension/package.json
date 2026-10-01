@@ -58,6 +58,50 @@
         "title": "GTS: Refresh Discovered Files",
         "category": "GTS",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gts-kit.openToSide",
+        "title": "Open to the Side"
+      },
+      {
+        "command": "gts-kit.openWith",
+        "title": "Open With..."
+      },
+      {
+        "command": "gts-kit.revealInFinder",
+        "title": "Reveal in Finder"
+      },
+      {
+        "command": "gts-kit.revealInFileExplorer",
+        "title": "Reveal in File Explorer"
+      },
+      {
+        "command": "gts-kit.openContainingFolder",
+        "title": "Open Containing Folder"
+      },
+      {
+        "command": "gts-kit.openInIntegratedTerminal",
+        "title": "Open in Integrated Terminal"
+      },
+      {
+        "command": "gts-kit.selectForCompare",
+        "title": "Select for Compare"
+      },
+      {
+        "command": "gts-kit.compareWithSelected",
+        "title": "Compare with Selected"
+      },
+      {
+        "command": "gts-kit.openTimeline",
+        "title": "Open Timeline"
+      },
+      {
+        "command": "gts-kit.copyPath",
+        "title": "Copy Path"
+      },
+      {
+        "command": "gts-kit.copyRelativePath",
+        "title": "Copy Relative Path"
       }
     ],
     "viewsContainers": {
@@ -95,8 +139,63 @@
       ],
       "view/item/context": [
         {
+          "command": "gts-kit.openToSide",
+          "group": "navigation@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.openWith",
+          "group": "navigation@20",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.revealInFinder",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isMac"
+        },
+        {
+          "command": "gts-kit.revealInFileExplorer",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isWindows"
+        },
+        {
+          "command": "gts-kit.openContainingFolder",
+          "group": "navigation@30",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && isLinux"
+        },
+        {
+          "command": "gts-kit.openInIntegratedTerminal",
+          "group": "navigation@40",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
           "command": "gts-kit.openViewer",
           "group": "navigation@100",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.compareWithSelected",
+          "group": "3_compare@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && resourceSelectedForCompare"
+        },
+        {
+          "command": "gts-kit.selectForCompare",
+          "group": "3_compare@20",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.openTimeline",
+          "group": "4_timeline@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile && timelineHasProvider"
+        },
+        {
+          "command": "gts-kit.copyPath",
+          "group": "6_copypath@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
+        },
+        {
+          "command": "gts-kit.copyRelativePath",
+          "group": "6_copypath@20",
           "when": "view == gts-kit.fileExplorer && viewItem == gtsFile"
         }
       ],
