@@ -887,6 +887,15 @@ export class JsonRegistry {
             const regexPath = !propPath && !refMatch && !isTraitError && /regular expression|Unsupported pattern/.test(msg)
               ? findRegexPatternPath(entity.content, msg)
               : null
+            // The keyword-placement/unknown-keyword guards (§9.11, §9.7.1) report
+            // the offending keyword's JSON path(s) inline as "… found at: a/b/c,
+            // d/e/f". Anchor the diagnostic to the first such path so the squiggle
+            // lands on the actual keyword (e.g. properties/subject_type/x-gts-type)
+            // instead of the schema's `$id` — and so a self-referencing x-gts-ref
+            // elsewhere no longer appears to "own" an error from another field.
+            const foundAtMatch = !propPath && !refMatch && !isTraitError && !regexPath
+              ? msg.match(/ found at: (.+)$/)
+              : null
             let instancePath: string | null = null
             let params: Record<string, any> = {}
             if (propPath) {
@@ -902,6 +911,13 @@ export class JsonRegistry {
               params = traitName ? { trait: traitName } : {}
             } else if (regexPath) {
               instancePath = regexPath
+            } else if (foundAtMatch) {
+              // The reported path uses `/` separators and `[n]` array indices
+              // (e.g. "allOf[0]/properties/x/x-gts-type"); the depth-guard also
+              // appends " (nesting exceeds …)" which is not part of the path.
+              const firstPath = foundAtMatch[1].split(', ')[0].replace(/ \(.*\)$/, '').trim()
+              instancePath = fieldPathToInstancePath(firstPath)
+              params = { keywordPath: firstPath }
             }
             validation.errors.push({
               instancePath: instancePath || '/$id',
