@@ -2,7 +2,26 @@
 
 All notable changes to the GTS Viewer extension will be documented in this file.
 
-## [Unreleased]
+## [0.3.1] - 2026-10-26
+
+### Added
+- Explorer actions and context menus in the GTS file tree and viewer tree
+- Per-folder Rescan button in the GTS file tree (progress shown on the folder row), plus scan and validation progress at the top of the tree
+- Transitive `any-valid` validation: an instance referencing an invalid entity is reported as invalid
+
+### Changed
+- Validation rebased on `gts-ts` v0.11.0 (GTS spec 0.17): `x-gts-ref` is replaced by `x-gts-type-ref`, `x-gts-instance-ref` and `x-gts-pattern-ref`; schema regexes must follow the GTS safe regex profile; `re2.wasm` is no longer shipped
+- Much faster, non-blocking scans and validation of large workspaces (100K+ files)
+- One problem severity and standard problem decorations for all GTS problems
+
+### Fixed
+- Diagnostics anchored to the offending node instead of `$id`; fewer false positives (`gts://` in URL fields, GTS-id-shaped scalar values, `x-gts-pattern-ref` operands and `x-gts-traits` values)
+- Instances of invalid types, duplicate and malformed GTS ids are reported everywhere
+- Rescan starts immediately and fully rebuilds the GTS store; files open from the tree without delay during scans
+- Deleted files are dropped from discovery; not-yet-validated files show "validation pending" instead of green
+- Stack overflow on workspaces with 100K+ files
+- Workspace validation stalling on large workspaces when other extensions react to diagnostics changes
+
 
 ## [0.3.0] - 2026-09-18
 
