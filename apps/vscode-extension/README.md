@@ -18,8 +18,7 @@ GTS supports **type derivation** through chaining: a derived type extends a base
 
 **1. Base type** -- defines the common fields every user has:
 
-```jsonc
-// file: gts.x.core.idp.user.v1~.schema.json
+```json
 {
   "$id": "gts://gts.x.core.idp.user.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -29,7 +28,7 @@ GTS supports **type derivation** through chaining: a derived type extends a base
   "required": ["id", "type", "email", "display_name", "status"],
   "properties": {
     "id":           { "type": "string", "format": "uuid" },
-    "type":         { "type": "string", "x-gts-ref": "/$id" },
+    "type":         { "type": "string", "x-gts-type-ref": "/$id" },
     "email":        { "type": "string", "format": "email" },
     "display_name": { "type": "string" },
     "properties":   { "type": "object" }
@@ -39,8 +38,7 @@ GTS supports **type derivation** through chaining: a derived type extends a base
 
 **2. Derived type** -- extends the base with admin-specific fields. The chained `$id` shows that `platform_admin` inherits from `user`:
 
-```jsonc
-// file: gts.x.core.idp.user.v1~x.core.idp.platform_admin.v1~.schema.json
+```json
 {
   "$id": "gts://gts.x.core.idp.user.v1~x.core.idp.platform_admin.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -67,8 +65,7 @@ GTS supports **type derivation** through chaining: a derived type extends a base
 
 **3. Instance** -- a concrete platform administrator that conforms to the derived type:
 
-```jsonc
-// file: gts.x.core.idp.user.v1~x.core.idp.platform_admin.v1~.examples.jsonc
+```json
 {
   "id": "f0e1d2c3-b4a5-6789-0123-456789abcdef",
   "type": "gts.x.core.idp.user.v1~x.core.idp.platform_admin.v1~",

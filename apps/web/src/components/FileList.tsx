@@ -38,13 +38,11 @@ export function EntityList({ jsonObjs, schemas, selectedEntity: selectedEntity, 
   const filteredSchemas = schemas.filter(s => match(s.file?.name || s.id, s.id))
 
   // Build the visible linear list in render order for keyboard navigation
-  const visibleEntities: Entity[] = []
-  if (openJsonList) {
-    visibleEntities.push(...filteredJsonObjs)
-  }
-  if (openSchemaList) {
-    visibleEntities.push(...filteredSchemas)
-  }
+  // concat, not push(...): spreading 100K+ items as call arguments overflows the stack.
+  const visibleEntities: Entity[] = ([] as Entity[]).concat(
+    openJsonList ? filteredJsonObjs : [],
+    openSchemaList ? filteredSchemas : []
+  )
 
   // Notify parent of filtered entities for keyboard navigation
   useEffect(() => {

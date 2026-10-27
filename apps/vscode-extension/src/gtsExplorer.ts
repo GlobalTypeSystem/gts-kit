@@ -1,7 +1,7 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
 import { getRegistry, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
-import { countPublishedProblems } from './validation'
+import { countPublishedProblems, isValidationKnown, onValidationStateChanged, onWorkspaceValidationProgress } from './validation'
 
 /**
  * Left-sidebar file browser for GTS: shows every discovered file that holds at
@@ -24,55 +24,103 @@ interface GtsFileNode {
 interface GtsFolderNode {
   kind: 'folder'
   label: string
+  /** The folder's absolute path ('' for the invisible root). */
+  fsPath: string
   children: Map<string, GtsFileNode | GtsFolderNode>
+  /** Children in display order, computed on first request. */
+  sorted?: GtsTreeElement[]
 }
 
-type GtsTreeElement = GtsFileNode | GtsFolderNode
+/** The first row while a scan or validation runs, showing its status. */
+interface GtsStatusNode {
+  kind: 'status'
+  text: string
+}
+
+export type GtsTreeElement = GtsFileNode | GtsFolderNode | GtsStatusNode
+
+/** A folder rescan's progress: waiting behind other scans, or a phase's percentage. */
+export type FolderProgress = 'queued' | { phase: 'scanning' | 'validating'; percent: number }
+
+// Repainting a folder row makes VS Code fetch the folder's whole (expanded)
+// subtree again, and shows a second spinner in place of its twistie while
+// that is slow, so a row's percentage is repainted at most this often (a
+// phase change always repaints).
+const FOLDER_PROGRESS_REPAINT_MS = 1000
+
+function folderProgressText(progress: FolderProgress): string {
+  if (progress === 'queued') return 'waiting…'
+  return `${progress.phase} ${Math.max(0, Math.min(100, Math.floor(progress.percent)))}%`
+}
+
+/** `dir` + `name` with exactly one separator between them ('' for no parent). */
+function joinFsPath(dir: string, name: string): string {
+  if (!dir) return name
+  return dir.endsWith(path.sep) ? dir + name : dir + path.sep + name
+}
+
+/** Child folder `label` of `parent`, created if missing. */
+function getChildFolder(parent: GtsFolderNode, label: string, fsPath: string): GtsFolderNode {
+  const existing = parent.children.get(label)
+  if (existing?.kind === 'folder') return existing
+  const folder: GtsFolderNode = { kind: 'folder', label, fsPath, children: new Map() }
+  parent.children.set(label, folder)
+  return folder
+}
 
 /**
- * Tree path segments for a file: relative to its workspace folder, under a
- * top-level node named after that folder when the workspace has several roots.
- * Files outside every folder keep their absolute path.
+ * Build a nested folder/file tree from a flat list of absolute paths. Paths
+ * are shown relative to their workspace folder, under a top-level node named
+ * after that folder when the workspace has several roots. Files outside every
+ * folder keep their absolute path.
  */
-function treePathParts(fsPath: string, multiRoot: boolean): string[] {
-  const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))
-  if (!folder) return fsPath.split(path.sep).filter(Boolean)
-  const rel = path.relative(folder.uri.fsPath, fsPath).split(path.sep).filter(Boolean)
-  return multiRoot ? [folder.name, ...rel] : rel
-}
-
-/** Build a nested folder/file tree (per workspace folder) from a flat list of absolute paths. */
-function buildFileTree(filePaths: string[]): GtsFolderNode {
-  const root: GtsFolderNode = { kind: 'folder', label: '', children: new Map() }
-  const multiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1
+function buildFileTree(filePaths: Iterable<string>, folders: Map<string, GtsFolderNode>): GtsFolderNode {
+  const root: GtsFolderNode = { kind: 'folder', label: '', fsPath: '', children: new Map() }
+  const childFolder = (parent: GtsFolderNode, label: string, fsPath: string) => {
+    const folder = getChildFolder(parent, label, fsPath)
+    folders.set(fsPath, folder)
+    return folder
+  }
+  // Innermost first, so a file in nested workspace folders goes to the nested
+  // one (as with getWorkspaceFolder, which was too slow to call per file).
+  const workspaceFolders = (vscode.workspace.workspaceFolders || [])
+    .map(f => ({ name: f.name, fsPath: f.uri.fsPath, prefix: joinFsPath(f.uri.fsPath, '') }))
+    .sort((a, b) => b.fsPath.length - a.fsPath.length)
+  const multiRoot = workspaceFolders.length > 1
   for (const fsPath of filePaths) {
-    const parts = treePathParts(fsPath, multiRoot)
+    const workspaceFolder = workspaceFolders.find(f => fsPath.startsWith(f.prefix))
     let current = root
-    parts.forEach((part, idx) => {
-      const isLast = idx === parts.length - 1
-      if (isLast) {
-        current.children.set(part, { kind: 'file', label: part, fsPath })
-        return
-      }
-      const existing = current.children.get(part)
-      if (existing && existing.kind === 'folder') {
-        current = existing
-      } else {
-        const folder: GtsFolderNode = { kind: 'folder', label: part, children: new Map() }
-        current.children.set(part, folder)
-        current = folder
-      }
-    })
+    let dir: string
+    let parts: string[]
+    if (workspaceFolder) {
+      if (multiRoot) current = childFolder(root, workspaceFolder.name, workspaceFolder.fsPath)
+      dir = workspaceFolder.fsPath
+      parts = fsPath.slice(workspaceFolder.prefix.length).split(path.sep).filter(Boolean)
+    } else {
+      dir = fsPath.startsWith(path.sep) ? path.sep : ''
+      parts = fsPath.split(path.sep).filter(Boolean)
+    }
+    for (let i = 0; i < parts.length - 1; i++) {
+      dir = joinFsPath(dir, parts[i])
+      current = childFolder(current, parts[i], dir)
+    }
+    const name = parts[parts.length - 1]
+    if (name) current.children.set(name, { kind: 'file', label: name, fsPath })
   }
   return root
 }
 
+// One shared collator: `localeCompare` with options builds a collator per
+// call, which made sorting a folder of 100K files take seconds.
+const labelCollator = new Intl.Collator(undefined, { sensitivity: 'base' })
+
 /** Folders first, then files, both alphabetically (case-insensitive). */
 function sortedChildren(folder: GtsFolderNode): GtsTreeElement[] {
-  return Array.from(folder.children.values()).sort((a, b) => {
+  folder.sorted ??= Array.from(folder.children.values()).sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1
-    return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+    return labelCollator.compare(a.label, b.label)
   })
+  return folder.sorted
 }
 
 /**
@@ -80,14 +128,14 @@ function sortedChildren(folder: GtsFolderNode): GtsTreeElement[] {
  * failed to parse, and files whose only GTS content is malformed ids (those
  * hold no valid entity, so the registry itself doesn't list them).
  */
-function getDiscoveredFilePaths(): string[] {
+function getDiscoveredFilePaths(): Set<string> {
+  const paths = new Set<string>()
   const registry = getRegistry()
-  if (!registry) return []
-  return Array.from(new Set<string>([
-    ...registry.jsonFiles.keys(),
-    ...registry.invalidFiles.keys(),
-    ...getPathsWithMalformedIds()
-  ]))
+  if (!registry) return paths
+  for (const p of registry.jsonFiles.keys()) paths.add(p)
+  for (const p of registry.invalidFiles.keys()) paths.add(p)
+  for (const p of getPathsWithMalformedIds()) paths.add(p)
+  return paths
 }
 
 function isDiscoveredGtsFile(fsPath: string): boolean {
@@ -116,9 +164,9 @@ export function hasGtsErrors(uri: vscode.Uri): boolean {
 function collectFilePaths(element: GtsTreeElement, out: string[]): void {
   if (element.kind === 'file') {
     out.push(element.fsPath)
-    return
+  } else if (element.kind === 'folder') {
+    for (const child of element.children.values()) collectFilePaths(child, out)
   }
-  for (const child of element.children.values()) collectFilePaths(child, out)
 }
 
 export class GtsFileTreeProvider
@@ -132,11 +180,67 @@ export class GtsFileTreeProvider
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<GtsTreeElement | undefined | void>()
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event
 
-  private root: GtsFolderNode = { kind: 'folder', label: '', children: new Map() }
+  private root: GtsFolderNode = { kind: 'folder', label: '', fsPath: '', children: new Map() }
   // The set of discovered file paths currently reflected in the tree. Used to
   // avoid rebuilding (and thus visually flickering) the whole tree when only
   // file *contents* changed but the file list is the same.
   private knownPaths = new Set<string>()
+  // Folder nodes of the current tree by path, to repaint a single folder row.
+  private folders = new Map<string, GtsFolderNode>()
+  // Progress text shown on the rows of folders being rescanned, and when each
+  // row was last repainted.
+  private readonly folderProgress = new Map<string, string>()
+  private readonly folderRepaints = new Map<string, { at: number; timer?: NodeJS.Timeout }>()
+  private status: GtsStatusNode | undefined
+
+  /**
+   * Show `text` (dimmed) as the first row, e.g. scan or validation progress,
+   * or remove the row with `undefined`. VS Code's view message can't be
+   * styled, and the title description isn't shown for a view that is alone in
+   * its container.
+   */
+  setStatus(text: string | undefined): void {
+    if (!text) {
+      if (!this.status) return
+      this.status = undefined
+      this._onDidChangeTreeData.fire()
+    } else if (!this.status) {
+      this.status = { kind: 'status', text }
+      this._onDidChangeTreeData.fire()
+    } else if (this.status.text !== text) {
+      // Only this (leaf) row is repainted.
+      this.status.text = text
+      this._onDidChangeTreeData.fire(this.status)
+    }
+  }
+
+  /**
+   * Show `progress` on the row of the folder at `fsPath` while it is being
+   * rescanned (in place of its Rescan button), or clear it with `undefined`.
+   */
+  setFolderProgress(fsPath: string, progress: FolderProgress | undefined): void {
+    const previous = this.folderProgress.get(fsPath)
+    const text = progress === undefined ? undefined : folderProgressText(progress)
+    if (text === previous) return
+    if (text === undefined) this.folderProgress.delete(fsPath)
+    else this.folderProgress.set(fsPath, text)
+
+    const repaint = this.folderRepaints.get(fsPath) ?? { at: 0 }
+    this.folderRepaints.set(fsPath, repaint)
+    if (repaint.timer) clearTimeout(repaint.timer)
+    repaint.timer = undefined
+    const samePhase = previous !== undefined && text !== undefined && previous.split(' ')[0] === text.split(' ')[0]
+    const wait = samePhase ? repaint.at + FOLDER_PROGRESS_REPAINT_MS - Date.now() : 0
+    const fire = () => {
+      repaint.timer = undefined
+      repaint.at = Date.now()
+      if (text === undefined) this.folderRepaints.delete(fsPath)
+      const folder = this.folders.get(fsPath)
+      if (folder) this._onDidChangeTreeData.fire(folder)
+    }
+    if (wait > 0) repaint.timer = setTimeout(fire, wait)
+    else fire()
+  }
 
   /**
    * Reconcile the tree with the current registry state. Only rebuilds (and fires
@@ -151,8 +255,7 @@ export class GtsFileTreeProvider
   }
 
   refresh(): vscode.Uri[] {
-    const paths = getDiscoveredFilePaths()
-    const nextSet = new Set(paths)
+    const nextSet = getDiscoveredFilePaths()
 
     const changed: vscode.Uri[] = []
     for (const p of nextSet) if (!this.knownPaths.has(p)) changed.push(vscode.Uri.file(p))
@@ -160,37 +263,68 @@ export class GtsFileTreeProvider
     if (changed.length === 0) return []
 
     this.knownPaths = nextSet
-    this.root = buildFileTree(paths)
+    this.folders = new Map()
+    this.root = buildFileTree(nextSet, this.folders)
     this._onDidChangeTreeData.fire()
     return changed
   }
 
   getTreeItem(element: GtsTreeElement): vscode.TreeItem {
+    if (element.kind === 'status') {
+      // The text goes in the description, which VS Code renders dimmed.
+      const item = new vscode.TreeItem('', vscode.TreeItemCollapsibleState.None)
+      item.description = element.text
+      item.tooltip = element.text
+      item.iconPath = new vscode.ThemeIcon('loading~spin', new vscode.ThemeColor('descriptionForeground'))
+      item.contextValue = 'gtsStatus'
+      return item
+    }
     if (element.kind === 'file') {
       const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None)
       item.resourceUri = vscode.Uri.file(element.fsPath)
       item.contextValue = 'gtsFile'
+      // The built-in `vscode.open` is converted to a workbench command when the
+      // item is sent to the UI, so a click opens the file directly instead of
+      // round-tripping through this extension host, which may be busy scanning
+      // or validating a large workspace.
       item.command = {
-        command: 'gts-kit.openFileFromTree',
+        command: 'vscode.open',
         title: 'Open GTS File',
-        arguments: [element.fsPath]
+        arguments: [item.resourceUri, { preview: false }]
       }
-      item.tooltip = hasGtsErrors(item.resourceUri)
-        ? 'Has GTS validation errors'
-        : 'No GTS validation errors'
+      // The tooltip is filled in on hover (resolveTreeItem), so it reflects the
+      // file's validation state at that moment rather than when the row was built.
       return item
     }
 
     const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.Expanded)
-    item.iconPath = vscode.ThemeIcon.Folder
-    item.contextValue = 'gtsFolder'
+    item.tooltip = element.fsPath
+    const progress = this.folderProgress.get(element.fsPath)
+    if (progress === undefined) {
+      item.iconPath = vscode.ThemeIcon.Folder
+      item.contextValue = 'gtsFolder'
+    } else {
+      // A different context value hides the Rescan button while it runs.
+      item.iconPath = new vscode.ThemeIcon('loading~spin')
+      item.contextValue = 'gtsFolderRescanning'
+      item.description = progress
+    }
+    return item
+  }
+
+  resolveTreeItem(item: vscode.TreeItem, element: GtsTreeElement): vscode.TreeItem {
+    if (element.kind === 'file') {
+      const uri = vscode.Uri.file(element.fsPath)
+      item.tooltip = !isValidationKnown(element.fsPath)
+        ? 'GTS validation pending'
+        : hasGtsErrors(uri) ? 'Has GTS validation errors' : 'No GTS validation errors'
+    }
     return item
   }
 
   getChildren(element?: GtsTreeElement): GtsTreeElement[] {
-    const folder = element ? (element.kind === 'folder' ? element : undefined) : this.root
-    if (!folder) return []
-    return sortedChildren(folder)
+    if (!element) return this.status ? [this.status, ...sortedChildren(this.root)] : sortedChildren(this.root)
+    return element.kind === 'folder' ? sortedChildren(element) : []
   }
 
   /**
@@ -215,30 +349,42 @@ export class GtsFileTreeProvider
  * Colors every valid GTS file green (in the sidebar tree, the OS-style Explorer
  * and editor tabs). Files with GTS problems get no decoration of their own:
  * VS Code's Problems decoration colors them with its standard error color and
- * count, so every GTS problem looks the same everywhere.
+ * count, so every GTS problem looks the same everywhere. Files that haven't
+ * been validated yet stay uncolored: no diagnostics doesn't mean valid yet.
  */
 export class GtsFileDecorationProvider implements vscode.FileDecorationProvider {
   private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>()
   readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event
 
   refresh(uris?: vscode.Uri[]): void {
-    this._onDidChangeFileDecorations.fire(uris)
+    // VS Code eagerly re-fetches the decoration of every URI listed in a change
+    // event, one provider call per file, while a flush (`undefined`) only
+    // re-fetches what is on screen. Past a few thousand files (a scan, a
+    // validation batch) the flush is far cheaper, at the cost of a repaint.
+    this._onDidChangeFileDecorations.fire(uris && uris.length <= MAX_DECORATION_CHANGE_URIS ? uris : undefined)
   }
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     if (!isDiscoveredGtsFile(uri.fsPath)) return undefined
+    if (!isValidationKnown(uri.fsPath)) return undefined
 
     if (hasGtsErrors(uri)) return undefined
     return new vscode.FileDecoration(undefined, 'GTS: file is valid', new vscode.ThemeColor('charts.green'))
   }
 }
 
+const MAX_DECORATION_CHANGE_URIS = 2000
+
 export interface GtsExplorer {
   treeProvider: GtsFileTreeProvider
   decorationProvider: GtsFileDecorationProvider
   reset(): void
-  /** Call after the registry's set of discovered files may have changed (rescan, index/remove file). */
+  /** Call after the registry's set of discovered files may have changed (rescan, index/remove file). Debounced. */
   refresh(): void
+  /** Status of the running scan, shown dimmed as the tree's first row (undefined: none). */
+  setScanStatus(status: string | undefined): void
+  /** Progress of a folder rescan, shown on the folder's row (undefined: done). */
+  setFolderProgress(fsPath: string, progress: FolderProgress | undefined): void
 }
 
 /** Update the small rounded problem-count badge shown next to the view title. */
@@ -282,14 +428,6 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
     registerNativeFileCommand('gts-kit.openTimeline', 'files.openTimeline'),
     registerNativeFileCommand('gts-kit.copyPath', 'copyFilePath'),
     registerNativeFileCommand('gts-kit.copyRelativePath', 'copyRelativeFilePath'),
-    vscode.commands.registerCommand('gts-kit.openFileFromTree', async (fsPath: string) => {
-      try {
-        const uri = vscode.Uri.file(fsPath)
-        await vscode.window.showTextDocument(uri, { preview: false })
-      } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to open GTS file: ${error?.message || String(error)}`)
-      }
-    }),
     // Diagnostics (and therefore per-file error state and the problem-count
     // badge) change independently of the file list. This event fires for every
     // diagnostics change of every extension (e.g. the TypeScript server on each
@@ -302,8 +440,41 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
       decorationProvider.refresh(relevant)
       scheduleTreeUpdate()
     }),
-    new vscode.Disposable(() => { if (updateTimer) clearTimeout(updateTimer) })
+    // A file whose validation just became known turns green without any
+    // diagnostics change, so it has to be repainted explicitly.
+    onValidationStateChanged(uris => {
+      decorationProvider.refresh(uris)
+    }),
+    // Workspace validation runs after a scan (minutes on a very large
+    // workspace): show its progress like the scan's.
+    onWorkspaceValidationProgress(progress => {
+      if (!progress) {
+        validationStatus = undefined
+        endValidationProgress?.()
+        endValidationProgress = null
+      } else {
+        validationStatus = `Validating ${progress.done.toLocaleString()} / ${progress.total.toLocaleString()}`
+        if (!endValidationProgress) {
+          const ended = new Promise<void>(resolve => { endValidationProgress = resolve })
+          void vscode.window.withProgress({ location: { viewId: 'gts-kit.fileExplorer' } }, () => ended)
+        }
+      }
+      updateMessage()
+    }),
+    new vscode.Disposable(() => {
+      if (updateTimer) clearTimeout(updateTimer)
+      endValidationProgress?.()
+    })
   )
+
+  // What is running (a scan, else validation) is shown as a dimmed first row
+  // of the tree (see GtsFileTreeProvider.setStatus).
+  let scanStatus: string | undefined
+  let validationStatus: string | undefined
+  let endValidationProgress: (() => void) | null = null
+  function updateMessage(): void {
+    treeProvider.setStatus(scanStatus ?? validationStatus)
+  }
 
   // Coalesces tree reconciliation + badge recount across bursts of changes.
   let updateTimer: NodeJS.Timeout | null = null
@@ -332,11 +503,17 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
     refresh() {
       // Only the added/removed files need a decoration repaint; error-state
       // changes on existing files are repainted by the onDidChangeDiagnostics
-      // handler above. A global decoration refresh here would flicker every file.
-      // Called on every keystroke in a GTS file, so the badge recount is debounced.
-      const changed = treeProvider.refresh()
-      if (changed.length > 0) decorationProvider.refresh(changed)
+      // handler above. Called on every keystroke in a GTS file and for every
+      // file of an on-disk burst (git checkout), and each reconciliation walks
+      // every discovered file, so it is debounced.
       scheduleTreeUpdate()
+    },
+    setScanStatus(status) {
+      scanStatus = status
+      updateMessage()
+    },
+    setFolderProgress(fsPath, progress) {
+      treeProvider.setFolderProgress(fsPath, progress)
     }
   }
 }

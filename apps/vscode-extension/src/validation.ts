@@ -5,9 +5,10 @@ import * as jsonc from 'jsonc-parser'
 import { ValidationError, DEFAULT_GTS_CONFIG, parseGtsFileContent, isYamlFileName } from '@gts/shared'
 import type { JsonRegistry, JsonSchema, JsonObj } from '@gts/shared'
 import { getLastScanFiles } from './scanStore'
-import { getRegistry, rebuildRegistry, indexFile, removeFile, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
+import { getRegistry, getRegistryRevision, rebuildRegistry, indexFile, removeFile, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
 import { malformedGtsIdMessage } from './gtsIdFormat'
 import { isGtsCandidateFile, isIndexableGtsDocument } from './helpers'
+import { TimeSlicer, CancelledError, PublishSchedule } from './timeSlice'
 
 let diagnosticCollection: vscode.DiagnosticCollection
 let workspaceDiagnosticCollection: vscode.DiagnosticCollection
@@ -17,6 +18,13 @@ const documentValidationGenerations = new Map<string, number>()
 const validationCompletedListeners = new Set<(uri: vscode.Uri) => void>()
 let workspaceValidationGeneration = 0
 
+// Files whose GTS problems have been published at least once. Until then, a
+// file without diagnostics is "not validated yet", not "valid": on a large
+// workspace the first pass takes a while, and treating the absence of markers
+// as valid colored every not-yet-processed invalid file green.
+const validatedPaths = new Set<string>()
+const validationStateListeners = new Set<(uris: vscode.Uri[]) => void>()
+
 export function getDocumentValidationErrors(uri: vscode.Uri): ValidationError[] {
   return documentValidationErrors.get(uri.toString()) || []
 }
@@ -24,6 +32,39 @@ export function getDocumentValidationErrors(uri: vscode.Uri): ValidationError[] 
 export function onValidationCompleted(listener: (uri: vscode.Uri) => void): vscode.Disposable {
   validationCompletedListeners.add(listener)
   return new vscode.Disposable(() => validationCompletedListeners.delete(listener))
+}
+
+/** True once the file's validation result has been published (its diagnostics are authoritative). */
+export function isValidationKnown(fsPath: string): boolean {
+  return validatedPaths.has(fsPath)
+}
+
+/** Fires with the files whose validation result just became known. */
+export function onValidationStateChanged(listener: (uris: vscode.Uri[]) => void): vscode.Disposable {
+  validationStateListeners.add(listener)
+  return new vscode.Disposable(() => validationStateListeners.delete(listener))
+}
+
+/** The file left the index; if it comes back it is unvalidated again. */
+export function forgetValidationState(fsPath: string): void {
+  validatedPaths.delete(fsPath)
+}
+
+function markValidated(fsPaths: Iterable<string>): void {
+  const added: vscode.Uri[] = []
+  for (const fsPath of fsPaths) {
+    if (validatedPaths.has(fsPath)) continue
+    validatedPaths.add(fsPath)
+    added.push(vscode.Uri.file(fsPath))
+  }
+  if (added.length === 0) return
+  for (const listener of validationStateListeners) {
+    try {
+      listener(added)
+    } catch (err) {
+      console.error('[GTS Validation] Error in validation state listener:', err)
+    }
+  }
 }
 
 /**
@@ -133,7 +174,7 @@ function findErrorPosition(parsed: ParsedDocument, instancePath: string, error: 
 
   // 3. For any error carrying an instance path, underline the offending node.
   // The choice of what to underline is STRUCTURAL, not keyword-specific: a
-  // scalar value (format/uuid/pattern/x-gts-abstract/x-gts-ref/type/enum on a
+  // scalar value (format/uuid/pattern/x-gts-abstract/x-gts-*-ref/type/enum on a
   // leaf, or the schema's own $id) is underlined directly; when the path
   // resolves to an object/array subschema (e.g. an OP#12 derivation error at
   // `/allOf/1/properties/level`, whose value is itself a schema) the property
@@ -149,9 +190,9 @@ function findErrorPosition(parsed: ParsedDocument, instancePath: string, error: 
     }
   }
 
-  // 4. For gts:// prefix violations, x-gts-ref mismatches, malformed ids and
+  // 4. For gts:// prefix violations, reference keyword mismatches, malformed ids and
   // duplicate ids without a resolvable path, highlight the offending string value.
-  const valueKeywords = ['gts-uri-prefix', 'x-gts-ref', 'gts-id-format', 'gts-duplicate-id']
+  const valueKeywords = ['gts-uri-prefix', 'x-gts-type-ref', 'x-gts-instance-ref', 'x-gts-pattern-ref', 'gts-id-format', 'gts-duplicate-id']
   if (valueKeywords.includes(error.keyword) && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
     // Quoted (JSON, or a quoted YAML scalar) first, then bare YAML scalar.
@@ -585,6 +626,7 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
       documentValidationErrors.delete(document.uri.toString())
       diagnosticCollection.delete(document.uri)
     }
+    markValidated([filePath])
 
     for (const listener of validationCompletedListeners) {
       try {
@@ -606,15 +648,47 @@ export async function validateOpenDocument(document: vscode.TextDocument) {
 // steady stream of edits/file events can no longer starve it.
 let workspaceValidationRunning = false
 let workspaceValidationWaiters: Array<() => void> = []
+let workspaceValidationIdleWaiters: Array<() => void> = []
+
+/** Files validated so far by the running workspace pass, out of `total`. */
+export interface WorkspaceValidationProgress {
+  done: number
+  total: number
+}
+
+const workspaceValidationProgressListeners = new Set<(progress: WorkspaceValidationProgress | undefined) => void>()
+
+/**
+ * Fires while workspace validation runs (at most every
+ * WORKSPACE_PROGRESS_INTERVAL_MS), and with `undefined` once it is idle.
+ */
+export function onWorkspaceValidationProgress(listener: (progress: WorkspaceValidationProgress | undefined) => void): vscode.Disposable {
+  workspaceValidationProgressListeners.add(listener)
+  return new vscode.Disposable(() => workspaceValidationProgressListeners.delete(listener))
+}
+
+function emitWorkspaceValidationProgress(progress: WorkspaceValidationProgress | undefined): void {
+  for (const listener of workspaceValidationProgressListeners) {
+    try {
+      listener(progress)
+    } catch (err) {
+      console.error('[GTS Validation] Error in validation progress listener:', err)
+    }
+  }
+}
+
+const WORKSPACE_PROGRESS_INTERVAL_MS = 250
+
+/** Resolves once no workspace validation pass is running or pending. */
+export function whenWorkspaceValidationIdle(): Promise<void> {
+  if (!workspaceValidationRunning) return Promise.resolve()
+  return new Promise(resolve => workspaceValidationIdleWaiters.push(resolve))
+}
 
 // Max time a pass validates before yielding back to the extension host's event
 // loop. Entity validation never yields on its own (it's all microtasks), so
 // without this a large workspace freezes hovers/tree/typing for seconds.
 const WORKSPACE_VALIDATION_SLICE_MS = 25
-
-function yieldToEventLoop(): Promise<void> {
-  return new Promise(resolve => setImmediate(resolve))
-}
 
 /**
  * Validate all indexed entities and publish coarse diagnostics for files that are
@@ -651,6 +725,10 @@ async function drainWorkspaceValidation(): Promise<void> {
     }
   } finally {
     workspaceValidationRunning = false
+    emitWorkspaceValidationProgress(undefined)
+    const idleWaiters = workspaceValidationIdleWaiters
+    workspaceValidationIdleWaiters = []
+    for (const resolve of idleWaiters) resolve()
   }
 }
 
@@ -665,8 +743,8 @@ type RegistryEntity = JsonSchema | JsonObj
  */
 function entitiesByFile(registry: JsonRegistry): RegistryEntity[] {
   const entities: RegistryEntity[] = []
-  for (const list of registry.jsonFileSchemas.values()) entities.push(...list)
-  for (const list of registry.jsonFileObjs.values()) entities.push(...list)
+  for (const list of registry.jsonFileSchemas.values()) for (const entity of list) entities.push(entity)
+  for (const list of registry.jsonFileObjs.values()) for (const entity of list) entities.push(entity)
   return entities
 }
 
@@ -676,6 +754,16 @@ function isIndexedInItsFile(registry: JsonRegistry, entity: RegistryEntity): boo
   if (!filePath) return false
   return (registry.jsonFileSchemas.get(filePath) || []).includes(entity as JsonSchema) ||
     (registry.jsonFileObjs.get(filePath) || []).includes(entity as JsonObj)
+}
+
+/** True if both are the same coarse diagnostics (or both absent/empty). */
+function sameDiagnostics(a: readonly vscode.Diagnostic[] | undefined, b: readonly vscode.Diagnostic[] | undefined): boolean {
+  const left = a ?? []
+  const right = b ?? []
+  if (left.length !== right.length) return false
+  return left.every((d, i) =>
+    d.message === right[i].message && d.code === right[i].code && d.severity === right[i].severity &&
+    d.source === right[i].source && d.range.isEqual(right[i].range))
 }
 
 /** Coarse (line 0) diagnostic for a file that isn't open in an editor. */
@@ -791,69 +879,144 @@ function collectValidationErrors(registry: JsonRegistry, filePath: string, index
   ]
 }
 
+/** Paths of the GTS files currently open in an editor (they get precise diagnostics from validateOpenDocument). */
+function openGtsPaths(): Set<string> {
+  const openPaths = new Set<string>()
+  for (const doc of vscode.workspace.textDocuments) {
+    if (isGtsCandidateFile(doc)) openPaths.add(doc.uri.fsPath)
+  }
+  return openPaths
+}
+
+/** Every file the workspace pass reports on. */
+function workspaceFilePaths(registry: JsonRegistry): Set<string> {
+  const paths = new Set<string>()
+  for (const p of registry.jsonFileSchemas.keys()) paths.add(p)
+  for (const p of registry.jsonFileObjs.keys()) paths.add(p)
+  for (const p of registry.invalidFiles.keys()) paths.add(p)
+  for (const p of getPathsWithMalformedIds()) paths.add(p)
+  return paths
+}
+
 /** One full validation pass. Returns false if it was superseded and must rerun. */
 async function runWorkspaceValidationPass(): Promise<boolean> {
   const registry = getRegistry()
   if (!registry || !workspaceDiagnosticCollection) return true
+  const collection = workspaceDiagnosticCollection
   const validationGeneration = workspaceValidationGeneration
   const isSuperseded = () =>
     getRegistry() !== registry || workspaceValidationGeneration !== validationGeneration
   const startTime = Date.now()
+  const slicer = new TimeSlicer(isSuperseded, WORKSPACE_VALIDATION_SLICE_MS)
+  try {
+    return await validateWorkspace(registry, collection, slicer, startTime)
+  } catch (error) {
+    if (error instanceof CancelledError) return false
+    throw error
+  }
+}
+
+async function validateWorkspace(registry: JsonRegistry, collection: vscode.DiagnosticCollection, slicer: TimeSlicer, startTime: number): Promise<boolean> {
+  // Built on demand by the first validation, the gts-ts store would block the
+  // extension host for seconds on a large workspace; build it in slices first.
+  await registry.prepareGtsStore(() => slicer.tick())
+
+  // Files are validated one at a time and published in batches as the pass
+  // goes. Everything is indexed before validation starts, so the duplicate-id
+  // index is complete from the beginning; it is rebuilt when the registry
+  // changes mid-pass, and the final publish below recomputes every file anyway.
+  let index = buildDefinitionIndex(registry)
+  let indexRevision = getRegistryRevision()
+  let finished: string[] = []
+  const schedule = new PublishSchedule(slicer)
+  const publishFinished = () => {
+    if (getRegistryRevision() !== indexRevision) {
+      index = buildDefinitionIndex(registry)
+      indexRevision = getRegistryRevision()
+    }
+    const openPaths = openGtsPaths()
+    const closed = finished.filter(filePath => !openPaths.has(filePath))
+    const entries: Array<[vscode.Uri, vscode.Diagnostic[] | undefined]> = []
+    for (const filePath of closed) {
+      const uri = vscode.Uri.file(filePath)
+      const problems = collectValidationErrors(registry, filePath, index)
+      const diagnostics = problems.length > 0 ? problems.map(coarseDiagnostic) : undefined
+      if (!sameDiagnostics(collection.get(uri), diagnostics)) entries.push([uri, diagnostics])
+    }
+    if (entries.length > 0) collection.set(entries)
+    markValidated(closed)
+    finished = []
+    schedule.published()
+  }
 
   // Re-indexing a file replaces its entity objects, so rather than aborting when
   // the registry changes mid-pass, keep sweeping until every *current* entity has
   // been validated. Edits that land during the pass are picked up by the next
   // sweep; replaced entities are skipped.
   const validated = new Set<object>()
-  let sliceStart = Date.now()
+  const initialPaths = workspaceFilePaths(registry)
+  let pendingPaths: Iterable<string> = initialPaths
+  const progress: WorkspaceValidationProgress = { done: 0, total: initialPaths.size }
+  let lastProgress = Date.now()
+  emitWorkspaceValidationProgress({ ...progress })
   for (;;) {
-    const pending = entitiesByFile(registry).filter(entity => !validated.has(entity))
-    if (pending.length === 0) break
-    for (const entity of pending) {
-      validated.add(entity)
-      if (!isIndexedInItsFile(registry, entity)) continue
-      await registry.validateEntity(entity)
-      if (Date.now() - sliceStart >= WORKSPACE_VALIDATION_SLICE_MS) {
-        await yieldToEventLoop()
-        if (isSuperseded()) return false
-        sliceStart = Date.now()
+    let swept = 0
+    for (const filePath of pendingPaths) {
+      swept++
+      for (const entity of fileEntities(registry, filePath)) {
+        if (validated.has(entity)) continue
+        validated.add(entity)
+        if (!isIndexedInItsFile(registry, entity)) continue
+        await registry.validateEntity(entity)
+        await slicer.tick()
+      }
+      finished.push(filePath)
+      progress.done = Math.min(progress.done + 1, progress.total)
+      if (Date.now() - lastProgress >= WORKSPACE_PROGRESS_INTERVAL_MS) {
+        emitWorkspaceValidationProgress({ ...progress })
+        lastProgress = Date.now()
+      }
+      if (schedule.due) {
+        slicer.throwIfCancelled()
+        publishFinished()
       }
     }
+    if (swept === 0) break
+    pendingPaths = [...workspaceFilePaths(registry)].filter(filePath =>
+      fileEntities(registry, filePath).some(entity => !validated.has(entity)))
   }
-  if (isSuperseded()) return false
+  slicer.throwIfCancelled()
 
   // Collect from the registry's current state (open documents get precise
   // diagnostics from validateOpenDocument instead).
-  const openPaths = new Set<string>()
-  for (const doc of vscode.workspace.textDocuments) {
-    if (isGtsCandidateFile(doc)) openPaths.add(doc.uri.fsPath)
-  }
-
-  const index = buildDefinitionIndex(registry)
-  const filePaths = new Set([
-    ...registry.jsonFileSchemas.keys(),
-    ...registry.jsonFileObjs.keys(),
-    ...registry.invalidFiles.keys(),
-    ...getPathsWithMalformedIds()
-  ])
+  const openPaths = openGtsPaths()
+  index = buildDefinitionIndex(registry)
+  const filePaths = workspaceFilePaths(registry)
+  const closedPaths: string[] = []
   const diagnosticsByPath = new Map<string, vscode.Diagnostic[]>()
   for (const filePath of filePaths) {
     if (openPaths.has(filePath)) continue
+    closedPaths.push(filePath)
     const problems = collectValidationErrors(registry, filePath, index)
     if (problems.length > 0) diagnosticsByPath.set(filePath, problems.map(coarseDiagnostic))
+    await slicer.tick()
   }
 
   // Replace the collection's full contents. `set(entries)` only touches the
   // listed files, so files that became valid must be cleared explicitly or they
-  // keep stale red markers.
+  // keep stale red markers. Files whose markers the batches above already
+  // published unchanged are skipped: re-sending every file's markers made the
+  // whole UI stall at the end of a pass over a large workspace.
   const entries: Array<[vscode.Uri, vscode.Diagnostic[] | undefined]> = []
-  workspaceDiagnosticCollection.forEach(uri => {
+  collection.forEach(uri => {
     if (!diagnosticsByPath.has(uri.fsPath)) entries.push([uri, undefined])
   })
   for (const [filePath, diagnostics] of diagnosticsByPath.entries()) {
-    entries.push([vscode.Uri.file(filePath), diagnostics])
+    const uri = vscode.Uri.file(filePath)
+    if (!sameDiagnostics(collection.get(uri), diagnostics)) entries.push([uri, diagnostics])
   }
-  workspaceDiagnosticCollection.set(entries)
+  if (entries.length > 0) collection.set(entries)
+  markValidated(closedPaths)
   console.log(`[GTS Validation] Workspace pass: ${validated.size} entities, ${diagnosticsByPath.size} file(s) with problems (${Date.now() - startTime}ms)`)
   return true
 }
@@ -866,14 +1029,21 @@ async function runWorkspaceValidationPass(): Promise<boolean> {
 async function validateClosedFile(filePath: string, index?: DefinitionIndex): Promise<void> {
   const registry = getRegistry()
   if (!registry || !workspaceDiagnosticCollection) return
+  const uri = vscode.Uri.file(filePath)
+  const diagnostics = await closedFileDiagnostics(registry, filePath, index ?? buildDefinitionIndex(registry))
+  // Unchanged markers aren't re-sent: every diagnostics change makes other
+  // extensions re-process diagnostics.
+  if (!sameDiagnostics(workspaceDiagnosticCollection.get(uri), diagnostics)) workspaceDiagnosticCollection.set(uri, diagnostics)
+  markValidated([filePath])
+}
 
+/** Validate a closed file's entities and return its coarse diagnostics (undefined: none). */
+async function closedFileDiagnostics(registry: JsonRegistry, filePath: string, index: DefinitionIndex): Promise<vscode.Diagnostic[] | undefined> {
   // Entity validation itself is shared registry logic; here we only turn the
   // resulting problems into coarse (line-0) workspace diagnostics.
   await registry.validateFile(filePath)
-  const diagnostics = collectValidationErrors(registry, filePath, index ?? buildDefinitionIndex(registry)).map(coarseDiagnostic)
-
-  const uri = vscode.Uri.file(filePath)
-  workspaceDiagnosticCollection.set(uri, diagnostics.length > 0 ? diagnostics : undefined)
+  const diagnostics = collectValidationErrors(registry, filePath, index).map(coarseDiagnostic)
+  return diagnostics.length > 0 ? diagnostics : undefined
 }
 
 /**
@@ -922,13 +1092,8 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
   }
   if (dependentPaths.size === 0) return
 
-  const openByPath = new Map<string, vscode.TextDocument>()
-  for (const doc of vscode.workspace.textDocuments) {
-    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
-      openByPath.set(doc.uri.fsPath, doc)
-    }
-  }
-
+  const openByPath = openGtsDocumentsByPath()
+  const slicer = new TimeSlicer()
   for (const dependentPath of dependentPaths) {
     const openDoc = openByPath.get(dependentPath)
     if (openDoc) {
@@ -936,6 +1101,96 @@ export async function revalidateDependents(changedPath: string, previousIds?: It
     } else {
       await validateClosedFile(dependentPath, index)
     }
+    await slicer.tick()
+  }
+}
+
+function openGtsDocumentsByPath(): Map<string, vscode.TextDocument> {
+  const openByPath = new Map<string, vscode.TextDocument>()
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === 'file' && isGtsCandidateFile(doc)) {
+      openByPath.set(doc.uri.fsPath, doc)
+    }
+  }
+  return openByPath
+}
+
+/**
+ * Revalidate `paths` together with everything affected by the files in
+ * `changed` (path -> ids it defined before the change): files depending on
+ * them and other definers of their ids. Used after a folder rescan. When that
+ * adds up to most of the workspace, a workspace pass (with its own progress)
+ * is started instead and this returns right away; otherwise `onProgress` gets
+ * files done / total.
+ */
+export async function revalidateFiles(
+  paths: Iterable<string>,
+  changed: ReadonlyMap<string, readonly string[]>,
+  onProgress?: (done: number, total: number) => void
+): Promise<void> {
+  const registry = getRegistry()
+  const collection = workspaceDiagnosticCollection
+  if (!registry || !collection) return
+  // A full rescan replacing the registry runs its own workspace pass.
+  const slicer = new TimeSlicer(() => getRegistry() !== registry)
+  try {
+    const index = buildDefinitionIndex(registry)
+    const targets = new Set(paths)
+    for (const [changedPath, oldIds] of changed) {
+      targets.add(changedPath)
+      for (const p of registry.getDependentFilePaths(changedPath, oldIds)) targets.add(p)
+      for (const id of new Set([...oldIds, ...registry.getEntityIdsForFile(changedPath)])) {
+        for (const p of index.get(id) || []) targets.add(p)
+      }
+      await slicer.tick()
+    }
+    const indexed = workspaceFilePaths(registry)
+    if (targets.size > indexed.size / 2) {
+      // Not awaited: the pass reports its own progress (at the top of the
+      // tree) and can take minutes, which left a rescanned folder's row
+      // looking stuck.
+      void validateWorkspaceInBackground()
+      return
+    }
+
+    // Closed files' markers are published in batches, like the workspace pass's.
+    const openByPath = openGtsDocumentsByPath()
+    const schedule = new PublishSchedule(slicer)
+    let pending: Array<[vscode.Uri, vscode.Diagnostic[] | undefined]> = []
+    let pendingValidated: string[] = []
+    const publish = () => {
+      slicer.throwIfCancelled()
+      if (pending.length > 0) collection.set(pending)
+      markValidated(pendingValidated)
+      pending = []
+      pendingValidated = []
+      schedule.published()
+    }
+    let done = 0
+    let lastProgress = 0
+    for (const filePath of targets) {
+      const openDoc = openByPath.get(filePath)
+      const uri = vscode.Uri.file(filePath)
+      if (openDoc) {
+        await validateOpenDocument(openDoc)
+      } else if (indexed.has(filePath)) {
+        const diagnostics = await closedFileDiagnostics(registry, filePath, index)
+        if (!sameDiagnostics(collection.get(uri), diagnostics)) pending.push([uri, diagnostics])
+        pendingValidated.push(filePath)
+      } else if (collection.has(uri)) {
+        pending.push([uri, undefined])
+      }
+      done++
+      if (Date.now() - lastProgress >= WORKSPACE_PROGRESS_INTERVAL_MS) {
+        onProgress?.(done, targets.size)
+        lastProgress = Date.now()
+      }
+      if (schedule.due) publish()
+      await slicer.tick()
+    }
+    publish()
+  } catch (error) {
+    if (!(error instanceof CancelledError)) throw error
   }
 }
 
@@ -954,6 +1209,7 @@ export function countPublishedProblems(): number {
 export function resetValidationDiagnostics(): void {
   documentValidationErrors.clear()
   documentValidationGenerations.clear()
+  validatedPaths.clear()
   workspaceValidationGeneration++
   diagnosticCollection?.clear()
   workspaceDiagnosticCollection?.clear()

@@ -93,7 +93,7 @@ export function parseJsonToProperties(data: any, name = 'root'): PropertyInfo[] 
           }
         }
 
-        // For plain nested objects, use recursive parsing without any x-gts-type special handling
+        // For plain nested objects, use recursive parsing without any reference-keyword special handling
         return {
           name: key,
           type: 'object',
@@ -157,9 +157,10 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
         description = description ? `${description}\n${patDescription}` : patDescription
       }
 
-      if (prop['x-gts-type']) {
-        const gtsTypeDescription = `GTS Type: ${prop['x-gts-type']}`
-        description = description ? `${description}\n${gtsTypeDescription}` : gtsTypeDescription
+      for (const [keyword, label] of [['x-gts-type-ref', 'GTS Type'], ['x-gts-instance-ref', 'GTS Instance'], ['x-gts-pattern-ref', 'GTS Pattern']] as const) {
+        if (!prop[keyword]) continue
+        const refDescription = `${label}: ${prop[keyword]}`
+        description = description ? `${description}\n${refDescription}` : refDescription
         isGtsType = true
       }
 

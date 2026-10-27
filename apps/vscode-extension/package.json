@@ -2,7 +2,7 @@
   "name": "gts-kit",
   "displayName": "Global Type System (GTS) Kit",
   "description": "Global Type System (GTS) support for VS Code — browse, validate,visualize, and manage GTS schemas and instances",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "publisher": "GlobalTypeSystem",
   "license": "Apache-2.0",
@@ -56,6 +56,12 @@
       {
         "command": "gts-kit.refreshFileExplorer",
         "title": "GTS: Refresh Discovered Files",
+        "category": "GTS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gts-kit.rescanFolder",
+        "title": "Rescan Folder",
         "category": "GTS",
         "icon": "$(refresh)"
       },
@@ -137,7 +143,23 @@
           "when": "resourceExtname =~ /\\.(json|jsonc|gts)$/"
         }
       ],
+      "commandPalette": [
+        {
+          "command": "gts-kit.rescanFolder",
+          "when": "false"
+        }
+      ],
       "view/item/context": [
+        {
+          "command": "gts-kit.rescanFolder",
+          "group": "inline",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFolder"
+        },
+        {
+          "command": "gts-kit.rescanFolder",
+          "group": "navigation@10",
+          "when": "view == gts-kit.fileExplorer && viewItem == gtsFolder"
+        },
         {
           "command": "gts-kit.openToSide",
           "group": "navigation@10",

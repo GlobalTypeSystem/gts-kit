@@ -4,13 +4,14 @@ import * as fs from 'fs'
 import { parseGtsFileContent, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { EntityValidationDto, ObjValidationDto, InvalidFileValidationDto, ValidationRelayPayload } from '@gts/shared'
 import { setLastScanFiles } from './scanStore'
-import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
+import { rebuildRegistry, indexFile as indexFileInRegistry, indexFiles, removeFile as removeFileFromRegistry, getRegistry, getPathsWithMalformedIds, type RegistryFileInput } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, isGitIgnored, type FolderIgnore } from './gitignore'
 import { WorkspaceLayoutStorage } from './storage'
-import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
+import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, revalidateFiles, onValidationCompleted, forgetValidationState, whenWorkspaceValidationIdle } from './validation'
 import { isGtsCandidateFile, isIndexableGtsDocument } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
-import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
+import { registerGtsExplorer, type GtsExplorer, type GtsTreeElement, type FolderProgress } from './gtsExplorer'
+import { TimeSlicer, CancelledError, filterSliced, yieldToEventLoop } from './timeSlice'
 import type { LayoutSaveRequest, LayoutTarget, LayoutSnapshot } from '@gts/layout-storage'
 
 // Glob used for all GTS workspace scans and the on-disk file watcher.
@@ -97,7 +98,10 @@ async function findGtsFiles(ignores: Map<string, FolderIgnore>, baseExclude: str
     if (capPerFolder !== undefined && found.length >= capPerFolder) {
       console.warn(`[GTS] Phase 1 hit its ${capPerFolder}-file cap in "${folder.name}"; the rest is indexed by phase 2`)
     }
-    uris.push(...found)
+    // Not `uris.push(...found)`: spreading passes every element as a call
+    // argument, which overflows the stack ("Maximum call stack size exceeded")
+    // once a folder holds more than ~120K files.
+    for (const uri of found) uris.push(uri)
   }
   return uris
 }
@@ -110,33 +114,38 @@ async function findGtsFiles(ignores: Map<string, FolderIgnore>, baseExclude: str
 // once and let the most-recently-scanned/edited path win (so an open file, which
 // is scanned first, stays canonical and gets its in-editor diagnostics).
 const realPathIndex = new Map<string, string>()
+// Reverse of realPathIndex (indexed path -> real path), so forgetting a path is
+// a lookup instead of a scan of every indexed file.
+const realPathOfIndexedPath = new Map<string, string>()
+
+function setCanonicalPath(real: string, fsPath: string): void {
+  const previous = realPathIndex.get(real)
+  if (previous !== undefined) realPathOfIndexedPath.delete(previous)
+  realPathIndex.set(real, fsPath)
+  realPathOfIndexedPath.set(fsPath, real)
+}
+
+function clearCanonicalPaths(): void {
+  realPathIndex.clear()
+  realPathOfIndexedPath.clear()
+}
 
 /** Resolve a path to its canonical real path; fall back to the input on error. */
 function resolveRealPath(fsPath: string): string {
   try { return fs.realpathSync.native(fsPath) } catch { return fsPath }
 }
 
-/** Drop any canonical-path entries that point at `fsPath` (on delete/rename). */
-function forgetIndexedPath(fsPath: string): void {
-  for (const [real, p] of realPathIndex) {
-    if (p === fsPath) realPathIndex.delete(real)
-  }
+/** Async resolveRealPath, for bulk scans (the sync one blocked the extension host for seconds). */
+async function resolveRealPathAsync(fsPath: string): Promise<string> {
+  try { return await fs.promises.realpath(fsPath) } catch { return fsPath }
 }
 
-/**
- * Keep only one URI per physical file, recording the canonical path chosen.
- * First-seen wins, so callers should pass higher-priority paths (open files)
- * first. Duplicates reached through other symlinks are dropped.
- */
-function dedupeUrisByRealPath(uris: vscode.Uri[]): vscode.Uri[] {
-  const out: vscode.Uri[] = []
-  for (const uri of uris) {
-    const real = resolveRealPath(uri.fsPath)
-    if (realPathIndex.has(real)) continue
-    realPathIndex.set(real, uri.fsPath)
-    out.push(uri)
-  }
-  return out
+/** Drop the canonical-path entry that points at `fsPath` (on delete/rename). */
+function forgetIndexedPath(fsPath: string): void {
+  const real = realPathOfIndexedPath.get(fsPath)
+  if (real === undefined) return
+  realPathOfIndexedPath.delete(fsPath)
+  if (realPathIndex.get(real) === fsPath) realPathIndex.delete(real)
 }
 
 /**
@@ -152,7 +161,7 @@ function claimCanonicalPath(fsPath: string): void {
     removeFileFromRegistry(existing)
     forgetIndexedPath(existing)
   }
-  realPathIndex.set(real, fsPath)
+  setCanonicalPath(real, fsPath)
 }
 
 let viewerPanel: vscode.WebviewPanel | null = null
@@ -170,6 +179,57 @@ function enqueueScan(operation: () => Promise<void>): Promise<void> {
   const run = fullScanQueue.then(operation, operation)
   fullScanQueue = run.catch(() => {})
   return run
+}
+
+// Bumped by every full scan request. Queued and running scans (full or folder)
+// check it at each time slice and stop once a newer full scan was requested,
+// so a Rescan click takes over right away instead of waiting behind them.
+let scanGeneration = 0
+
+/**
+ * Run a scan step in the scan queue. With a `status`, the GTS files view
+ * shows its progress bar and the status from the moment this is called, even
+ * while the step still waits in the queue (folder rescans report progress on
+ * their own row instead). The step is abandoned (at its next time slice) when
+ * a newer full scan supersedes `generation`.
+ */
+async function runScan(status: string | undefined, generation: number, step: (slicer: TimeSlicer) => Promise<void>): Promise<void> {
+  const isCurrent = () => generation === scanGeneration
+  const run = () => enqueueScan(async () => {
+    if (!isCurrent()) return
+    if (status) gtsExplorer?.setScanStatus(status)
+    // Let the progress bar and status reach the UI before the heavy lifting.
+    await yieldToEventLoop()
+    pathsTouchedDuringScan = new Set()
+    try {
+      await step(new TimeSlicer(() => !isCurrent()))
+    } catch (error) {
+      if (!(error instanceof CancelledError)) throw error
+      console.log('[GTS] Scan superseded by a newer one')
+    } finally {
+      pathsTouchedDuringScan = null
+      if (status && isCurrent()) gtsExplorer?.setScanStatus(undefined)
+    }
+  })
+  if (!status) return run()
+  gtsExplorer?.setScanStatus(status)
+  await vscode.window.withProgress({ location: { viewId: 'gts-kit.fileExplorer' } }, run)
+}
+
+/** Calls `report(done)` at most every 200ms (and always for the last file). */
+function throttledProgress(total: number, report: (done: number) => void): (done: number) => void {
+  let last = 0
+  return done => {
+    const now = Date.now()
+    if (done < total && now - last < 200) return
+    last = now
+    report(done)
+  }
+}
+
+/** Reports "<label> N / M" as the view's status. */
+function fileProgress(label: string, total: number): (done: number) => void {
+  return throttledProgress(total, done => gtsExplorer?.setScanStatus(`${label} ${done.toLocaleString()} / ${total.toLocaleString()}`))
 }
 
 // Paths changed by live events (editor edits, on-disk changes, renames, closes)
@@ -197,6 +257,7 @@ function indexFileText(fsPath: string, text: string): void {
 function dropFileFromRegistry(fsPath: string): void {
   removeFileFromRegistry(fsPath)
   forgetIndexedPath(fsPath)
+  forgetValidationState(fsPath)
 }
 
 /**
@@ -262,7 +323,11 @@ function getNonce(): string {
  */
 async function scanAndPost(refreshFilePath?: string | null, fullRescan: boolean = false): Promise<void> {
   if (fullRescan) await performInitialScan(true)
-  // Queued behind any scan in flight, so the viewer never gets a partial registry.
+  // Wait for any scan in flight and for the validation pass it started (scans
+  // don't hold the queue while validating), then post from inside the queue,
+  // so the viewer never gets a partial registry or unvalidated entities.
+  await enqueueScan(async () => {})
+  await whenWorkspaceValidationIdle()
   await enqueueScan(() => postRegistryToViewer(refreshFilePath))
 }
 
@@ -498,6 +563,15 @@ export async function activate(context: vscode.ExtensionContext) {
         console.error('[GTS] Full refresh failed:', error)
         vscode.window.showErrorMessage(`Failed to refresh GTS files: ${error?.message || String(error)}`)
       }
+    }),
+    vscode.commands.registerCommand('gts-kit.rescanFolder', async (element?: GtsTreeElement) => {
+      if (element?.kind !== 'folder') return
+      try {
+        await rescanFolder(element.fsPath)
+      } catch (error: any) {
+        console.error('[GTS] Folder rescan failed:', error)
+        vscode.window.showErrorMessage(`Failed to rescan GTS folder: ${error?.message || String(error)}`)
+      }
     })
   )
 
@@ -572,41 +646,64 @@ function collectOpenGtsPaths(): string[] {
 }
 
 /**
- * Read the given files, keeping only those that can contain a GTS id.
+ * Read the given files, keeping only those that can contain a GTS id, one per
+ * physical file.
  *
  * The `gts.` substring pre-filter avoids parsing the (potentially huge) majority
  * of JSON files that have nothing to do with GTS. For files open in the editor we
  * use the live buffer so unsaved edits are reflected.
+ *
+ * Symlinked duplicates collapse to the first path given (callers pass
+ * higher-priority paths, e.g. open files, first), which is recorded as the
+ * canonical path; paths of physical files already indexed are skipped. Real
+ * paths are resolved asynchronously alongside the reads: resolving them
+ * synchronously up front blocked the extension host for seconds on large
+ * workspaces.
  */
 async function readGtsCandidateFiles(
-  uris: vscode.Uri[]
-): Promise<Array<{ path: string; name: string; content: any }>> {
+  uris: vscode.Uri[],
+  slicer: TimeSlicer,
+  onProgress?: (done: number) => void
+): Promise<RegistryFileInput[]> {
   // Only real files: a git:/ quick-diff document shares the fsPath but holds HEAD content.
   const openDocs = new Map(vscode.workspace.textDocuments.filter(d => d.uri.scheme === 'file').map(d => [d.uri.fsPath, d]))
+  let done = 0
   const results = await mapWithConcurrency(uris, FILE_READ_CONCURRENCY, async uri => {
+    await slicer.tick()
+    const fsPath = uri.fsPath
     try {
-      const openDoc = openDocs.get(uri.fsPath)
-      const text = openDoc ? openDoc.getText() : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')
+      const real = await resolveRealPathAsync(fsPath)
+      const openDoc = openDocs.get(fsPath)
+      // Scanned URIs are local (file:) paths, so read them with Node directly.
+      const text = openDoc ? openDoc.getText() : await fs.promises.readFile(fsPath, 'utf8')
       // Quick pre-filter: a file with no GTS-like substring cannot hold a GTS id.
       // Check for both "gts." (canonical form) and "gts://" (URI form) so that
       // malformed identifiers like "gts://gtx.foo.bar.v1~" are still surfaced.
       if (!mayContainGts(text)) return null
-      const name = path.basename(uri.fsPath)
+      const name = path.basename(fsPath)
       let content: any
       try { content = parseGtsFileContent(name, text) } catch { content = text }
-      return { path: uri.fsPath, name, content }
+      return { real, file: { path: fsPath, name, content } }
     } catch {
       return null // Unreadable file — skip.
+    } finally {
+      onProgress?.(++done)
     }
   })
   // Results keep input order, so indexing order (and thus which definition of a
   // duplicated id wins) is the same as with sequential reads.
-  return results.filter((f): f is { path: string; name: string; content: any } => f !== null)
+  const files: RegistryFileInput[] = []
+  for (const result of results) {
+    if (!result || realPathIndex.has(result.real)) continue
+    setCanonicalPath(result.real, result.file.path)
+    files.push(result.file)
+  }
+  return files
 }
 
 // Files read concurrently during a scan. Sequential reads left most of the scan
 // waiting on I/O one file at a time.
-const FILE_READ_CONCURRENCY = 32
+const FILE_READ_CONCURRENCY = 64
 
 /** Map over `items` with at most `limit` operations in flight; results keep input order. */
 async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -643,7 +740,7 @@ async function resetGtsStore(): Promise<void> {
   if (externalChangeTimer) clearTimeout(externalChangeTimer)
   externalChangeTimer = null
   preEditIdsByPath.clear()
-  realPathIndex.clear()
+  clearCanonicalPaths()
   resetWorkspaceIgnore()
   setLastScanFiles([])
   await rebuildRegistry([], DEFAULT_GTS_CONFIG)
@@ -659,25 +756,18 @@ async function refreshGtsFileExplorer(): Promise<void> {
 
 /**
  * Queue a full two-phase workspace scan (optionally from an emptied store, so
- * nothing from before can survive). Shows progress on the GTS files view.
+ * nothing from before can survive). Supersedes any scan queued or running.
+ * Shows progress on the GTS files view.
  */
 async function performInitialScan(reset: boolean = false): Promise<void> {
-  await vscode.window.withProgress(
-    { location: { viewId: 'gts-kit.fileExplorer' }, title: 'Scanning GTS files' },
-    () => enqueueScan(async () => {
-      // Reset inside the queue so it can't interleave with a scan in flight.
-      if (reset) await resetGtsStore()
-      pathsTouchedDuringScan = new Set()
-      try {
-        await performInitialScanPass()
-      } finally {
-        pathsTouchedDuringScan = null
-      }
-    })
-  )
+  await runScan(reset ? 'Rescanning…' : 'Scanning…', ++scanGeneration, async slicer => {
+    // Reset inside the queue so it can't interleave with a scan in flight.
+    if (reset) await resetGtsStore()
+    await performInitialScanPass(slicer)
+  })
 }
 
-async function performInitialScanPass(): Promise<void> {
+async function performInitialScanPass(slicer: TimeSlicer): Promise<void> {
   const startTime = Date.now()
   try {
     // Load .gitignore rules first so both phases permanently exclude ignored
@@ -687,7 +777,7 @@ async function performInitialScanPass(): Promise<void> {
     const openPaths = collectOpenGtsPaths()
 
     // A full scan re-establishes the canonical set of physical files.
-    realPathIndex.clear()
+    clearCanonicalPaths()
 
     // --- Phase 1: fast pass -------------------------------------------------
     // Enumerate with FAST_EXCLUDE_GLOB (+ gitignore) so build-output/dependency
@@ -695,7 +785,9 @@ async function performInitialScanPass(): Promise<void> {
     // Also skip known framework files by name. Currently-open files are always
     // included and go first so the file you are looking at colors ASAP (an open
     // file is an explicit user action, so it is coloured even if gitignored).
+    gtsExplorer?.setScanStatus('Listing files…')
     const fastUris = await findGtsFiles(ignores, FAST_EXCLUDE_GLOB, PHASE1_FILE_CAP)
+    slicer.throwIfCancelled()
     const phase1Candidates: vscode.Uri[] = []
     const phase1Paths = new Set<string>()
     for (const p of openPaths) {
@@ -703,58 +795,141 @@ async function performInitialScanPass(): Promise<void> {
       phase1Paths.add(p)
     }
     for (const uri of fastUris) {
-      if (phase1Paths.has(uri.fsPath)) continue
-      if (isDeferredToPhase2(uri.fsPath)) continue
-      if (isExcludedFile(uri, ignores)) continue
-      phase1Candidates.push(uri)
-      phase1Paths.add(uri.fsPath)
+      if (!phase1Paths.has(uri.fsPath) && !isDeferredToPhase2(uri.fsPath) && !isExcludedFile(uri, ignores)) {
+        phase1Candidates.push(uri)
+        phase1Paths.add(uri.fsPath)
+      }
+      await slicer.tick()
     }
 
-    // Collapse symlinked duplicates to one physical file each (open files first,
+    // Symlinked duplicates collapse to one physical file each (open files first,
     // so they stay canonical).
-    const phase1Deduped = dedupeUrisByRealPath(phase1Candidates)
-    console.log(`[GTS] Phase 1: ${phase1Deduped.length} candidate files (of ${fastUris.length} enumerated, ${phase1Candidates.length} before real-path dedup)`)
-    const files1 = await readGtsCandidateFiles(phase1Deduped)
-    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG)
+    console.log(`[GTS] Phase 1: ${phase1Candidates.length} candidate files (of ${fastUris.length} enumerated)`)
+    const files1 = await readGtsCandidateFiles(phase1Candidates, slicer, fileProgress('Scanning', phase1Candidates.length))
+    gtsExplorer?.setScanStatus('Indexing…')
+    const registry = await rebuildRegistry(files1, DEFAULT_GTS_CONFIG, slicer)
     // Keep recording: phase 2 below may also race with live changes.
     await resyncPathsTouchedDuringScan(true)
     setLastScanFiles(files1)
     console.log(`[GTS] Phase 1 registry: ${registry.jsonSchemas.size} schemas, ${registry.jsonObjs.size} objects (${files1.length} GTS files)`)
     gtsExplorer?.refresh()
 
-    // Paint decorations + validate now that phase-1 registry is available.
-    // Validate the whole workspace (not just the folders of currently-open docs)
-    // so all findings/badge counts are present immediately after a window reload.
+    // Paint decorations and validate the open documents now that the phase-1
+    // registry is available. The workspace-wide pass waits for phase 2:
+    // indexing more files invalidates every memoized validation result, so a
+    // pass started now would be thrown away (on a large workspace, minutes of
+    // work done twice).
     await gtsLinkProvider?.refresh()
-    await validateWorkspaceInBackground()
     revalidateOpenDocs()
 
     // --- Phase 2: background pass -------------------------------------------
     // Enumerate the full set (only .git / our cache + gitignore excluded) and
-    // process whatever phase 1 didn't: non-ignored deferred dirs and framework
-    // files. Runs after the UI is already coloured, so its cost is not visible.
+    // process whatever phase 1 didn't: non-ignored deferred dirs, framework
+    // files and everything past phase 1's enumeration cap.
+    gtsExplorer?.setScanStatus('Listing remaining files…')
     const allUris = await findGtsFiles(ignores, ALWAYS_EXCLUDE_GLOB)
-    // Skip anything already indexed in phase 1 and any symlinked duplicate of a
-    // physical file we've already taken (the realPathIndex still holds phase 1).
-    const phase2Prefiltered = allUris.filter(uri => !phase1Paths.has(uri.fsPath) && !isExcludedFile(uri, ignores))
-    const phase2Uris = dedupeUrisByRealPath(phase2Prefiltered)
-    const files2 = phase2Uris.length > 0 ? await readGtsCandidateFiles(phase2Uris) : []
-    for (const f of files2) indexFileInRegistry(f.path, f.name, f.content)
-    if (files2.length > 0) setLastScanFiles([...files1, ...files2])
-    console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Uris.length} deferred)`)
+    slicer.throwIfCancelled()
+    // Skip anything already indexed in phase 1; symlinked duplicates of a
+    // physical file we've already taken are dropped while reading (the
+    // realPathIndex still holds phase 1).
+    const phase2Candidates = await filterSliced(allUris, uri => !phase1Paths.has(uri.fsPath) && !isExcludedFile(uri, ignores), slicer)
+    const files2 = phase2Candidates.length > 0
+      ? await readGtsCandidateFiles(phase2Candidates, slicer, fileProgress('Scanning remaining', phase2Candidates.length))
+      : []
+    gtsExplorer?.setScanStatus('Indexing…')
+    await indexFiles(files2, slicer)
+    if (files2.length > 0) setLastScanFiles(files1.concat(files2))
+    console.log(`[GTS] Phase 2: merged ${files2.length} GTS files (of ${phase2Candidates.length} deferred)`)
     const resynced = await resyncPathsTouchedDuringScan(false)
     if (files2.length > 0 || resynced > 0) {
       gtsExplorer?.refresh()
       await gtsLinkProvider?.refresh()
-      await validateWorkspaceInBackground()
       revalidateOpenDocs()
     }
+    // The workspace pass runs in the background (with its own progress) rather
+    // than holding the scan queue: a rescan or folder rescan requested meanwhile
+    // starts right away and the pass restarts on the new registry.
+    void validateWorkspaceInBackground()
     const finalRegistry = getRegistry()
     console.log(`[GTS] Scan complete in ${Date.now() - startTime}ms: ${finalRegistry?.jsonFiles.size ?? 0} GTS files, ${finalRegistry?.invalidFiles.size ?? 0} unparsable`)
   } catch (error) {
-    console.error('[GTS] Initial scan error:', error)
+    if (!(error instanceof CancelledError)) console.error('[GTS] Initial scan error:', error)
     throw error
   }
+}
+
+/**
+ * Rescan one folder of the GTS tree and everything below it: re-read every
+ * candidate file under it, drop indexed files that are gone (or no longer
+ * hold GTS content), then revalidate the folder's files and whatever depends
+ * on the ones that changed. Unchanged files don't count as changes, so
+ * rescanning a folder where nothing changed keeps every validation result.
+ *
+ * Progress shows on the folder's row (in place of its Rescan button), per
+ * phase: "scanning N%" (files of the folder read), then "validating N%" (the
+ * folder's files plus whatever depends on the changed ones).
+ */
+async function rescanFolder(folderPath: string): Promise<void> {
+  const setProgress = (progress: FolderProgress | undefined) => gtsExplorer?.setFolderProgress(folderPath, progress)
+  // Shown until the scan queue gets to it (another scan may be running).
+  setProgress('queued')
+  try {
+    let rescanned: FolderRescan | undefined
+    await runScan(undefined, scanGeneration, async slicer => {
+      setProgress({ phase: 'scanning', percent: 0 })
+      rescanned = await rescanFolderPass(folderPath, slicer, percent => setProgress({ phase: 'scanning', percent }))
+    })
+    if (!rescanned) return // superseded by a full rescan
+    // Like the full scan's validation, this runs outside the scan queue.
+    setProgress({ phase: 'validating', percent: 0 })
+    await revalidateFiles(rescanned.found, rescanned.changed, (done, total) => setProgress({ phase: 'validating', percent: 100 * done / total }))
+  } finally {
+    setProgress(undefined)
+  }
+  if (viewerPanel) void scanAndPost()
+}
+
+interface FolderRescan {
+  /** GTS files now indexed under the folder. */
+  found: Set<string>
+  /** Files whose indexed state changed (or that were dropped) -> ids they defined before. */
+  changed: Map<string, string[]>
+}
+
+/** The scan-queue part of rescanFolder: re-read and re-index the folder's files. */
+async function rescanFolderPass(folderPath: string, slicer: TimeSlicer, setProgress: (percent: number) => void): Promise<FolderRescan> {
+  const startTime = Date.now()
+  const folderUri = vscode.Uri.file(folderPath)
+  const ignores = await getWorkspaceIgnore()
+  // Exclude globs are matched relative to the containing workspace folder.
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(folderUri)
+  const ignoreGlobs = workspaceFolder ? ignores.get(workspaceFolder.uri.fsPath)?.excludeGlobs || [] : []
+  const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(folderUri, GTS_SCAN_GLOB), combineExcludeGlobs(ALWAYS_EXCLUDE_GLOB, ignoreGlobs))
+  slicer.throwIfCancelled()
+  const candidates = await filterSliced(uris, uri => !isExcludedFile(uri, ignores), slicer)
+
+  // The folder's files compete for canonical paths afresh; symlinked aliases
+  // outside the folder keep theirs.
+  const previouslyIndexed = indexedPathsUnder(folderPath)
+  const registry = getRegistry()
+  const previousIds = new Map(previouslyIndexed.map(p => [p, registry?.getEntityIdsForFile(p) || []]))
+  for (const p of previouslyIndexed) forgetIndexedPath(p)
+
+  const files = await readGtsCandidateFiles(candidates, slicer, throttledProgress(candidates.length, done => setProgress(100 * done / candidates.length)))
+  const found = new Set(files.map(f => f.path))
+  const changed = new Map<string, string[]>()
+  for (const p of previouslyIndexed) {
+    if (found.has(p)) continue
+    dropFileFromRegistry(p)
+    changed.set(p, previousIds.get(p) || [])
+  }
+  for (const p of await indexFiles(files, slicer)) changed.set(p, previousIds.get(p) || [])
+  await resyncPathsTouchedDuringScan(false)
+  console.log(`[GTS] Rescanned ${folderPath} in ${Date.now() - startTime}ms: ${files.length} GTS files, ${changed.size} changed`)
+
+  gtsExplorer?.refresh()
+  if (changed.size > 0) await gtsLinkProvider?.refresh()
+  return { found, changed }
 }
 
 export async function deactivate() {
@@ -871,16 +1046,20 @@ async function onDiskFileChanged(uri: vscode.Uri): Promise<void> {
   scheduleExternalChangeSettle()
 }
 
-/** Indexed file paths (GTS files and unparsable ones) strictly under `dirPath`. */
+/**
+ * Indexed file paths strictly under `dirPath`: GTS files, unparsable ones and
+ * files whose only GTS content is malformed ids (all of them are listed in the
+ * GTS tree).
+ */
 function indexedPathsUnder(dirPath: string): string[] {
   const registry = getRegistry()
   if (!registry) return []
   const prefix = dirPath.endsWith(path.sep) ? dirPath : dirPath + path.sep
-  const out: string[] = []
-  for (const p of [...registry.jsonFiles.keys(), ...registry.invalidFiles.keys()]) {
-    if (p.startsWith(prefix)) out.push(p)
+  const out = new Set<string>()
+  for (const paths of [registry.jsonFiles.keys(), registry.invalidFiles.keys(), getPathsWithMalformedIds()]) {
+    for (const p of paths) if (p.startsWith(prefix)) out.add(p)
   }
-  return out
+  return [...out]
 }
 
 /**

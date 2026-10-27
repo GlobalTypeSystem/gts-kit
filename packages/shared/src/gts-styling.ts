@@ -66,7 +66,7 @@ export interface GtsStyleAnalysis {
  * authoritative gts-ts validation results surfaced through `entityLookup`:
  * a segment whose cumulative entity failed gts-ts validation (`isValid: false`)
  * is rendered as an error. GTS *rule* violations (abstract instantiation,
- * derivation incompatibility, x-gts-ref, ...) are therefore not re-derived here;
+ * derivation incompatibility, reference keywords, ...) are therefore not re-derived here;
  * they are read back from `entityLookup`/the caller's validation errors, keeping
  * gts-ts the single source of truth.
  *
