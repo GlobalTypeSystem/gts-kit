@@ -7,7 +7,7 @@ import { setLastScanFiles } from './scanStore'
 import { rebuildRegistry, indexFile as indexFileInRegistry, removeFile as removeFileFromRegistry, getRegistry } from './registryStore'
 import { getWorkspaceIgnore, resetWorkspaceIgnore, isGitIgnored, type FolderIgnore } from './gitignore'
 import { WorkspaceLayoutStorage } from './storage'
-import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted } from './validation'
+import { initValidation, resetValidationDiagnostics, validateOpenDocument, validateWorkspaceInBackground, revalidateDependents, onValidationCompleted, forgetValidationState } from './validation'
 import { isGtsCandidateFile, isIndexableGtsDocument } from './helpers'
 import { GtsLinkProvider } from './linkProvider'
 import { registerGtsExplorer, type GtsExplorer } from './gtsExplorer'
@@ -97,7 +97,10 @@ async function findGtsFiles(ignores: Map<string, FolderIgnore>, baseExclude: str
     if (capPerFolder !== undefined && found.length >= capPerFolder) {
       console.warn(`[GTS] Phase 1 hit its ${capPerFolder}-file cap in "${folder.name}"; the rest is indexed by phase 2`)
     }
-    uris.push(...found)
+    // Not `uris.push(...found)`: spreading passes every element as a call
+    // argument, which overflows the stack ("Maximum call stack size exceeded")
+    // once a folder holds more than ~120K files.
+    for (const uri of found) uris.push(uri)
   }
   return uris
 }
@@ -197,6 +200,7 @@ function indexFileText(fsPath: string, text: string): void {
 function dropFileFromRegistry(fsPath: string): void {
   removeFileFromRegistry(fsPath)
   forgetIndexedPath(fsPath)
+  forgetValidationState(fsPath)
 }
 
 /**

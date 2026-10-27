@@ -74,11 +74,12 @@ export function EntityList({ jsonObjs, schemas, invalidFiles, selectedEntity: se
 
   // Build the visible linear list in render order for keyboard navigation
   const visibleEntities: Array<Entity | JsonFile> = useMemo(() => {
-    const list: Array<Entity | JsonFile> = []
-    if (openJsonList) list.push(...filteredJsonObjs)
-    if (openSchemaList) list.push(...filteredSchemas)
-    if (openInvalidList) list.push(...filteredInvalidFiles)
-    return list
+    // concat, not push(...): spreading 100K+ items as call arguments overflows the stack.
+    return ([] as Array<Entity | JsonFile>).concat(
+      openJsonList ? filteredJsonObjs : [],
+      openSchemaList ? filteredSchemas : [],
+      openInvalidList ? filteredInvalidFiles : []
+    )
   }, [filteredJsonObjs, filteredSchemas, filteredInvalidFiles, openJsonList, openSchemaList, openInvalidList])
 
   // Notify parent of filtered entities for keyboard navigation (only when content actually changes)

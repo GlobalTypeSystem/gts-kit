@@ -1,7 +1,7 @@
 import * as vscode from 'vscode'
 import * as path from 'path'
 import { getRegistry, getMalformedIds, getPathsWithMalformedIds } from './registryStore'
-import { countPublishedProblems } from './validation'
+import { countPublishedProblems, isValidationKnown, onValidationStateChanged } from './validation'
 
 /**
  * Left-sidebar file browser for GTS: shows every discovered file that holds at
@@ -175,15 +175,24 @@ export class GtsFileTreeProvider
         title: 'Open GTS File',
         arguments: [element.fsPath]
       }
-      item.tooltip = hasGtsErrors(item.resourceUri)
-        ? 'Has GTS validation errors'
-        : 'No GTS validation errors'
+      // The tooltip is filled in on hover (resolveTreeItem), so it reflects the
+      // file's validation state at that moment rather than when the row was built.
       return item
     }
 
     const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.Expanded)
     item.iconPath = vscode.ThemeIcon.Folder
     item.contextValue = 'gtsFolder'
+    return item
+  }
+
+  resolveTreeItem(item: vscode.TreeItem, element: GtsTreeElement): vscode.TreeItem {
+    if (element.kind === 'file') {
+      const uri = vscode.Uri.file(element.fsPath)
+      item.tooltip = !isValidationKnown(element.fsPath)
+        ? 'GTS validation pending'
+        : hasGtsErrors(uri) ? 'Has GTS validation errors' : 'No GTS validation errors'
+    }
     return item
   }
 
@@ -215,7 +224,8 @@ export class GtsFileTreeProvider
  * Colors every valid GTS file green (in the sidebar tree, the OS-style Explorer
  * and editor tabs). Files with GTS problems get no decoration of their own:
  * VS Code's Problems decoration colors them with its standard error color and
- * count, so every GTS problem looks the same everywhere.
+ * count, so every GTS problem looks the same everywhere. Files that haven't
+ * been validated yet stay uncolored: no diagnostics doesn't mean valid yet.
  */
 export class GtsFileDecorationProvider implements vscode.FileDecorationProvider {
   private readonly _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>()
@@ -227,6 +237,7 @@ export class GtsFileDecorationProvider implements vscode.FileDecorationProvider 
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     if (!isDiscoveredGtsFile(uri.fsPath)) return undefined
+    if (!isValidationKnown(uri.fsPath)) return undefined
 
     if (hasGtsErrors(uri)) return undefined
     return new vscode.FileDecoration(undefined, 'GTS: file is valid', new vscode.ThemeColor('charts.green'))
@@ -301,6 +312,11 @@ export function registerGtsExplorer(context: vscode.ExtensionContext): GtsExplor
       if (relevant.length === 0) return
       decorationProvider.refresh(relevant)
       scheduleTreeUpdate()
+    }),
+    // A file whose validation just became known turns green without any
+    // diagnostics change, so it has to be repainted explicitly.
+    onValidationStateChanged(uris => {
+      decorationProvider.refresh(uris)
     }),
     new vscode.Disposable(() => { if (updateTimer) clearTimeout(updateTimer) })
   )
