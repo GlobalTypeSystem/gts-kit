@@ -1,6 +1,7 @@
 import { JsonRegistry, DEFAULT_GTS_CONFIG } from '@gts/shared'
 import type { GtsConfig } from '@gts/shared'
 import { findMalformedGtsIds, type MalformedGtsId } from './gtsIdFormat'
+import { TimeSlicer } from './timeSlice'
 
 /**
  * Long-lived, shared GTS registry for the extension host.
@@ -31,9 +32,13 @@ const malformedIdsByPath = new Map<string, MalformedGtsId[]>()
 
 const GTS_VIEWER_DIR_RE = /(^|[\\/])\.gts-viewer[\\/]/
 
-function updateMalformedIds(path: string, content: any): void {
+function findMalformedIdsIn(path: string, content: any): MalformedGtsId[] {
   // Unparsable files (raw string content) are reported as parse errors instead.
-  const issues = typeof content === 'string' || GTS_VIEWER_DIR_RE.test(path) ? [] : findMalformedGtsIds(content)
+  return typeof content === 'string' || GTS_VIEWER_DIR_RE.test(path) ? [] : findMalformedGtsIds(content)
+}
+
+function updateMalformedIds(path: string, content: any): void {
+  const issues = findMalformedIdsIn(path, content)
   if (issues.length > 0) malformedIdsByPath.set(path, issues)
   else malformedIdsByPath.delete(path)
 }
@@ -57,35 +62,57 @@ export function getRegistryRevision(): number {
   return revision
 }
 
-/** Rebuild the shared registry from a full set of scanned files (index-only). */
+/**
+ * Rebuild the shared registry from a full set of scanned files (index-only).
+ * Indexing 100K+ files takes seconds, so it yields between time slices (via
+ * `slicer`, which also aborts a cancelled scan by throwing); the shared
+ * registry is only replaced once the new one is complete.
+ */
 export async function rebuildRegistry(
   files: RegistryFileInput[],
-  cfg: GtsConfig = DEFAULT_GTS_CONFIG
+  cfg: GtsConfig = DEFAULT_GTS_CONFIG,
+  slicer: TimeSlicer = new TimeSlicer()
 ): Promise<JsonRegistry> {
-  activeConfig = cfg
   const next = new JsonRegistry()
-  await next.ingestFiles(files, cfg, { skipValidation: true })
+  const malformed = new Map<string, MalformedGtsId[]>()
+  for (const file of files) {
+    next.indexFile(file.path, file.name, file.content, cfg)
+    const issues = findMalformedIdsIn(file.path, file.content)
+    if (issues.length > 0) malformed.set(file.path, issues)
+    await slicer.tick()
+  }
+  activeConfig = cfg
   malformedIdsByPath.clear()
-  for (const file of files) updateMalformedIds(file.path, file.content)
+  for (const [path, issues] of malformed) malformedIdsByPath.set(path, issues)
   registry = next
   revision++
   return next
 }
 
-/** Incrementally upsert a single file's entities into the shared registry. */
-export function indexFile(path: string, name: string, content: any): void {
-  if (!registry) return
-  registry.indexFile(path, name, content, activeConfig)
+/** Incrementally upsert a single file's entities into the shared registry. Returns whether anything changed. */
+export function indexFile(path: string, name: string, content: any): boolean {
+  if (!registry) return false
+  const changed = registry.indexFile(path, name, content, activeConfig)
   updateMalformedIds(path, content)
-  revision++
+  if (changed) revision++
+  return changed
+}
+
+/** `indexFile` for many files, yielding between time slices. Returns the paths whose indexed state changed. */
+export async function indexFiles(files: RegistryFileInput[], slicer: TimeSlicer = new TimeSlicer()): Promise<string[]> {
+  const changed: string[] = []
+  for (const file of files) {
+    if (indexFile(file.path, file.name, file.content)) changed.push(file.path)
+    await slicer.tick()
+  }
+  return changed
 }
 
 /** Remove a single file's entities from the shared registry. */
 export function removeFile(path: string): void {
   if (!registry) return
-  registry.invalidateFile(path)
-  malformedIdsByPath.delete(path)
-  revision++
+  const changed = registry.invalidateFile(path)
+  if (malformedIdsByPath.delete(path) || changed) revision++
 }
 
 /** The GTS config the registry was built with. */
