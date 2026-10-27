@@ -173,7 +173,7 @@ function findErrorPosition(parsed: ParsedDocument, instancePath: string, error: 
 
   // 3. For any error carrying an instance path, underline the offending node.
   // The choice of what to underline is STRUCTURAL, not keyword-specific: a
-  // scalar value (format/uuid/pattern/x-gts-abstract/x-gts-ref/type/enum on a
+  // scalar value (format/uuid/pattern/x-gts-abstract/x-gts-*-ref/type/enum on a
   // leaf, or the schema's own $id) is underlined directly; when the path
   // resolves to an object/array subschema (e.g. an OP#12 derivation error at
   // `/allOf/1/properties/level`, whose value is itself a schema) the property
@@ -189,9 +189,9 @@ function findErrorPosition(parsed: ParsedDocument, instancePath: string, error: 
     }
   }
 
-  // 4. For gts:// prefix violations, x-gts-ref mismatches, malformed ids and
+  // 4. For gts:// prefix violations, reference keyword mismatches, malformed ids and
   // duplicate ids without a resolvable path, highlight the offending string value.
-  const valueKeywords = ['gts-uri-prefix', 'x-gts-ref', 'gts-id-format', 'gts-duplicate-id']
+  const valueKeywords = ['gts-uri-prefix', 'x-gts-type-ref', 'x-gts-instance-ref', 'x-gts-pattern-ref', 'gts-id-format', 'gts-duplicate-id']
   if (valueKeywords.includes(error.keyword) && error.params && 'value' in error.params) {
     const value = String((error.params as any).value)
     // Quoted (JSON, or a quoted YAML scalar) first, then bare YAML scalar.

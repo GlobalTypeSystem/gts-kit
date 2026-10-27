@@ -1,4 +1,5 @@
 import { isGtsId, isGtsType as checkGtsType, isGtsObj as checkGtsObj, normalizeGtsId } from '@gts/shared'
+import { GTS_REF_KEYWORDS, type GtsRefKeyword } from '@globaltypesystem/gts-ts'
 
 export interface PropertyInfo {
   name: string
@@ -93,7 +94,7 @@ export function parseJsonToProperties(data: any, name = 'root'): PropertyInfo[] 
           }
         }
 
-        // For plain nested objects, use recursive parsing without any x-gts-ref special handling
+        // For plain nested objects, use recursive parsing without any reference-keyword special handling
         return {
           name: key,
           type: 'object',
@@ -158,9 +159,10 @@ export function parseSchemaToProperties(schema: any): PropertyInfo[] {
         description = description ? `${description}\n${patDescription}` : patDescription
       }
 
-      if (prop['x-gts-ref']) {
-        const gtsTypeDescription = `GTS Type: ${prop['x-gts-ref']}`
-        description = description ? `${description}\n${gtsTypeDescription}` : gtsTypeDescription
+      for (const [keyword, label] of [['x-gts-type-ref', 'GTS Type'], ['x-gts-instance-ref', 'GTS Instance'], ['x-gts-pattern-ref', 'GTS Pattern']] as const) {
+        if (!prop[keyword]) continue
+        const refDescription = `${label}: ${prop[keyword]}`
+        description = description ? `${description}\n${refDescription}` : refDescription
         isGtsType = true
       }
 
@@ -402,11 +404,12 @@ export function findSchemaPropertyPath(content: any, propPath: string): string |
 }
 
 /**
- * Locate the JSON Pointer instancePath of the `x-gts-ref` keyword whose value
+ * Locate the JSON Pointer instancePath of the reference keyword
+ * (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) whose value
  * equals `refValue` (any `gts://` prefix ignored), searching every position in
- * the schema document. Used to anchor a "Referenced x-gts-ref entity '<id>' is
- * invalid" diagnostic to the offending `x-gts-ref` node rather than the
- * document root. Returns null when no matching `x-gts-ref` is present.
+ * the schema document. Used to anchor a "Referenced type '<id>' is invalid"
+ * diagnostic to the offending reference node rather than the document root.
+ * Returns null when no matching reference keyword is present.
  */
 export function findXGtsRefPath(content: any, refValue: string): string | null {
   const target = normalizeGtsId(refValue)
@@ -422,7 +425,7 @@ export function findXGtsRefPath(content: any, refValue: string): string | null {
     }
     for (const [key, value] of Object.entries(node)) {
       const childPath = `${currentPath}/${key}`
-      if (key === 'x-gts-ref' && typeof value === 'string' && normalizeGtsId(value) === target) {
+      if (GTS_REF_KEYWORDS.includes(key as GtsRefKeyword) && typeof value === 'string' && normalizeGtsId(value) === target) {
         return childPath
       }
       const res = walk(value, childPath)

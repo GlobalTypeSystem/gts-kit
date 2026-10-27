@@ -336,7 +336,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider<vscode.Docum
         continue
       }
 
-      // Wildcard patterns (e.g. "gts.*" in x-gts-ref) are valid GTS references
+      // Wildcard patterns (e.g. "gts.*" in x-gts-pattern-ref) are valid GTS references
       // but don't resolve to specific entities — show as schema decoration
       if (ref.isPattern) {
         const gtsStartOffset = ref.contentOffset + ref.uriPrefixLength
@@ -352,7 +352,7 @@ export class GtsLinkProvider implements vscode.DocumentLinkProvider<vscode.Docum
       // validation results: a *schema* segment whose entity failed gts-ts
       // validation (e.g. an invalid derived schema in the chain) is `isValid:
       // false` → red. Instance-level, field-specific errors (abstract type,
-      // x-gts-ref, ...) are handled by `hasFieldError` below, not by flagging the
+      // reference keywords, ...) are handled by `hasFieldError` below, not by flagging the
       // whole instance entity, so an instance's own id is not reddened merely
       // because some other field of it failed. No GTS rules are re-derived here.
       const registry = this.registry

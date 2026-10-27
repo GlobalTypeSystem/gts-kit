@@ -4,7 +4,7 @@
 
 gts-ts now owns parsing, entity extraction, schema meta-validation, instance
 validation, derivation, traits, modifiers, formats, `$ref` resolution, and
-`x-gts-ref` validation. gts-kit consumes the structured results and only maps
+reference-keyword (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) validation. gts-kit consumes the structured results and only maps
 JSON Pointer paths to editor ranges.
 
 `packages/shared` depends on the official `@globaltypesystem/gts-ts` NPM
@@ -38,7 +38,7 @@ interface ValidationResult {
 
 The legacy joined `error` string remains unchanged for compatibility. Structured
 issues are returned for JSON Schema assertions, schema meta-validation,
-derivation constraints, traits, abstract instances, and `x-gts-ref` failures.
+derivation constraints, traits, abstract instances, and reference-keyword (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) failures.
 
 ### Full schema validation
 
@@ -49,7 +49,7 @@ derivation constraints, traits, abstract instances, and `x-gts-ref` failures.
 - derivation compatibility;
 - trait validation;
 - GTS `$ref` resolution;
-- `x-gts-ref` declaration, existence, and transitive validity checks.
+- reference-keyword (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) declaration, existence, and transitive validity checks.
 
 The additive `validateSchemaAsync` and `validateInstanceAsync` methods provide
 Promise-based entry points without changing synchronous APIs.
@@ -81,10 +81,10 @@ JSONC comments and trailing commas are supported. YAML selection is based on the
 
 - a local Ajv instance or schema loader;
 - local format registration and temporal-format composition;
-- local `x-gts-ref` stripping/combinator normalization;
+- local reference-keyword (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) stripping/combinator normalization;
 - local Ajv error formatting;
 - local abstract-instance checks;
-- local `x-gts-ref` instance validation;
+- local reference-keyword (`x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref`) instance validation;
 - derivation error-string parsing and schema-property path reconstruction.
 
 Direct `ajv` and `ajv-formats` dependencies were removed from all gts-kit

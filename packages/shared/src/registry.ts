@@ -4,7 +4,7 @@ import { isYamlFileName } from './parse.js'
 import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, findRegexPatternPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
-import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity } from '@globaltypesystem/gts-ts'
+import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity, GTS_REF_KEYWORDS, X_GTS_TYPE_REF, X_GTS_INSTANCE_REF } from '@globaltypesystem/gts-ts'
 // XGtsRefValidator is not re-exported from the package index, so import it from
 // its published subpath module.
 import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
@@ -25,34 +25,46 @@ const JSON_SCHEMA_ANNOTATION_KEYWORDS = new Set([
   'contentSchema'
 ])
 
+/** The reference keywords whose values name concrete entities (§9.6.1). */
+const ENTITY_REF_KEYWORDS = [X_GTS_TYPE_REF, X_GTS_INSTANCE_REF]
+
+/** True for the GTS reference keywords (`x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`). */
+function isGtsRefKeyword(key: string): boolean {
+  return (GTS_REF_KEYWORDS as readonly string[]).includes(key)
+}
+
+/** True when `schema` declares any GTS reference keyword. */
+function hasGtsRefKeyword(schema: any): boolean {
+  return GTS_REF_KEYWORDS.some(key => schema[key] !== undefined)
+}
+
 /**
- * Prepare a schema for Ajv instance validation by removing the `x-gts-ref`
- * keyword, mirroring gts-ts's own `GtsStore.normalizeSchema` (the reference
- * implementation strips `x-gts-ref` "so Ajv never sees the unknown keyword"
- * and then prunes combinator branches that were `x-gts-ref`-only).
+ * Prepare a schema for Ajv instance validation by removing the GTS reference
+ * keywords (`x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`) and
+ * pruning combinator branches that were reference-keyword-only.
  *
- * This matters for combinators: a branch like `{ "x-gts-ref": "…" }` becomes an
+ * This matters for combinators: a branch like `{ "x-gts-type-ref": "…" }` becomes an
  * empty schema once the keyword is dropped, i.e. always-true. Left in place, an
  * `oneOf` of two such branches matches *both* and Ajv spuriously reports
  * "must match exactly one schema in oneOf" for a value that is perfectly valid.
- * The actual `x-gts-ref` assertions — including correct oneOf/anyOf branch
- * counting — are enforced separately by `XGtsRefValidator` (§9.6).
+ * The actual reference assertions — including correct oneOf/anyOf branch
+ * counting — are enforced separately by the gts-ts store (§9.6).
  *
  * Unlike gts-ts's full `normalizeSchema`, this intentionally does NOT rewrite
  * `$id`/`$ref` (it leaves any `gts://` prefixes untouched) because the
  * registry's Ajv instance resolves those via its own `gts://`-aware loader.
  */
-function stripXGtsRefForAjv(schema: any): any {
+function stripGtsRefKeywordsForAjv(schema: any): any {
   if (schema === null || typeof schema !== 'object') return schema
-  if (Array.isArray(schema)) return schema.map(stripXGtsRefForAjv)
+  if (Array.isArray(schema)) return schema.map(stripGtsRefKeywordsForAjv)
 
   const normalized: Record<string, any> = {}
   for (const [key, value] of Object.entries(schema)) {
-    if (key === 'x-gts-ref') continue
-    normalized[key] = value && typeof value === 'object' ? stripXGtsRefForAjv(value) : value
+    if (isGtsRefKeyword(key)) continue
+    normalized[key] = value && typeof value === 'object' ? stripGtsRefKeywordsForAjv(value) : value
   }
 
-  // Drop combinator subschemas whose only assertion was `x-gts-ref`, so Ajv
+  // Drop combinator subschemas whose only assertion was a reference keyword, so Ajv
   // doesn't treat their remaining annotations as always-true branches.
   for (const combinator of ['oneOf', 'anyOf', 'allOf'] as const) {
     if (!Array.isArray(normalized[combinator])) continue
@@ -62,8 +74,8 @@ function stripXGtsRefForAjv(schema: any): any {
         original &&
         typeof original === 'object' &&
         !Array.isArray(original) &&
-        original['x-gts-ref'] !== undefined &&
-        Object.keys(original).every(key => key === 'x-gts-ref' || JSON_SCHEMA_ANNOTATION_KEYWORDS.has(key))
+        hasGtsRefKeyword(original) &&
+        Object.keys(original).every(key => isGtsRefKeyword(key) || JSON_SCHEMA_ANNOTATION_KEYWORDS.has(key))
       return !hasOnlyXGtsRefAssertion
     })
     if (normalized[combinator].length === 0) delete normalized[combinator]
@@ -88,6 +100,110 @@ function matchesFormat(format: Format, value: string): boolean {
   return false
 }
 
+/** Ajv configured for GTS: the options, formats and keywords every instance shares. */
+function createGtsAjv(options: { validateSchema?: boolean; loadSchema?: (uri: string) => Promise<any> } = {}): Ajv {
+  const ajv = new Ajv({
+    strict: false,
+    allErrors: true,
+    verbose: true,
+    // Enable full JSON Schema support
+    discriminator: true,
+    allowUnionTypes: true,
+    // Provide data alongside errors
+    $data: true,
+    // Disable code generation for CSP compliance (VS Code webviews)
+    code: { source: false },
+    ...options
+  })
+
+  // Add format validation (email, uri, date-time, etc.). Default "full" mode
+  // validates real value ranges (e.g. rejects month 13, offset +25:00).
+  addFormats(ajv)
+
+  // Tighten the temporal formats to strict RFC 3339. ajv-formats' full-mode
+  // date/time splits on `/t|\s/i`, so it accepts a space instead of `T`
+  // (permitted by RFC 3339 §5.6's NOTE, but not by the ABNF grammar GTS
+  // requires). Compose the two *standard* ajv-formats validators so a value
+  // must satisfy BOTH: the "fast" grammar (strict `T` separator + mandatory
+  // time-offset) AND the "full" validator (real calendar/clock ranges).
+  for (const name of ['date', 'time', 'date-time'] as const) {
+    const fast = addFormats.get(name, 'fast')
+    const full = addFormats.get(name, 'full')
+    ajv.addFormat(name, {
+      type: 'string',
+      validate: (value: string) => matchesFormat(fast, value) && matchesFormat(full, value),
+    })
+  }
+
+  // GTS id formats emitted by schema generators (e.g. gts-rust) as annotations
+  // next to an `x-gts-type-ref`/`x-gts-instance-ref` that does the actual checking. Registered as
+  // accept-all — exactly how Ajv treated them before (ignored as unknown) —
+  // so each compile no longer logs an "unknown format" warning.
+  // Same for the sized-integer formats Rust's schemars emits (int32/int64 are
+  // already provided by ajv-formats).
+  for (const name of ['gts-instance-id', 'gts-type-id', 'int8', 'int16', 'uint', 'uint8', 'uint16', 'uint32', 'uint64']) {
+    ajv.addFormat(name, true)
+  }
+
+  // Add custom schema loader that resolves GTS IDs from the registry
+  ajv.addKeyword({
+    keyword: 'gtsRef',
+    schemaType: 'string',
+  })
+
+  return ajv
+}
+
+// Meta-schema validation depends only on the Ajv options, never on the
+// registry, so one instance — whose meta-schemas are compiled once — serves
+// every schema. Each schema still compiles in its own fresh instance, and that
+// instance used to compile the draft-07 meta-schema from scratch first: ~80% of
+// all validation time, minutes on a workspace with 100K+ schemas.
+let sharedMetaValidator: Ajv | null = null
+
+/** True for the json-schema.org URIs the registry's schema loader resolves to `true` (accept-all). */
+function isStandardJsonSchemaUri(uri: string): boolean {
+  const id = decodeGtsId(uri)
+  return id.startsWith('https://json-schema.org') || id.startsWith('http://json-schema.org')
+}
+
+/**
+ * Meta-validate `schema` exactly as Ajv does before adding it to an instance,
+ * but against the shared meta-schemas; throws Ajv's own "schema is invalid"
+ * error. Returns false, without validating, when the schema names a `$schema`
+ * that only the per-instance loader can resolve.
+ */
+function metaValidateShared(schema: any): boolean {
+  if (!schema || typeof schema !== 'object') return true
+  const ajv = (sharedMetaValidator ??= createGtsAjv())
+  const $schema = schema.$schema
+  if ($schema !== undefined) {
+    if (typeof $schema !== 'string') return false
+    let known: boolean
+    try {
+      known = Boolean(ajv.getSchema($schema))
+    } catch {
+      return false
+    }
+    // Any other json-schema.org meta-schema (e.g. draft 2020-12, which plain
+    // Ajv doesn't bundle) is loaded as `true`, so the schema is valid against it.
+    if (!known) return isStandardJsonSchemaUri($schema)
+  }
+  if (!ajv.validateSchema(schema)) throw new Error(`schema is invalid: ${ajv.errorsText(ajv.errors)}`)
+  return true
+}
+
+/**
+ * A meta-validated schema without its `$schema`, so the instance compiling it
+ * doesn't load and compile that meta-schema again. `$schema` has no other
+ * effect on compilation.
+ */
+function withoutMetaSchemaRef(schema: any): any {
+  if (!schema || typeof schema !== 'object' || !('$schema' in schema)) return schema
+  const { $schema: _metaSchema, ...rest } = schema
+  return rest
+}
+
 /**
  * Convert an XGtsRefValidator field path (dot/bracket notation, e.g.
  * `value.tags[0]`) into a JSON-Pointer-style instancePath (`/value/tags/0`)
@@ -108,13 +224,13 @@ function normalizeToArray(content: any): any[] {
 /**
  * True when a resolved subschema describes a *scalar data value* rather than a
  * GTS reference: it constrains the value with a scalar `type`, a `format`, an
- * `enum`, or a `const`, and does NOT declare it as a reference via `x-gts-ref`
+ * `enum`, or a `const`, and does NOT declare it as a reference via a GTS reference keyword
  * or `$ref`. Used to suppress the syntactic "GTS reference not found" check for
  * fields whose GTS-id-shaped value is just data (e.g. a `format: uuid` string).
  */
 function isScalarDataField(sub: any): boolean {
   if (!sub || typeof sub !== 'object') return false
-  if (sub['x-gts-ref'] !== undefined || sub['$ref'] !== undefined) return false
+  if (hasGtsRefKeyword(sub) || sub['$ref'] !== undefined) return false
   const scalarTypes = new Set(['string', 'number', 'integer', 'boolean', 'null'])
   const t = sub.type
   const hasScalarType = typeof t === 'string'
@@ -131,7 +247,7 @@ function isScalarDataField(sub: any): boolean {
  *   to `id` changes their meaning, so this relation is followed **transitively**.
  *
  * `references.get(id)` — entity ids that merely *point at* `id` by GTS id (any
- *   GTS id field, `x-gts-ref`). They must be re-checked when `id` changes/renames,
+ *   GTS id field, `x-gts-type-ref`/`x-gts-instance-ref`). They must be re-checked when `id` changes/renames,
  *   but their own shape is unaffected, so this relation is applied **depth-1**.
  */
 interface DependencyGraph {
@@ -343,8 +459,8 @@ export class JsonRegistry {
    *
    *  references (depth-1 — Type #2 id reference):
    *    - any GTS id used anywhere in the entity's content (JsonEntity.gtsRefs),
-   *      which already includes `x-gts-ref` targets (their concrete values are
-   *      valid GTS ids). Wildcard `x-gts-ref` *patterns* are authoring
+   *      which already includes entity-reference targets (their concrete values
+   *      are valid GTS ids). Wildcard reference *patterns* are authoring
    *      constraints; the concrete instance value that matches carries the real
    *      id edge via gtsRefs, so patterns need no separate reverse edge.
    */
@@ -668,7 +784,7 @@ export class JsonRegistry {
 
   /**
    * Validation result of an entity that an instance references through an
-   * `x-gts-ref` field, evaluated within the chain of instances being validated
+   * entity-reference field, evaluated within the chain of instances being validated
    * (`chain`). Returns null for a reference cycle, which is treated as valid
    * (like gts-ts's visiting guard).
    *
@@ -705,12 +821,12 @@ export class JsonRegistry {
     const cache = this.instanceValidators.byContent
     let validator = cache.get(schemaContent)
     if (!validator) {
-      // Strip `x-gts-ref` first (mirroring gts-ts's normalizeSchema) so Ajv never
-      // sees the unknown keyword and, crucially, so `x-gts-ref`-only combinator
-      // branches don't collapse into always-true schemas and make e.g.
-      // `oneOf: [{x-gts-ref}, {x-gts-ref}]` fail. The `x-gts-ref` assertions
-      // themselves are enforced by XGtsRefValidator.
-      validator = this.createAjvInstance().compileAsync(stripXGtsRefForAjv(schemaContent))
+      // Strip the reference keywords first so Ajv never sees them and,
+      // crucially, so reference-only combinator branches don't collapse into
+      // always-true schemas and make e.g.
+      // `oneOf: [{x-gts-type-ref}, {x-gts-instance-ref}]` fail. The reference
+      // assertions themselves are enforced by the gts-ts store.
+      validator = this.compileSchema(stripGtsRefKeywordsForAjv(schemaContent))
       cache.set(schemaContent, validator)
       validator.catch(() => { if (cache.get(schemaContent) === validator) cache.delete(schemaContent) })
     }
@@ -776,7 +892,7 @@ export class JsonRegistry {
 
         // Schema-aware skip: when the instance's schema types this field as a
         // scalar data value (a `format`/scalar `type`/`enum`/`const`, and NOT a
-        // reference via `x-gts-ref`/`$ref`), its GTS-id-shaped value is data,
+        // reference via a reference keyword/`$ref`), its GTS-id-shaped value is data,
         // not a reference, so its existence must not be checked. Configured
         // id/schema fields are never exempted (they are references by design).
         const lastSegment = ref.sourcePath.replace(/\[\d+\]/g, '').split('.').pop() || ''
@@ -816,9 +932,8 @@ export class JsonRegistry {
     if (entity instanceof JsonSchema) {
       // Validate the schema itself (meta-validation)
       try {
-        const ajv = this.createAjvInstance()
         // Try to compile the schema to check if it's valid (async to support $ref resolution)
-        await ajv.compileAsync(entity.content)
+        await this.compileSchema(entity.content)
       } catch (error: any) {
         // If Ajv provides a detailed errors array, use it for precise paths
         if (Array.isArray(error?.errors) && error.errors.length > 0) {
@@ -869,12 +984,14 @@ export class JsonRegistry {
           for (const msg of rawMessages) {
             const propMatch = msg.match(/^Property '([^']+)'/)
             const propPath = propMatch ? propMatch[1] : null
-            // A "Referenced x-gts-ref entity '<id>' is invalid: ..." message is
-            // caused by a specific `x-gts-ref` node, not by the schema's own
-            // `$id`; anchor it to that node so the squiggle lands on the ref
-            // (e.g. line with `"x-gts-ref": "<id>"`) rather than the document
-            // root. Everything else keeps the previous `$id` fallback.
-            const refMatch = propPath ? null : msg.match(/^Referenced x-gts-ref entity '([^']+)'/)
+            // A "Referenced type '<id>' is invalid: ..." / "<path> names '<id>',
+            // which is invalid: ..." message is caused by a specific reference
+            // node, not by the schema's own `$id`; anchor it to that node so the
+            // squiggle lands on the ref (e.g. line with `"x-gts-type-ref": "<id>"`)
+            // rather than the document root. Everything else keeps the previous
+            // `$id` fallback.
+            const refMatch = propPath ? null : msg.match(/^Referenced (?:type|entity) '([^']+)' is invalid| names '([^']+)', which is invalid/)
+            const refId = refMatch ? refMatch[1] ?? refMatch[2] : null
             // A "trait validation: ..." message comes from the OP#13 trait
             // completeness check; anchor it to the unmet `x-gts-traits-schema`
             // requirement (the specific `required` entry when we can name the
@@ -890,8 +1007,8 @@ export class JsonRegistry {
             // The keyword-placement/unknown-keyword guards (§9.11, §9.7.1) report
             // the offending keyword's JSON path(s) inline as "… found at: a/b/c,
             // d/e/f". Anchor the diagnostic to the first such path so the squiggle
-            // lands on the actual keyword (e.g. properties/subject_type/x-gts-type)
-            // instead of the schema's `$id` — and so a self-referencing x-gts-ref
+            // lands on the actual keyword (e.g. properties/subject_type/x-gts-type-ref)
+            // instead of the schema's `$id` — and so a self-referencing reference keyword
             // elsewhere no longer appears to "own" an error from another field.
             const foundAtMatch = !propPath && !refMatch && !isTraitError && !regexPath
               ? msg.match(/ found at: (.+)$/)
@@ -902,8 +1019,8 @@ export class JsonRegistry {
               instancePath = findSchemaPropertyPath(entity.content, propPath)
               params = { property: propPath }
             } else if (refMatch) {
-              instancePath = findXGtsRefPath(entity.content, refMatch[1])
-              params = { refValue: refMatch[1] }
+              instancePath = findXGtsRefPath(entity.content, refId!)
+              params = { refValue: refId }
             } else if (isTraitError) {
               const traitMatch = msg.match(/required (?:property|trait) '([^']+)'/)
               const traitName = traitMatch ? traitMatch[1] : undefined
@@ -913,7 +1030,7 @@ export class JsonRegistry {
               instancePath = regexPath
             } else if (foundAtMatch) {
               // The reported path uses `/` separators and `[n]` array indices
-              // (e.g. "allOf[0]/properties/x/x-gts-type"); the depth-guard also
+              // (e.g. "allOf[0]/properties/x/x-gts-type-ref"); the depth-guard also
               // appends " (nesting exceeds …)" which is not part of the path.
               const firstPath = foundAtMatch[1].split(', ')[0].replace(/ \(.*\)$/, '').trim()
               instancePath = fieldPathToInstancePath(firstPath)
@@ -930,15 +1047,14 @@ export class JsonRegistry {
         }
       }
 
-      // §9.6: validate the `x-gts-ref` *pattern declarations* inside the schema
-      // (e.g. a literal that is neither a valid GTS ID/pattern nor a resolvable
-      // JSON Pointer). This checks the schema authoring, not an instance value.
+      // §9.6.3: validate the reference keyword *operands* inside the schema
+      // (e.g. a literal that is neither a valid GTS ID/pattern nor `/$id`). This checks the schema authoring, not an instance value.
       const refDeclErrors = new XGtsRefValidator().validateSchema(entity.content)
       for (const err of refDeclErrors) {
         validation.errors.push({
           instancePath: fieldPathToInstancePath(err.fieldPath),
           schemaPath: '#',
-          keyword: 'x-gts-ref',
+          keyword: err.keyword ?? 'x-gts-schema',
           message: err.reason,
           params: { value: err.value, refPattern: err.refPattern }
         })
@@ -1040,47 +1156,53 @@ export class JsonRegistry {
           validation.errors.push(...formatted)
         }
 
-        // §9.6: `x-gts-ref` is an assertion keyword on instance string values
+        // §9.6: the reference keywords are assertions on instance string values
         // (the value must be a GTS ID matching the declared prefix/pattern).
-        // Ajv treats it as an unknown keyword and silently ignores it, so it is
+        // Ajv treats them as unknown keywords and silently ignores them, so they are
         // enforced explicitly here (mirrors gts-ts store.validateInstance).
-        // The validator gets the registry's gts-ts store so it can follow
-        // `gts://` `$ref`s (e.g. `allOf: [{ $ref: <parent type> }]`) into parent
-        // schemas: without one, every such `$ref` is unresolvable and gts-ts
-        // reports "Cannot resolve $ref ... for x-gts-ref traversal" (it fails
-        // closed rather than skip the parent's constraints). It runs in
-        // any-present mode to collect the referenced ids for the any-valid
-        // check below; its own "not found" errors repeat the gtsRefs registry
-        // check above and are dropped.
-        const refValidator = new XGtsRefValidator(this.getGtsStore(), GtsRefValidationMode.AnyPresent)
-        const xGtsRefErrors = refValidator.validateInstance(entity.content, schema.content, '', undefined, entity.id)
-        for (const err of xGtsRefErrors) {
-          if (/^Referenced entity '.+' not found in registry$/.test(err.reason)) continue
+        // Since gts-ts 0.11 XGtsRefValidator is registry-less, so the check is
+        // delegated to the registry's gts-ts store, which follows `gts://`
+        // `$ref`s into parent schemas. It runs in any-present mode (the
+        // any-valid check is done below); only reference-keyword issues are
+        // kept (Ajv already reported the rest), and "not found" errors repeat
+        // the gtsRefs registry check above and are dropped.
+        const store = this.getGtsStore()
+        const storeResult = store.get(entity.id)
+          ? store.validateInstance(entity.id, GtsRefValidationMode.AnyPresent)
+          : null
+        for (const issue of storeResult?.errors ?? []) {
+          if (!issue.keyword.startsWith('x-gts-')) continue
+          if (/not found/.test(issue.message)) continue
           validation.errors.push({
-            instancePath: fieldPathToInstancePath(err.fieldPath),
-            schemaPath: '#',
-            keyword: 'x-gts-ref',
-            message: err.reason,
-            params: { value: err.value, refPattern: err.refPattern }
+            instancePath: issue.instancePath,
+            schemaPath: issue.schemaPath || '#',
+            keyword: issue.keyword,
+            message: issue.message,
+            params: issue.params
           })
         }
 
         // §9.6 `gts-ref-validation=any-valid` (the spec's default policy): an
-        // entity referenced through an `x-gts-ref` field must itself be valid,
+        // entity referenced through an entity-reference field must itself be valid,
         // transitively, or the referencing instance is invalid too.
-        for (const referencedId of refValidator.getReferencedIds()) {
+        const checkedIds = new Set<string>()
+        for (const { id: referencedId, sourcePath } of entity.gtsRefs ?? []) {
+          if (checkedIds.has(referencedId)) continue
+          const fieldSchema = getInstanceFieldSubschema(schema.content, sourcePath)
+          const keyword = ENTITY_REF_KEYWORDS.find(key => fieldSchema?.[key] !== undefined)
+          if (!keyword) continue
+          checkedIds.add(referencedId)
           const dependency = this.jsonObjs.get(referencedId) ?? this.jsonSchemas.get(referencedId)
           if (!dependency || dependency === entity) continue
           const dependencyValidation = await this.referencedEntityValidation(dependency, chain)
           const firstError = dependencyValidation?.errors[0]
           if (!firstError) continue
-          const sourcePath = entity.gtsRefs?.find(ref => ref.id === referencedId)?.sourcePath
           validation.errors.push({
             instancePath: sourcePath && sourcePath !== 'root'
               ? '/' + sourcePath.replace(/\./g, '/').replace(/\[(\d+)\]/g, '/$1')
               : '/',
             schemaPath: '#',
-            keyword: 'x-gts-ref',
+            keyword,
             message: `Referenced entity '${referencedId}' is invalid: ${firstError.message}`,
             params: { value: referencedId }
           })
@@ -1170,29 +1292,36 @@ export class JsonRegistry {
   }
 
   /**
+   * Compile `schema` with an Ajv instance that resolves GTS `$ref`s from the
+   * registry. Rejects exactly like `compileAsync` did when each fresh instance
+   * meta-validated schemas itself, but the meta-validation runs against the
+   * shared, compiled-once meta-schemas (see metaValidateShared). Schemas naming
+   * a `$schema` the shared instance doesn't know keep the full per-instance path.
+   */
+  private async compileSchema(schema: any): Promise<ValidateFunction> {
+    if (!metaValidateShared(schema)) return this.createAjvInstance(false).compileAsync(schema)
+    return this.createAjvInstance(true).compileAsync(withoutMetaSchemaRef(schema))
+  }
+
+  /**
    * Create an Ajv instance with custom schema resolver.
    * This resolver handles GTS ID references and supports all JSON Schema features.
+   *
+   * With `sharedMeta`, the instance doesn't meta-validate schemas itself: the
+   * caller validated the root (compileSchema) and the loader validates every
+   * schema it loads, both against the shared meta-schemas.
    */
-  private createAjvInstance(): Ajv {
+  private createAjvInstance(sharedMeta: boolean): Ajv {
     const registry = this
 
-    const ajv = new Ajv({
-      strict: false,
-      allErrors: true,
-      verbose: true,
-      // Enable full JSON Schema support
-      discriminator: true,
-      allowUnionTypes: true,
-      // Provide data alongside errors
-      $data: true,
-      // Disable code generation for CSP compliance (VS Code webviews)
-      code: { source: false },
+    return createGtsAjv({
+      validateSchema: !sharedMeta,
       // Custom schema loader for GTS ID resolution
       loadSchema: async (uri: string): Promise<any> => {
         const schemaId = decodeGtsId(uri)
 
         // Allow standard JSON Schema references
-        if (schemaId.startsWith('https://json-schema.org') || schemaId.startsWith('http://json-schema.org')) {
+        if (isStandardJsonSchemaUri(uri)) {
           return true
         }
 
@@ -1202,46 +1331,10 @@ export class JsonRegistry {
           // Show human-readable error message with decoded URI
           throw new Error(`Schema not found for $ref: ${schemaId}`)
         }
+        if (sharedMeta && metaValidateShared(schema.content)) return withoutMetaSchemaRef(schema.content)
         return schema.content
       }
     })
-
-    // Add format validation (email, uri, date-time, etc.). Default "full" mode
-    // validates real value ranges (e.g. rejects month 13, offset +25:00).
-    addFormats(ajv)
-
-    // Tighten the temporal formats to strict RFC 3339. ajv-formats' full-mode
-    // date/time splits on `/t|\s/i`, so it accepts a space instead of `T`
-    // (permitted by RFC 3339 §5.6's NOTE, but not by the ABNF grammar GTS
-    // requires). Compose the two *standard* ajv-formats validators so a value
-    // must satisfy BOTH: the "fast" grammar (strict `T` separator + mandatory
-    // time-offset) AND the "full" validator (real calendar/clock ranges).
-    for (const name of ['date', 'time', 'date-time'] as const) {
-      const fast = addFormats.get(name, 'fast')
-      const full = addFormats.get(name, 'full')
-      ajv.addFormat(name, {
-        type: 'string',
-        validate: (value: string) => matchesFormat(fast, value) && matchesFormat(full, value),
-      })
-    }
-
-    // GTS id formats emitted by schema generators (e.g. gts-rust) as annotations
-    // next to an `x-gts-ref` that does the actual checking. Registered as
-    // accept-all — exactly how Ajv treated them before (ignored as unknown) —
-    // so each compile no longer logs an "unknown format" warning.
-    // Same for the sized-integer formats Rust's schemars emits (int32/int64 are
-    // already provided by ajv-formats).
-    for (const name of ['gts-instance-id', 'gts-type-id', 'int8', 'int16', 'uint', 'uint8', 'uint16', 'uint32', 'uint64']) {
-      ajv.addFormat(name, true)
-    }
-
-    // Add custom schema loader that resolves GTS IDs from the registry
-    ajv.addKeyword({
-      keyword: 'gtsRef',
-      schemaType: 'string',
-    })
-
-    return ajv
   }
 
   /**

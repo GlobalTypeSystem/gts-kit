@@ -3,7 +3,8 @@ import {
   validateGtsID as gtsValidateID,
   matchIDPattern as gtsMatchIDPattern,
   extractID as gtsExtractID,
-  Gts
+  Gts,
+  X_GTS_REF_SELF
 } from '@globaltypesystem/gts-ts'
 import type {
   ValidationResult as GtsValidationResult,
@@ -116,17 +117,17 @@ export function isGtsPattern(value: string): boolean {
 }
 
 /**
- * Check if a GTS x-gts-ref value is valid. Accepts:
- * - Full GTS type IDs (e.g. "gts.vendor.pkg.ns.type.v1~")
+ * Check if a GTS reference keyword operand (`x-gts-type-ref`,
+ * `x-gts-instance-ref`, `x-gts-pattern-ref`) is valid. Accepts:
+ * - Full GTS IDs (e.g. "gts.vendor.pkg.ns.type.v1~")
  * - Wildcard patterns (e.g. "gts.*", "gts.vendor.pkg.*")
- * - JSON Pointer references starting with "/" (e.g. "/$id")
+ * - The reserved selected-type operand "/$id"
  *
  * Uses the official gts-ts library for GTS ID/pattern validation.
  */
 export function isValidXGtsRef(value: string): boolean {
   if (!value || typeof value !== 'string') return false
-  // JSON Pointer references are valid x-gts-ref values
-  if (value.startsWith('/')) return true
+  if (value === X_GTS_REF_SELF) return true
   // Otherwise validate as GTS ID or pattern
   return isGtsIdOrPattern(value)
 }
