@@ -50,10 +50,21 @@ export function normalizeGtsId(id: string): string {
  * Does NOT accept wildcard patterns — use {@link isGtsIdOrPattern} for that.
  */
 export function isGtsId(value: string): boolean {
-  if (!value || typeof value !== 'string') return false
+  const result = validateNormalizedGtsId(value)
+  return !!result && result.ok && !result.is_wildcard
+}
+
+/**
+ * gts-ts validation of the normalized value, or null when it can't be a GTS id
+ * at all. gts-ts reports a missing "gts." prefix by throwing (and catching) an
+ * error, which made checking every string of every scanned file - nearly all of
+ * them plain words or URLs - the dominant cost of indexing a large workspace.
+ */
+function validateNormalizedGtsId(value: string): GtsValidationResult | null {
+  if (!value || typeof value !== 'string') return null
   const normalized = normalizeGtsId(value)
-  const result = gtsValidateID(normalized)
-  return result.ok && !result.is_wildcard
+  if (!normalized.startsWith('gts.')) return null
+  return gtsValidateID(normalized)
 }
 
 /**
@@ -91,10 +102,7 @@ export function isGtsObj(value: string): boolean {
  * isGtsIdOrPattern('not-a-gts-id')                  // false
  */
 export function isGtsIdOrPattern(value: string): boolean {
-  if (!value || typeof value !== 'string') return false
-  const normalized = normalizeGtsId(value)
-  const result = gtsValidateID(normalized)
-  return result.ok
+  return validateNormalizedGtsId(value)?.ok === true
 }
 
 /**
@@ -110,10 +118,8 @@ export function isGtsIdOrPattern(value: string): boolean {
  * isGtsPattern('gts.x.core.events.type.v1~')   // false (full ID, not a pattern)
  */
 export function isGtsPattern(value: string): boolean {
-  if (!value || typeof value !== 'string') return false
-  const normalized = normalizeGtsId(value)
-  const result = gtsValidateID(normalized)
-  return result.ok && (result.is_wildcard === true)
+  const result = validateNormalizedGtsId(value)
+  return !!result && result.ok && (result.is_wildcard === true)
 }
 
 /**
@@ -514,15 +520,9 @@ export class JsonEntity {
             return
           }
           if (typeof node === 'object') {
+            // A string value is checked (once) by the recursive call itself.
             Object.entries(node).forEach(([k, v]) => {
-              const nextPath = currentPath ? `${currentPath}.${k}` : k
-              if (typeof v === 'string') {
-                const normalized = normalizeGtsId(v)
-                if (isGtsId(normalized)) {
-                  found.push({ id: normalized, sourcePath: nextPath })
-                }
-              }
-              walk(v, nextPath)
+              walk(v, currentPath ? `${currentPath}.${k}` : k)
             })
           }
         }

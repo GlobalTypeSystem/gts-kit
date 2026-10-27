@@ -4,7 +4,7 @@ import { isYamlFileName } from './parse.js'
 import { findSchemaPropertyPath, findXGtsRefPath, findTraitRequiredPath, findRegexPatternPath, getInstanceFieldSubschema } from './schemaParser.js'
 import Ajv, { type ValidateFunction, type ErrorObject } from 'ajv'
 import addFormats from 'ajv-formats'
-import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity, GTS_REF_KEYWORDS, X_GTS_TYPE_REF, X_GTS_INSTANCE_REF } from '@globaltypesystem/gts-ts'
+import { GtsModifiers, GtsStore, GtsRefValidationMode, createJsonEntity, GTS_REF_KEYWORDS, X_GTS_TYPE_REF, X_GTS_INSTANCE_REF, X_GTS_PATTERN_REF } from '@globaltypesystem/gts-ts'
 // XGtsRefValidator is not re-exported from the package index, so import it from
 // its published subpath module.
 import { XGtsRefValidator } from '@globaltypesystem/gts-ts/dist/x-gts-ref.js'
@@ -24,6 +24,82 @@ const JSON_SCHEMA_ANNOTATION_KEYWORDS = new Set([
   'contentMediaType',
   'contentSchema'
 ])
+
+/**
+ * A gts-ts GtsStore holding the registry's winning entity for each id, plus
+ * what registering them reported.
+ */
+class GtsStoreMirror {
+  readonly store = new GtsStore()
+  // Modifier-declaration errors captured while registering schemas into the
+  // gts-ts store (register() throws these per §9.11.1), keyed by schema id.
+  readonly declErrors = new Map<string, string>()
+  // Registry id -> id the entity is registered under in the store, so a
+  // removed/replaced entity can be unregistered without re-extracting its id.
+  private readonly storeIds = new Map<string, string>()
+  // Ids matching a wildcard pattern, valid until the store's entity set changes.
+  private readonly matchCache = new Map<string, string[]>()
+
+  constructor() {
+    // gts-ts resolves a wildcard reference operand by testing every registered
+    // id under the pattern's literal prefix, on every validation that reaches
+    // it; with `gts.x.*`-style operands and 100K+ entities that dominated
+    // workspace validation. The result only depends on the registered ids, and
+    // this mirror performs every mutation of the store, so it is memoized here
+    // until the next add/remove. (Private gts-ts method: if it is renamed, the
+    // store simply runs unmemoized.)
+    const store = this.store as unknown as { matchingIds?: (pattern: string) => string[] }
+    const matchingIds = store.matchingIds
+    if (typeof matchingIds !== 'function') return
+    store.matchingIds = (pattern: string) => {
+      let ids = this.matchCache.get(pattern)
+      if (!ids) {
+        ids = matchingIds.call(this.store, pattern)
+        this.matchCache.set(pattern, ids)
+      }
+      return ids
+    }
+  }
+
+  /** Register `entity`, replacing whatever was registered for its id. */
+  add(entity: JsonEntity): void {
+    this.matchCache.clear()
+    this.remove(entity.id)
+    const storeEntity = createJsonEntity(entity.content)
+    try {
+      this.store.register(storeEntity)
+      this.storeIds.set(entity.id, storeEntity.id)
+    } catch (err) {
+      // A schema register() rejects (§9.11.1 declaration error) is reported by
+      // validateEntity; an instance that can't be registered (e.g. malformed or
+      // UUID-less id) is reported through the normal instance-validation path.
+      if (entity instanceof JsonSchema) {
+        this.declErrors.set(entity.id, err instanceof Error ? err.message : String(err))
+      }
+    }
+  }
+
+  /** Unregister whatever is registered for registry id `id`. */
+  remove(id: string): void {
+    this.declErrors.delete(id)
+    const storeId = this.storeIds.get(id)
+    if (storeId === undefined) return
+    this.storeIds.delete(id)
+    this.matchCache.clear()
+    this.store.unregister(storeId)
+  }
+}
+
+/** True when two file contents (parsed values, or raw text for unparsable files) are identical. */
+function sameFileContent(a: any, b: any): boolean {
+  if (a === b) return true
+  if (typeof a === 'string' || typeof b === 'string') return false
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
 
 /** The reference keywords whose values name concrete entities (§9.6.1). */
 const ENTITY_REF_KEYWORDS = [X_GTS_TYPE_REF, X_GTS_INSTANCE_REF]
@@ -287,14 +363,11 @@ export class JsonRegistry {
   // Default file to open/select when displaying layout
   private defaultFilePath: string | null
 
-  // Lazily-built gts-ts store mirroring the registry's schemas, used to
-  // delegate GTS-specific schema validation (derivation §9.12, traits OP#13,
-  // modifier declaration/placement §9.11) that plain Ajv cannot express. It is
-  // invalidated whenever schemas change and rebuilt on next demand.
-  private gtsStore: GtsStore | null = null
-  // Modifier-declaration errors captured while registering schemas into the
-  // gts-ts store (register() throws these per §9.11.1), keyed by schema id.
-  private gtsStoreDeclErrors: Map<string, string> = new Map()
+  // Lazily-built gts-ts store mirroring the registry's schemas and instances,
+  // used to delegate GTS-specific schema validation (derivation §9.12, traits
+  // OP#13, modifier declaration/placement §9.11) that plain Ajv cannot
+  // express. Once built it is kept in sync as entities are indexed/removed.
+  private gtsMirror: GtsStoreMirror | null = null
 
   // Cached reverse-dependency graph used by getDependentFilePaths(). Rebuilt
   // lazily and invalidated whenever the entity set changes (any indexFile /
@@ -347,8 +420,7 @@ export class JsonRegistry {
 
   /** Drop the cached gts-ts store so it is rebuilt from current schemas on next use. */
   private invalidateGtsStore(): void {
-    this.gtsStore = null
-    this.gtsStoreDeclErrors.clear()
+    this.gtsMirror = null
   }
 
   /**
@@ -361,58 +433,93 @@ export class JsonRegistry {
    * rather than aborting the whole build; instances that fail to register are
    * skipped (they surface through the normal instance-validation path).
    */
+  private getGtsMirror(): GtsStoreMirror {
+    if (!this.gtsMirror) {
+      const mirror = new GtsStoreMirror()
+      for (const schema of this.jsonSchemas.values()) mirror.add(schema)
+      for (const obj of this.jsonObjs.values()) mirror.add(obj)
+      this.gtsMirror = mirror
+    }
+    return this.gtsMirror
+  }
+
   private getGtsStore(): GtsStore {
-    if (this.gtsStore) return this.gtsStore
-    const store = new GtsStore()
-    this.gtsStoreDeclErrors.clear()
-    for (const schema of this.jsonSchemas.values()) {
-      try {
-        store.register(createJsonEntity(schema.content))
-      } catch (err) {
-        this.gtsStoreDeclErrors.set(schema.id, err instanceof Error ? err.message : String(err))
+    return this.getGtsMirror().store
+  }
+
+  /**
+   * Build the gts-ts store ahead of validation, calling `tick` between
+   * entities so the caller can yield: built on demand, it blocks for seconds
+   * on a workspace with 100K+ entities. The store is only adopted when the
+   * registry didn't change while it was being built.
+   */
+  async prepareGtsStore(tick: () => Promise<void>): Promise<void> {
+    for (let attempt = 0; attempt < 2 && !this.gtsMirror; attempt++) {
+      const generation = this.contentGeneration
+      const mirror = new GtsStoreMirror()
+      for (const entities of [Array.from(this.jsonSchemas.values()), Array.from(this.jsonObjs.values())]) {
+        for (const entity of entities) {
+          mirror.add(entity)
+          await tick()
+        }
       }
+      if (!this.gtsMirror && this.contentGeneration === generation) this.gtsMirror = mirror
     }
-    for (const obj of this.jsonObjs.values()) {
-      try {
-        store.register(createJsonEntity(obj.content))
-      } catch {
-        // Instance couldn't be registered (e.g. malformed/UUID-less id); it is
-        // reported through validateEntity's normal path, not via the store.
-      }
-    }
-    this.gtsStore = store
-    return store
+  }
+
+  /**
+   * Mirror a newly winning entity (the one `jsonSchemas`/`jsonObjs` now hold
+   * for its id) into the gts-ts store, if it has been built. Updating it in
+   * place instead of dropping it matters on large workspaces: rebuilding it
+   * re-registers every entity, which took seconds and ran on every edit.
+   */
+  private addToGtsStore(entity: JsonEntity): void {
+    this.gtsMirror?.add(entity)
+  }
+
+  /** Drop the entity registered for registry id `id` from the gts-ts store, if any. */
+  private removeFromGtsStore(id: string): void {
+    this.gtsMirror?.remove(id)
+  }
+
+  /** Record that the indexed content changed: derived caches and memoized results are stale. */
+  private markContentChanged(): void {
+    this.depGraph = null
+    this.contentGeneration++
   }
 
   /**
    * Invalidate a file and remove its JsonFile and associated records from the registry.
+   * Returns false (and leaves every cache intact) when nothing was indexed for it.
    */
-  invalidateFile(path: string): void {
-    // Any schema set change invalidates the derived gts-ts store and the
-    // reverse-dependency graph (both are rebuilt lazily on next use).
-    this.invalidateGtsStore()
-    this.depGraph = null
-    this.contentGeneration++
-    if (this.jsonFiles.has(path)) {
-      this.jsonFiles.delete(path)
-    }
-    if (this.invalidFiles.has(path)) {
-      this.invalidFiles.delete(path)
-    }
-    if (this.jsonFileObjs.has(path)) {
-      for (const obj of this.jsonFileObjs.get(path)!) {
+  invalidateFile(path: string): boolean {
+    const objs = this.jsonFileObjs.get(path)
+    const schemas = this.jsonFileSchemas.get(path)
+    const hadRecords = this.jsonFiles.has(path) || this.invalidFiles.has(path) || !!objs?.length || !!schemas?.length
+    if (!hadRecords) return false
+    // Any entity set change invalidates the reverse-dependency graph (rebuilt
+    // lazily) and every memoized validation result; the gts-ts store is
+    // updated in place.
+    this.markContentChanged()
+    this.jsonFiles.delete(path)
+    this.invalidFiles.delete(path)
+    if (objs) {
+      for (const obj of objs) {
         this.jsonObjs.delete(obj.id)
+        this.removeFromGtsStore(obj.id)
       }
       this.jsonFileObjs.delete(path)
       this.jsonFileObjs.set(path, [])
     }
-    if (this.jsonFileSchemas.has(path)) {
-      for (const schema of this.jsonFileSchemas.get(path)!) {
+    if (schemas) {
+      for (const schema of schemas) {
         this.jsonSchemas.delete(schema.id)
+        this.removeFromGtsStore(schema.id)
       }
       this.jsonFileSchemas.delete(path)
       this.jsonFileSchemas.set(path, [])
     }
+    return true
   }
 
   /**
@@ -673,9 +780,15 @@ export class JsonRegistry {
    * Process a file and store its entities if they are GTS entities.
    * This is a helper used by both scanFile and ingestFiles.
    */
-  private processFileContent(path: string, name: string, content: any, cfg: GtsConfig): void {
+  private processFileContent(path: string, name: string, content: any, cfg: GtsConfig): boolean {
+    // Re-indexing identical content (opening a file, saving without changes,
+    // revalidating open documents) must not count as a change: a change throws
+    // away every memoized validation result and compiled validator.
+    const previous = this.jsonFiles.get(path) ?? this.invalidFiles.get(path)
+    if (previous && previous.name === name && sameFileContent(previous.content, content)) return false
+
     // Cleanup any existing records for this file
-    this.invalidateFile(path)
+    let changed = this.invalidateFile(path)
 
     // Create JsonFile
     const jsonFile = new JsonFile(path, name, content)
@@ -686,7 +799,8 @@ export class JsonRegistry {
     if (jsonFile.validation && jsonFile.validation.errors.length > 0) {
       // Store JsonFile if it's invalid to show it in the UI
       this.invalidFiles.set(path, jsonFile)
-      return
+      this.markContentChanged()
+      return true
     }
 
     // Use the file's parsed content: JsonFile parses raw string input (JSON/JSONC
@@ -700,6 +814,10 @@ export class JsonRegistry {
       const hasSelectedId = entity?.selectedEntityIdField !== undefined || entity?.selectedSchemaIdField !== undefined
       if (entity && (!requireSelectedId || hasSelectedId) && entity.isGtsEntity()) {
         hasGtsEntities = true
+        if (!changed) {
+          this.markContentChanged()
+          changed = true
+        }
         if (entity instanceof JsonSchema) {
           this.jsonSchemas.set(entity.id, entity)
           this.jsonFileSchemas.set(path, [...this.jsonFileSchemas.get(path) || [], entity])
@@ -707,6 +825,7 @@ export class JsonRegistry {
           this.jsonObjs.set(entity.id, entity as JsonObj)
           this.jsonFileObjs.set(path, [...this.jsonFileObjs.get(path) || [], entity as JsonObj])
         }
+        this.addToGtsStore(entity)
       }
     }
 
@@ -733,6 +852,7 @@ export class JsonRegistry {
     if (hasGtsEntities && !this.jsonFiles.has(path)) {
       this.jsonFiles.set(path, jsonFile)
     }
+    return changed
   }
 
   /**
@@ -741,16 +861,18 @@ export class JsonRegistry {
    * This is the incremental counterpart to ingestFiles: it upserts one file's
    * entities without re-processing the whole workspace and without running Ajv.
    * Use it to keep a long-lived registry in sync with editor/file changes.
+   * Returns whether the indexed state changed (false for identical content).
    */
-  indexFile(path: string, name: string, content: any, cfg: GtsConfig): void {
+  indexFile(path: string, name: string, content: any, cfg: GtsConfig): boolean {
     // Skip files in the .gts-viewer directory (cross-platform, browser-safe)
     if (/(^|[\\\/])\.gts-viewer[\\\/]/.test(path)) {
-      return
+      return false
     }
     try {
-      this.processFileContent(path, name, content, getGtsConfig(cfg))
+      return this.processFileContent(path, name, content, getGtsConfig(cfg))
     } catch (error) {
       console.error(`Failed to index file ${path}:`, error)
+      return true
     }
   }
 
@@ -890,6 +1012,16 @@ export class JsonRegistry {
           continue
         }
 
+        // In a schema, an `x-gts-pattern-ref` operand only constrains what
+        // values look like (§9.6: it names no entity, and gts-ts never looks it
+        // up), and `x-gts-traits` values are trait data, checked against the
+        // trait schema by gts-ts. Neither has to exist. (`x-gts-type-ref` /
+        // `x-gts-instance-ref` operands are checked by gts-ts as well.)
+        const segments = ref.sourcePath.replace(/\[\d+\]/g, '').split('.')
+        if (entity instanceof JsonSchema && (segments[segments.length - 1] === X_GTS_PATTERN_REF || segments.includes('x-gts-traits'))) {
+          continue
+        }
+
         // Schema-aware skip: when the instance's schema types this field as a
         // scalar data value (a `format`/scalar `type`/`enum`/`const`, and NOT a
         // reference via a reference keyword/`$ref`), its GTS-id-shaped value is data,
@@ -965,8 +1097,8 @@ export class JsonRegistry {
       //   - §9.11 misplaced document-level keywords + final-base-in-chain guard
       //   - §9.12 (OP#12) derivation constraint compatibility with the parent
       //   - §9.7  (OP#13) trait schema/value validation across the chain
-      const store = this.getGtsStore()
-      const declError = this.gtsStoreDeclErrors.get(entity.id)
+      const { store, declErrors } = this.getGtsMirror()
+      const declError = declErrors.get(entity.id)
       if (declError) {
         // register() rejected this schema outright (§9.11.1); surface it and
         // skip chain validation (the schema isn't in the store).
